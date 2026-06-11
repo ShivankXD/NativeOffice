@@ -39,6 +39,9 @@ public:
     // Mark one slide as the active (highlighted) one
     void setActiveSlide(int slideIndex);
 
+    // Remove all thumbnails (used when loading a new file)
+    void clear();
+
     [[nodiscard]] int  slideCount() const noexcept;
 
 signals:

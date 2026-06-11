@@ -1,23 +1,22 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// main.cpp — NativeOffice entry point  (Sprint 6)
+// main.cpp — NativeOffice entry point  (Sprint 8)
 //
-// Sprint 6 additions:
-//   • Writer  → File → Export to PDF…  (QPdfWriter + QTextDocument::print)
-//   • Impress → File → Export to PDF…  (QPdfWriter + QGraphicsScene::render)
-//   • Qt6::PrintSupport linked across all affected targets
+// Sprint 8 additions:
+//   • CalcWindow     — QMainWindow subclass with Save/SaveAs/Open/dirty/close
+//   • ImpressWindow  — QMainWindow subclass with Save/SaveAs/Open/dirty/close
+//   • createCalcWindow(filePath)    — full menu bar, file loading
+//   • createImpressWindow(filePath) — upgraded with file persistence
+//   • openDocumentByPath uses new helpers for all three module types
 //
-// Sprint 3 changes (legacy):
-//   • .noff file format for Save / Save As / Open
-//   • Proper "Save" behaviour: silent overwrite if path known, else Save As
-//   • Dirty flag (*) cleared on successful save
-//   • File open triggers RecentFilesManager::addFile() → Start Screen refreshes
-//   • File open from the Start Screen’s RecentFilesWidget works end-to-end
-//   • QSettings organization/app name set before first QSettings use
+// Sprint 7: Smart content-based file routing via FileRouter
+// Sprint 6: Writer/Impress PDF export
+// Sprint 3: .noff file format, WriterWindow, RecentFilesManager
 // ─────────────────────────────────────────────────────────────────────────────
 #include "startscreen/StartScreen.h"
 #include "core/theme/ThemeManager.h"
 #include "core/application/AppController.h"
 #include "core/application/RecentFilesManager.h"
+#include "core/application/FileRouter.h"
 
 #include "WriterModule.h"
 #include "CalcModule.h"
@@ -47,8 +46,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
 static const QString NOFF_FILTER =
     "NativeOffice Document (*.noff);;HTML Document (*.html);;All Files (*)";
+static const QString CALC_FILTER =
+    "NativeOffice Spreadsheet (*.noff);;CSV File (*.csv);;All Files (*)";
+static const QString IMPRESS_FILTER =
+    "NativeOffice Presentation (*.noff);;All Files (*)";
 static const QString PDF_FILTER =
     "PDF Document (*.pdf)";
+
+// Forward declarations for free-function helpers
+static class WriterWindow* createWriterWindow(const QString& filePath = {});
+static class CalcWindow*   createCalcWindow(const QString& filePath = {});
+static class ImpressWindow* createImpressWindow(const QString& filePath = {});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WriterWindow — QMainWindow subclass with close-confirmation logic
@@ -107,7 +115,7 @@ protected:
         if (m_writer && m_writer->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
-                QString(""%1" has unsaved changes.\nDo you want to save before closing?")
+                QString("\"%1\" has unsaved changes.\nDo you want to save before closing?")
                     .arg(m_writer->currentFilePath().isEmpty()
                              ? "Untitled Document"
                              : QFileInfo(m_writer->currentFilePath()).fileName()),
@@ -140,6 +148,182 @@ private:
     }
 
     NativeOffice::WriterModule* m_writer { nullptr };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CalcWindow — QMainWindow subclass with close-confirmation logic (Sprint 8)
+// ─────────────────────────────────────────────────────────────────────────────
+class CalcWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    explicit CalcWindow(QWidget* parent = nullptr)
+        : QMainWindow(parent)
+    {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setMinimumSize(960, 640);
+        resize(1200, 800);
+    }
+
+    void setCalc(NativeOffice::CalcModule* c) {
+        m_calc = c;
+        setCentralWidget(c);
+        updateTitle();
+
+        connect(c, &NativeOffice::CalcModule::documentModified,
+                this, &CalcWindow::updateTitle);
+        connect(c, &NativeOffice::CalcModule::filePathChanged,
+                this, [this](const QString&) { updateTitle(); });
+    }
+
+    NativeOffice::CalcModule* calc() const { return m_calc; }
+
+    bool saveAs() {
+        const QString path = QFileDialog::getSaveFileName(
+            this, "Save As…",
+            m_calc->currentFilePath().isEmpty()
+                ? QDir::homePath() + "/Untitled.noff"
+                : m_calc->currentFilePath(),
+            CALC_FILTER);
+
+        if (path.isEmpty()) return false;
+        return performSave(path);
+    }
+
+    bool save() {
+        if (m_calc->currentFilePath().isEmpty()) return saveAs();
+        return performSave(m_calc->currentFilePath());
+    }
+
+public slots:
+    void updateTitle() {
+        setWindowTitle(m_calc ? m_calc->titleString() : "NativeOffice Calc");
+    }
+
+protected:
+    void closeEvent(QCloseEvent* e) override {
+        if (m_calc && m_calc->isDirty()) {
+            const auto btn = QMessageBox::question(
+                this, "Unsaved Changes",
+                QString("\"%1\" has unsaved changes.\nDo you want to save before closing?")
+                    .arg(m_calc->currentFilePath().isEmpty()
+                             ? "Untitled Spreadsheet"
+                             : QFileInfo(m_calc->currentFilePath()).fileName()),
+                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                QMessageBox::Save);
+
+            if (btn == QMessageBox::Cancel) {
+                e->ignore();
+                return;
+            }
+            if (btn == QMessageBox::Save && !save()) {
+                e->ignore();
+                return;
+            }
+        }
+        e->accept();
+    }
+
+private:
+    bool performSave(const QString& path) {
+        if (!m_calc->saveToPath(path)) {
+            QMessageBox::critical(this, "Save Failed",
+                "Could not write to:\n" + path);
+            return false;
+        }
+        NativeOffice::RecentFilesManager::instance().addFile(path, "Calc");
+        updateTitle();
+        return true;
+    }
+
+    NativeOffice::CalcModule* m_calc { nullptr };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ImpressWindow — QMainWindow subclass with close-confirmation logic (Sprint 8)
+// ─────────────────────────────────────────────────────────────────────────────
+class ImpressWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    explicit ImpressWindow(QWidget* parent = nullptr)
+        : QMainWindow(parent)
+    {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setMinimumSize(1100, 680);
+        resize(1280, 800);
+    }
+
+    void setImpress(NativeOffice::ImpressModule* im) {
+        m_impress = im;
+        setCentralWidget(im);
+        updateTitle();
+
+        connect(im, &NativeOffice::ImpressModule::documentModified,
+                this, &ImpressWindow::updateTitle);
+        connect(im, &NativeOffice::ImpressModule::filePathChanged,
+                this, [this](const QString&) { updateTitle(); });
+    }
+
+    NativeOffice::ImpressModule* impress() const { return m_impress; }
+
+    bool saveAs() {
+        const QString path = QFileDialog::getSaveFileName(
+            this, "Save As…",
+            m_impress->currentFilePath().isEmpty()
+                ? QDir::homePath() + "/Untitled.noff"
+                : m_impress->currentFilePath(),
+            IMPRESS_FILTER);
+
+        if (path.isEmpty()) return false;
+        return performSave(path);
+    }
+
+    bool save() {
+        if (m_impress->currentFilePath().isEmpty()) return saveAs();
+        return performSave(m_impress->currentFilePath());
+    }
+
+public slots:
+    void updateTitle() {
+        setWindowTitle(m_impress ? m_impress->titleString() : "NativeOffice Impress");
+    }
+
+protected:
+    void closeEvent(QCloseEvent* e) override {
+        if (m_impress && m_impress->isDirty()) {
+            const auto btn = QMessageBox::question(
+                this, "Unsaved Changes",
+                QString("\"%1\" has unsaved changes.\nDo you want to save before closing?")
+                    .arg(m_impress->currentFilePath().isEmpty()
+                             ? "Untitled Presentation"
+                             : QFileInfo(m_impress->currentFilePath()).fileName()),
+                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                QMessageBox::Save);
+
+            if (btn == QMessageBox::Cancel) {
+                e->ignore();
+                return;
+            }
+            if (btn == QMessageBox::Save && !save()) {
+                e->ignore();
+                return;
+            }
+        }
+        e->accept();
+    }
+
+private:
+    bool performSave(const QString& path) {
+        if (!m_impress->saveToPath(path)) {
+            QMessageBox::critical(this, "Save Failed",
+                "Could not write to:\n" + path);
+            return false;
+        }
+        NativeOffice::RecentFilesManager::instance().addFile(path, "Impress");
+        updateTitle();
+        return true;
+    }
+
+    NativeOffice::ImpressModule* m_impress { nullptr };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,7 +367,7 @@ static void writerExportToPdf(NativeOffice::WriterModule* writer, QWidget* paren
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build the Writer editor window with full menu bar
 // ─────────────────────────────────────────────────────────────────────────────
-static WriterWindow* createWriterWindow(const QString& filePath = {}) {
+static WriterWindow* createWriterWindow(const QString& filePath) {
     auto* win    = new WriterWindow;
     auto* writer = new NativeOffice::WriterModule;
     win->setWriter(writer);
@@ -275,22 +459,89 @@ static WriterWindow* createWriterWindow(const QString& filePath = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: build the Impress presentation window with menu bar  (Sprint 6)
+// Helper: build the Calc spreadsheet window with full menu bar  (Sprint 8)
 // ─────────────────────────────────────────────────────────────────────────────
-static QMainWindow* createImpressWindow(const QString& title = {}) {
-    auto* win     = new QMainWindow;
-    auto* impress = new NativeOffice::ImpressModule(win);
-    win->setAttribute(Qt::WA_DeleteOnClose);
-    win->setCentralWidget(impress);
-    win->setWindowTitle(title.isEmpty()
-                        ? "New Presentation — NativeOffice Impress"
-                        : title + " — NativeOffice Impress");
-    win->setMinimumSize(1100, 680);
-    win->resize(1280, 800);
+static CalcWindow* createCalcWindow(const QString& filePath) {
+    auto* win  = new CalcWindow;
+    auto* calc = new NativeOffice::CalcModule;
+    win->setCalc(calc);
 
     // Centre on screen
     const QScreen* screen = QApplication::primaryScreen();
     win->move(screen->availableGeometry().center() - win->rect().center());
+
+    // ── Load file if provided ─────────────────────────────────────────────
+    if (!filePath.isEmpty()) {
+        if (!calc->loadFromPath(filePath)) {
+            QMessageBox::critical(win, "Open Failed",
+                "Could not read:\n" + filePath);
+        } else {
+            NativeOffice::RecentFilesManager::instance().addFile(filePath, "Calc");
+        }
+    }
+
+    // ── Menu bar ──────────────────────────────────────────────────────────
+    auto* mb       = win->menuBar();
+    auto* fileMenu = mb->addMenu("&File");
+
+    auto* actNew = fileMenu->addAction("&New Spreadsheet");
+    actNew->setShortcut(QKeySequence::New);
+    auto* actOpen = fileMenu->addAction("&Open…");
+    actOpen->setShortcut(QKeySequence::Open);
+    fileMenu->addSeparator();
+    auto* actSave   = fileMenu->addAction("&Save");
+    actSave->setShortcut(QKeySequence::Save);
+    auto* actSaveAs = fileMenu->addAction("Save &As…");
+    actSaveAs->setShortcut(QKeySequence::SaveAs);
+    fileMenu->addSeparator();
+    auto* actClose = fileMenu->addAction("&Close");
+    actClose->setShortcut(QKeySequence::Close);
+
+    mb->addMenu("&Edit");
+    mb->addMenu("&View");
+    mb->addMenu("&Help");
+
+    // ── Wire actions ──────────────────────────────────────────────────────
+    QObject::connect(actNew, &QAction::triggered, win, []() {
+        createCalcWindow()->show();
+    });
+    QObject::connect(actOpen, &QAction::triggered, win, [win]() {
+        const QString path = QFileDialog::getOpenFileName(
+            win, "Open Spreadsheet",
+            QDir::homePath(),
+            CALC_FILTER);
+        if (!path.isEmpty()) {
+            createCalcWindow(path)->show();
+        }
+    });
+    QObject::connect(actSave,   &QAction::triggered, win, [win]() { win->save();   });
+    QObject::connect(actSaveAs, &QAction::triggered, win, [win]() { win->saveAs(); });
+    QObject::connect(actClose,  &QAction::triggered, win, &QMainWindow::close);
+
+    return win;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: build the Impress presentation window with full menu bar  (Sprint 8)
+// ─────────────────────────────────────────────────────────────────────────────
+static ImpressWindow* createImpressWindow(const QString& filePath) {
+    auto* win     = new ImpressWindow;
+    auto* impress = new NativeOffice::ImpressModule(win);
+    win->setImpress(impress);
+
+    // Centre on screen
+    const QScreen* screen = QApplication::primaryScreen();
+    win->move(screen->availableGeometry().center() - win->rect().center());
+
+    // ── Load file if provided ─────────────────────────────────────────────
+    if (!filePath.isEmpty()) {
+        if (!impress->loadFromPath(filePath)) {
+            QMessageBox::critical(win, "Open Failed",
+                "Could not read:\n" + filePath);
+        } else {
+            NativeOffice::RecentFilesManager::instance().addFile(filePath, "Impress");
+        }
+    }
 
     // ── Menu bar ──────────────────────────────────────────────────────────
     auto* mb       = win->menuBar();
@@ -298,14 +549,19 @@ static QMainWindow* createImpressWindow(const QString& title = {}) {
 
     auto* actNew = fileMenu->addAction("&New Presentation");
     actNew->setShortcut(QKeySequence::New);
+    auto* actOpen = fileMenu->addAction("&Open…");
+    actOpen->setShortcut(QKeySequence::Open);
     fileMenu->addSeparator();
-
+    auto* actSave   = fileMenu->addAction("&Save");
+    actSave->setShortcut(QKeySequence::Save);
+    auto* actSaveAs = fileMenu->addAction("Save &As…");
+    actSaveAs->setShortcut(QKeySequence::SaveAs);
+    fileMenu->addSeparator();
     // Sprint 6: Export to PDF
     auto* actExportPdf = fileMenu->addAction("★ Export to PDF…");
     actExportPdf->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     actExportPdf->setToolTip("Export all slides to a PDF file");
     fileMenu->addSeparator();
-
     auto* actClose = fileMenu->addAction("&Close");
     actClose->setShortcut(QKeySequence::Close);
 
@@ -316,6 +572,17 @@ static QMainWindow* createImpressWindow(const QString& title = {}) {
     QObject::connect(actNew, &QAction::triggered, win, []() {
         createImpressWindow()->show();
     });
+    QObject::connect(actOpen, &QAction::triggered, win, [win]() {
+        const QString path = QFileDialog::getOpenFileName(
+            win, "Open Presentation",
+            QDir::homePath(),
+            IMPRESS_FILTER);
+        if (!path.isEmpty()) {
+            createImpressWindow(path)->show();
+        }
+    });
+    QObject::connect(actSave,      &QAction::triggered, win, [win]() { win->save();   });
+    QObject::connect(actSaveAs,    &QAction::triggered, win, [win]() { win->saveAs(); });
     QObject::connect(actExportPdf, &QAction::triggered, win, [impress]() {
         impress->exportToPdf();
     });
@@ -325,24 +592,29 @@ static QMainWindow* createImpressWindow(const QString& title = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: open any document type based on file extension
+// Helper: open any document via smart content-based routing  (Sprint 7)
+//
+// Uses FileRouter::detectFileType() to read the file content first and
+// dispatch to the correct module (Writer, Calc, Impress) regardless of
+// file extension.
 // ─────────────────────────────────────────────────────────────────────────────
 static void openDocumentByPath(const QString& path) {
-    using NativeOffice::DocumentType;
+    using NativeOffice::DetectedFileType;
 
-    const QString ext = QFileInfo(path).suffix().toLower();
-    if (ext == "xlsx" || ext == "csv" || ext == "ods") {
-        auto* win = new QMainWindow;
-        win->setAttribute(Qt::WA_DeleteOnClose);
-        win->setWindowTitle(QFileInfo(path).fileName() + " — NativeOffice Calc");
-        win->setCentralWidget(new NativeOffice::CalcModule(win));
-        win->resize(1200, 800);
-        win->show();
-    } else if (ext == "pptx" || ext == "odp") {
-        createImpressWindow(QFileInfo(path).fileName())->show();
-    } else {
-        // Default: Writer (.noff, .html, or any unknown extension)
+    const auto fileType = NativeOffice::FileRouter::detectFileType(path);
+
+    switch (fileType) {
+    case DetectedFileType::SpreadsheetData:
+        createCalcWindow(path)->show();
+        break;
+    case DetectedFileType::PresentationData:
+        createImpressWindow(path)->show();
+        break;
+    case DetectedFileType::WriterDocument:
+    default:
+        // createWriterWindow already calls addFile(path, "Writer") on success
         createWriterWindow(path)->show();
+        break;
     }
 }
 
@@ -358,7 +630,7 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("0.3.0");
+    app.setApplicationVersion("0.4.0");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
@@ -398,15 +670,9 @@ int main(int argc, char* argv[]) {
         case DocumentType::Writer:
             createWriterWindow()->show();
             break;
-        case DocumentType::Calc: {
-            auto* win = new QMainWindow;
-            win->setAttribute(Qt::WA_DeleteOnClose);
-            win->setWindowTitle("New Spreadsheet — NativeOffice Calc");
-            win->setCentralWidget(new NativeOffice::CalcModule(win));
-            win->resize(1200, 800);
-            win->show();
+        case DocumentType::Calc:
+            createCalcWindow()->show();
             break;
-        }
         case DocumentType::Impress:
             createImpressWindow()->show();
             break;

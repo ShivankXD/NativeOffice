@@ -5,6 +5,8 @@ add_library(NativeOfficeCore STATIC
     application/AppController.h
     application/RecentFilesManager.cpp
     application/RecentFilesManager.h
+    application/FileRouter.cpp
+    application/FileRouter.h
 )
 
 target_include_directories(NativeOfficeCore PUBLIC

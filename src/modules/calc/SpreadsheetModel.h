@@ -50,6 +50,9 @@ public:
     // Clear all cells.
     void clearAll();
 
+    // Read-only access to the raw data map (for serialization)
+    [[nodiscard]] const std::unordered_map<int, QString>& rawData() const { return m_data; }
+
 private:
     // Flat key from (col, row) for the hash map
     static int cellKey(int col, int row) { return row * NUM_COLS + col; }

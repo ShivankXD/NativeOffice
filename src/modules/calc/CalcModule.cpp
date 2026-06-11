@@ -1,6 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// CalcModule.cpp  (Sprint 4)
+// CalcModule.cpp  (Sprint 8)
 // Full spreadsheet UI: formula bar + themed QTableView + SpreadsheetModel.
+// Sprint 8: JSON-based file persistence (.noff) with CSV fallback.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "CalcModule.h"
 #include "SpreadsheetModel.h"
@@ -20,6 +21,14 @@
 #include <QFont>
 #include <QSizePolicy>
 #include <QFrame>
+// Sprint 8: file persistence
+#include <QFile>
+#include <QFileInfo>
+#include <QTextStream>
+#include <QIODevice>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 namespace NativeOffice {
 
@@ -130,6 +139,10 @@ void CalcModule::buildUi() {
     connect(m_formulaBar, &QLineEdit::textEdited,
             this, &CalcModule::onFormulaBarTextEdited);
 
+    // ── Dirty-state tracking (Sprint 8) ─────────────────────────────────
+    connect(m_model, &SpreadsheetModel::dataChanged,
+            this, &CalcModule::onModelDataChanged);
+
     // Select A1 by default
     const QModelIndex first = m_model->index(0, 0);
     m_tableView->setCurrentIndex(first);
@@ -178,6 +191,14 @@ void CalcModule::onFormulaBarTextEdited(const QString& /*text*/) {
     // Live-preview while the user types: update the cell immediately
     // but don't move focus — only commit on Enter.
     // (Currently we commit on Enter in returnPressed.)
+}
+
+void CalcModule::onModelDataChanged() {
+    if (m_ignoreChange) return;
+    if (!m_dirty) {
+        m_dirty = true;
+        emit documentModified();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -299,6 +320,115 @@ QTableView#calcGrid QAbstractButton:hover {
     .arg("#EFF6FF")                               // %5 focused cell bg
     .arg(ThemeManager::cssColor(t.sidebarHover))  // %6 corner hover
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File I/O  (Sprint 8)
+// ─────────────────────────────────────────────────────────────────────────────
+QString CalcModule::titleString() const {
+    const QString base = m_currentPath.isEmpty()
+                             ? "Untitled Spreadsheet"
+                             : QFileInfo(m_currentPath).fileName();
+    return (m_dirty ? "* " : "") + base + " — NativeOffice Calc";
+}
+
+void CalcModule::markClean() {
+    m_dirty = false;
+}
+
+bool CalcModule::saveToPath(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+        return false;
+
+    // Build JSON from the sparse cell data
+    QJsonArray cellsArray;
+    const auto& data = m_model->rawData();
+    for (auto it = data.begin(); it != data.end(); ++it) {
+        const int key = it->first;
+        const int col = key % SpreadsheetModel::NUM_COLS;
+        const int row = key / SpreadsheetModel::NUM_COLS;
+
+        QJsonObject cell;
+        cell["col"]   = col;
+        cell["row"]   = row;
+        cell["value"] = it->second;
+        cellsArray.append(cell);
+    }
+
+    QJsonObject root;
+    root["type"]    = "calc";
+    root["version"] = 1;
+    root["cells"]   = cellsArray;
+
+    QTextStream out(&f);
+    out.setEncoding(QStringConverter::Utf8);
+    out << "<!-- NativeOffice Calc Spreadsheet (.noff) -->\n";
+    out << QJsonDocument(root).toJson(QJsonDocument::Indented);
+    f.close();
+
+    m_currentPath = path;
+    m_dirty       = false;
+    emit filePathChanged(path);
+    return true;
+}
+
+bool CalcModule::loadFromPath(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+
+    QTextStream in(&f);
+    in.setEncoding(QStringConverter::Utf8);
+    QString content = in.readAll();
+    f.close();
+
+    // Strip the .noff header comment if present
+    content.remove("<!-- NativeOffice Calc Spreadsheet (.noff) -->\n");
+
+    m_ignoreChange = true;
+    m_model->clearAll();
+
+    // Try JSON parse first
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(content.toUtf8(), &err);
+
+    if (!doc.isNull() && doc.isObject()) {
+        // ── JSON format ──────────────────────────────────────────────────
+        const QJsonObject root  = doc.object();
+        const QJsonArray  cells = root["cells"].toArray();
+
+        for (const auto& cellVal : cells) {
+            const QJsonObject cell = cellVal.toObject();
+            const int col   = cell["col"].toInt();
+            const int row   = cell["row"].toInt();
+            const QString v = cell["value"].toString();
+
+            if (col >= 0 && col < SpreadsheetModel::NUM_COLS
+                && row >= 0 && row < SpreadsheetModel::NUM_ROWS
+                && !v.isEmpty()) {
+                m_model->setData(m_model->index(row, col), v, Qt::EditRole);
+            }
+        }
+    } else {
+        // ── CSV fallback ─────────────────────────────────────────────────
+        const QStringList lines = content.split('\n', Qt::SkipEmptyParts);
+        for (int row = 0; row < lines.size() && row < SpreadsheetModel::NUM_ROWS; ++row) {
+            const QStringList cols = lines[row].split(',');
+            for (int col = 0; col < cols.size() && col < SpreadsheetModel::NUM_COLS; ++col) {
+                const QString v = cols[col].trimmed();
+                if (!v.isEmpty())
+                    m_model->setData(m_model->index(row, col), v, Qt::EditRole);
+            }
+        }
+    }
+
+    m_ignoreChange = false;
+
+    m_currentPath = path;
+    m_dirty       = false;
+    emit filePathChanged(path);
+    return true;
 }
 
 } // namespace NativeOffice

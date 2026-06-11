@@ -1,7 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// ImpressModule.cpp  (Sprint 6)
+// ImpressModule.cpp  (Sprint 8)
 // Full NativeOffice Presentation Tool: three-pane layout with slide management,
-// QGraphicsView canvas, toolbar-driven shape insertion, and PDF export.
+// QGraphicsView canvas, toolbar-driven shape insertion, PDF export, and file I/O.
+// Sprint 8: JSON-based file persistence (.noff) for slides + shapes.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "ImpressModule.h"
 #include "ImpressToolbar.h"
@@ -22,6 +23,14 @@
 #include <QDir>
 #include <QPageSize>
 #include <algorithm>
+// Sprint 8: file persistence
+#include <QFile>
+#include <QFileInfo>
+#include <QTextStream>
+#include <QIODevice>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 namespace NativeOffice {
 
@@ -121,6 +130,11 @@ void ImpressModule::createSlide(const SlideData& data) {
     // When scene changes → refresh its thumbnail
     connect(scene, &SlideScene::sceneModified, this, [this, idx]() {
         m_slidePanel->refreshSlide(idx);
+        // Sprint 8: dirty tracking
+        if (!m_ignoreChange && !m_dirty) {
+            m_dirty = true;
+            emit documentModified();
+        }
     });
 
     // When insert mode completes → reset toolbar button
@@ -325,6 +339,177 @@ void ImpressModule::exportToPdf() {
         QString("Presentation exported to PDF successfully!\n\n%1 slide(s) → %2")
             .arg(m_scenes.size())
             .arg(path));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 8: File I/O
+// ─────────────────────────────────────────────────────────────────────────────
+QString ImpressModule::titleString() const {
+    const QString base = m_currentPath.isEmpty()
+                             ? "Untitled Presentation"
+                             : QFileInfo(m_currentPath).fileName();
+    return (m_dirty ? "* " : "") + base + " — NativeOffice Impress";
+}
+
+void ImpressModule::markClean() {
+    m_dirty = false;
+}
+
+void ImpressModule::clearDeck() {
+    m_view->setScene(nullptr);
+    for (auto* s : m_scenes)
+        delete s;
+    m_scenes.clear();
+    m_slideData.clear();
+    m_currentIdx = -1;
+    m_slidePanel->clear();
+}
+
+bool ImpressModule::saveToPath(const QString& path) {
+    // Save current scene state first
+    if (m_currentIdx >= 0 && m_currentIdx < static_cast<int>(m_scenes.size()))
+        m_scenes[m_currentIdx]->saveToData(m_slideData[m_currentIdx]);
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+        return false;
+
+    // Build JSON from the slide deck
+    QJsonArray slidesArray;
+    for (const auto& slide : m_slideData) {
+        QJsonObject slideObj;
+        slideObj["title"]      = slide.title;
+        slideObj["background"] = slide.background.name();
+
+        QJsonArray itemsArray;
+        for (const auto& item : slide.items) {
+            QJsonObject itemObj;
+
+            switch (item.type) {
+            case SlideItemType::TextBox:   itemObj["type"] = "textbox";   break;
+            case SlideItemType::Rectangle: itemObj["type"] = "rectangle"; break;
+            case SlideItemType::Ellipse:   itemObj["type"] = "ellipse";   break;
+            }
+
+            itemObj["x"] = item.rect.x();
+            itemObj["y"] = item.rect.y();
+            itemObj["w"] = item.rect.width();
+            itemObj["h"] = item.rect.height();
+
+            if (item.type == SlideItemType::TextBox) {
+                itemObj["text"]        = item.text;
+                itemObj["fontSize"]    = item.fontSize;
+                itemObj["placeholder"] = item.isPlaceholder;
+            }
+
+            itemObj["fillColor"] = item.fillColor.name(QColor::HexArgb);
+            itemObj["penColor"]  = item.penColor.name(QColor::HexArgb);
+            itemObj["penWidth"]  = item.penWidth;
+
+            itemsArray.append(itemObj);
+        }
+
+        slideObj["items"] = itemsArray;
+        slidesArray.append(slideObj);
+    }
+
+    QJsonObject root;
+    root["type"]    = "impress";
+    root["version"] = 1;
+    root["slides"]  = slidesArray;
+
+    QTextStream out(&f);
+    out.setEncoding(QStringConverter::Utf8);
+    out << "<!-- NativeOffice Impress Presentation (.noff) -->\n";
+    out << QJsonDocument(root).toJson(QJsonDocument::Indented);
+    f.close();
+
+    m_currentPath = path;
+    m_dirty       = false;
+    emit filePathChanged(path);
+    return true;
+}
+
+bool ImpressModule::loadFromPath(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+
+    QTextStream in(&f);
+    in.setEncoding(QStringConverter::Utf8);
+    QString content = in.readAll();
+    f.close();
+
+    // Strip the .noff header comment if present
+    content.remove("<!-- NativeOffice Impress Presentation (.noff) -->\n");
+
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(content.toUtf8(), &err);
+    if (doc.isNull() || !doc.isObject())
+        return false;
+
+    const QJsonObject root   = doc.object();
+    const QJsonArray  slides = root["slides"].toArray();
+    if (slides.isEmpty())
+        return false;
+
+    m_ignoreChange = true;
+
+    // Clear existing deck
+    clearDeck();
+
+    // Recreate slides from JSON
+    for (const auto& slideVal : slides) {
+        const QJsonObject slideObj = slideVal.toObject();
+
+        SlideData data;
+        data.title      = slideObj["title"].toString("Untitled Slide");
+        data.background = QColor(slideObj["background"].toString("#ffffff"));
+
+        const QJsonArray items = slideObj["items"].toArray();
+        for (const auto& itemVal : items) {
+            const QJsonObject itemObj = itemVal.toObject();
+
+            SlideItem si;
+            const QString typeStr = itemObj["type"].toString();
+            if (typeStr == "rectangle")
+                si.type = SlideItemType::Rectangle;
+            else if (typeStr == "ellipse")
+                si.type = SlideItemType::Ellipse;
+            else
+                si.type = SlideItemType::TextBox;
+
+            si.rect = QRectF(itemObj["x"].toDouble(),
+                             itemObj["y"].toDouble(),
+                             itemObj["w"].toDouble(),
+                             itemObj["h"].toDouble());
+
+            if (si.type == SlideItemType::TextBox) {
+                si.text          = itemObj["text"].toString();
+                si.fontSize      = itemObj["fontSize"].toDouble(14.0);
+                si.isPlaceholder = itemObj["placeholder"].toBool(false);
+            }
+
+            si.fillColor = QColor(itemObj["fillColor"].toString("#ffffff"));
+            si.penColor  = QColor(itemObj["penColor"].toString("#1C1E26"));
+            si.penWidth  = itemObj["penWidth"].toDouble(1.5);
+
+            data.items.push_back(si);
+        }
+
+        createSlide(data);
+    }
+
+    // Switch to the first slide
+    if (!m_scenes.empty())
+        switchToSlide(0);
+
+    m_ignoreChange = false;
+
+    m_currentPath = path;
+    m_dirty       = false;
+    emit filePathChanged(path);
+    return true;
 }
 
 } // namespace NativeOffice

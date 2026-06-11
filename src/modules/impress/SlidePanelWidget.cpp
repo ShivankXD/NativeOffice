@@ -106,6 +106,15 @@ void SlidePanelWidget::setActiveSlide(int slideIndex) {
         m_thumbnails[i]->setActive(i == slideIndex);
 }
 
+void SlidePanelWidget::clear() {
+    for (auto* thumb : m_thumbnails) {
+        m_listLayout->removeWidget(thumb);
+        thumb->deleteLater();
+    }
+    m_thumbnails.clear();
+    m_activeIdx = 0;
+}
+
 int SlidePanelWidget::slideCount() const noexcept {
     return static_cast<int>(m_thumbnails.size());
 }

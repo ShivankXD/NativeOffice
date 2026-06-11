@@ -1,7 +1,7 @@
 # NativeOffice — Project Summary
 
 > **Auto-maintained file.** Updated automatically at every development milestone.  
-> Last updated: **2026-06-11** · Status: **🟢 Sprint 6 Complete — PDF Export live for Writer & Impress**
+> Last updated: **2026-06-11** · Status: **🟢 Sprint 8 Complete — Full File Persistence for Calc & Impress**
 
 ---
 
@@ -56,22 +56,29 @@ NativeOffice/
     │   ├── theme/ThemeManager.h/cpp     ← Color palette + Qt stylesheet
     │   └── application/
     │       ├── AppController.h/cpp      ← Signal-based navigation router
-    │       ├── RecentFilesManager.h/cpp ← ✅ NEW: QSettings-backed file list
+    │       ├── RecentFilesManager.h/cpp ← ✅ QSettings-backed file list
+    │       └── FileRouter.h/cpp        ← ✅ NEW: Content-based file type detection
     ├── modules/
     │   ├── writer/                      ← ✅ Word Processor (SPRINT 3 COMPLETE)
     │   │   ├── CMakeLists.txt
     │   │   ├── WriterModule.h/cpp       ← File I/O: saveToPath / loadFromPath
     │   │   └── WriterToolbar.h/cpp      ← Formatting toolbar
-    │   ├── calc/                        ← ✅ Spreadsheet Engine (SPRINT 4 COMPLETE)
+    │   ├── calc/                        ← ✅ Spreadsheet Engine (SPRINT 8 COMPLETE)
     │   │   ├── CMakeLists.txt
-    │   │   ├── CalcModule.h/cpp         ← Root widget: formula bar + grid
-    │   │   ├── SpreadsheetModel.h/cpp   ← QAbstractTableModel (100x26 grid)
+    │   │   ├── CalcModule.h/cpp         ← Root widget + JSON file I/O (Sprint 8)
+    │   │   ├── SpreadsheetModel.h/cpp   ← QAbstractTableModel (100x26 grid) + rawData()
     │   │   ├── FormulaEngine.h/cpp      ← Recursive-descent formula parser
     │   │   └── CalcHeaderView.h/cpp     ← Themed Charcoal/Scarlet headers
-    │   └── impress/ (stub – Sprint 5)
+    │   └── impress/                     ← ✅ Presentation Tool (SPRINT 8 COMPLETE)
+    │       ├── ImpressModule.h/cpp      ← Three-pane + JSON file I/O (Sprint 8)
+    │       ├── SlideData.h              ← Pure data: SlideItem + SlideData
+    │       ├── SlideScene.h/cpp         ← QGraphicsScene: render + saveToData/loadFromData
+    │       ├── SlidePanelWidget.h/cpp   ← Thumbnail panel + clear()
+    │       ├── SlideThumbnailWidget.h/cpp
+    │       └── ImpressToolbar.h/cpp
     └── app/
         ├── CMakeLists.txt
-        ├── main.cpp                     ← ✅ Sprint 3: WriterWindow + full file ops
+        ├── main.cpp                     ← ✅ Sprint 8: WriterWindow + CalcWindow + ImpressWindow
         └── startscreen/
             ├── StartScreen.h/cpp
             ├── SidebarWidget.h/cpp
@@ -200,12 +207,56 @@ NativeOffice/
   - Full menu bar: `File → New Presentation / Export to PDF… / Close` + View + Help
 - **CMake**: `Qt6::PrintSupport` added to `WriterModule`, `ImpressModule`, and `NativeOffice` executable
 
+### ✅ Sprint 7 — Smart Content-Based File Routing (Complete)
+- **`FileRouter`** — stateless content-detection utility (`core/application/`)
+  - `detectFileType(path)` returns `DetectedFileType::{WriterDocument, SpreadsheetData, PresentationData}`
+  - **Extension fast-path**: binary formats (`.xlsx`, `.ods`, `.pptx`, `.odp`) routed by extension alone
+  - **Content sampling**: reads first ~8 KB of text-based files for heuristic analysis
+  - **Presentation markers**: NativeOffice Impress header, JSON `"slides"` key, ODP/PPTX XML namespaces
+  - **Spreadsheet/CSV markers**: ≥60% of non-empty lines with consistent column count (≥2 columns, comma or tab delimited)
+  - **Default fallback**: HTML tags, `.noff` header, or plain text → Writer
+- **`openDocumentByPath()`** in `main.cpp` overhauled (Sprint 7)
+  - Uses `FileRouter::detectFileType()` instead of raw extension matching
+  - Registers the **detected** type in `RecentFilesManager` so the badge is accurate
+  - A `.txt` file with CSV data now correctly opens in Calc, not Writer
+- **Sidebar "Open" button** — now functional
+  - `SidebarItem::Open` wired to `QFileDialog` → `fileOpenRequested` signal
+  - Supports all file types: `.noff .html .txt .csv .tsv .pptx .odp .xlsx .ods`
+  - Routes through `AppController` → `openDocumentByPath()` → `FileRouter`
+
+### ✅ Sprint 8 — Full File Persistence for Calc & Impress (Complete)
+- **CalcModule File I/O** — JSON-based `.noff` format
+  - `saveToPath(path)` serializes non-empty cells from `SpreadsheetModel::rawData()` into `{"type":"calc","cells":[{col,row,value},…]}`
+  - `loadFromPath(path)` parses JSON; falls back to CSV import (comma-separated) for plain `.csv` files
+  - Header comment: `<!-- NativeOffice Calc Spreadsheet (.noff) -->`
+  - Dirty flag tracked via `SpreadsheetModel::dataChanged` signal with `m_ignoreChange` guard
+  - `titleString()` / `isDirty()` / `markClean()` API mirrors WriterModule
+- **ImpressModule File I/O** — JSON-based `.noff` format
+  - `saveToPath(path)` serializes full slide deck: `{"type":"impress","slides":[{title,background,items:[{type,x,y,w,h,text,fontSize,fillColor,penColor,penWidth},…]},…]}`
+  - `loadFromPath(path)` parses JSON, clears existing deck via `clearDeck()`, recreates scenes with `createSlide()`
+  - Header comment: `<!-- NativeOffice Impress Presentation (.noff) -->`
+  - Dirty flag tracked via `SlideScene::sceneModified` signal
+  - All shape types preserved: TextBox (text + fontSize + placeholder flag), Rectangle, Ellipse
+  - Colors stored in `#aarrggbb` hex format for full alpha support
+- **CalcWindow** subclass in `main.cpp` (mirrors WriterWindow)
+  - Save / Save As / Open menus with `Ctrl+S`, `Ctrl+Shift+S`, `Ctrl+O`
+  - Close-confirmation dialog on dirty state (Save / Discard / Cancel)
+  - `RecentFilesManager::addFile(path, "Calc")` on save
+- **ImpressWindow** subclass in `main.cpp` (mirrors WriterWindow)
+  - Save / Save As / Open / Export to PDF menus
+  - Close-confirmation dialog on dirty state
+  - `RecentFilesManager::addFile(path, "Impress")` on save
+- **`createCalcWindow(filePath)`** — new free function with full File menu
+- **`createImpressWindow(filePath)`** — upgraded from Sprint 6; now has Save/SaveAs/Open/Close
+- **`openDocumentByPath()`** simplified — now delegates to `createCalcWindow(path)` / `createImpressWindow(path)`
+- **FileRouter** updated — added `NativeOffice Calc` header detection (Sprint 8)
+- **SlidePanelWidget** — added `clear()` method for deck reset during `loadFromPath()`
+- **SpreadsheetModel** — added `rawData()` const accessor for serialization
+
 ### 🔲 Ongoing Backlog
 - Custom app icon
 - Unit tests (Catch2 / Google Test)
 - Installer packaging (NSIS for Windows, `.dmg` for macOS)
-- CalcModule file persistence (`.nocalc` or `.csv` format)
-- ImpressModule file persistence (`.noimpress` JSON format)
 
 ---
 
@@ -245,4 +296,17 @@ cmake --build build --config Debug --parallel
 | 16:9 custom page size for Impress PDF | Prevents letterboxing in PDF viewers; slide fills the whole page |
 | 300 dpi Writer / 150 dpi Impress | Writer needs print quality; Impress at 150 dpi is smaller file, still sharp on screen |
 | `createImpressWindow()` free function | Mirrors `createWriterWindow()`; all window creation goes through one consistent path |
-| `Ctrl+Shift+E` shortcut for Export to PDF | Consistent across Writer and Impress; doesn’t conflict with standard Ctrl+P (print) |
+| `Ctrl+Shift+E` shortcut for Export to PDF | Consistent across Writer and Impress; doesn't conflict with standard Ctrl+P (print) |
+| Content-based routing via `FileRouter` | Extension-only routing is fragile; reading file content makes `.txt` with CSV data open in Calc correctly |
+| 8 KB sample size | Enough to detect headers, CSV patterns, and XML namespaces without reading the entire file |
+| ≥60% consistent-column threshold | Avoids false positives on prose text that happens to contain a comma; requires real tabular structure |
+| Binary format extension fast-path | `.xlsx`/`.pptx` are ZIP-based binary formats that can't be usefully scanned as text; skip content read |
+| Sidebar "Open" → `fileOpenRequested` signal | Reuses the existing signal chain through `AppController` → no new wiring in `main.cpp` needed |
+| JSON `.noff` for Calc/Impress | Human-readable, easy to debug; `QJsonDocument` is built into Qt Core — no external dependencies |
+| Sparse cell storage in Calc JSON | Only non-empty cells are saved; a 100×26 grid with 10 cells produces a tiny file |
+| CSV fallback in `CalcModule::loadFromPath()` | FileRouter routes `.csv` to Calc; the loader must handle it without requiring JSON |
+| `CalcWindow` / `ImpressWindow` subclasses | Keeps file I/O policy (save/dirty/close-confirm) in `main.cpp`; modules stay policy-free |
+| `clearDeck()` in ImpressModule | Centralized scene cleanup for `loadFromPath()`; detaches view, deletes scenes, clears panel |
+| `rawData()` const accessor on SpreadsheetModel | Read-only; doesn't break encapsulation but allows CalcModule to iterate for serialization |
+| `#aarrggbb` color format in Impress JSON | Preserves alpha channel for translucent shape fills; `QColor::name(HexArgb)` is native Qt |
+| Header comments in `.noff` files | `FileRouter` uses these for instant detection without parsing JSON; different header per module |

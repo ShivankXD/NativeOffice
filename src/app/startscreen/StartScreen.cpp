@@ -9,6 +9,8 @@
 #include "core/theme/ThemeManager.h"
 
 #include <QFrame>
+#include <QFileDialog>
+#include <QDir>
 
 namespace NativeOffice {
 
@@ -70,6 +72,15 @@ void StartScreen::connectSignals() {
     connect(m_sidebar, &SidebarWidget::itemSelected,
             this, [this](SidebarItem item) {
         switch (item) {
+        case SidebarItem::Open: {
+            const QString path = QFileDialog::getOpenFileName(
+                this, "Open Document", QDir::homePath(),
+                "All Supported Files (*.noff *.html *.txt *.csv *.tsv "
+                "*.pptx *.odp *.xlsx *.ods);;All Files (*)");
+            if (!path.isEmpty())
+                emit fileOpenRequested(path);
+            break;
+        }
         case SidebarItem::Settings:
             emit settingsRequested();
             break;
