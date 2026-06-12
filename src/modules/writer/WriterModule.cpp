@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// WriterModule.cpp  (Sprint 3)
-// Word processor with integrated .noff file I/O.
+// WriterModule.cpp  (Sprint 3 → Sprint 10)
+// Word processor with integrated .noff file I/O and image insertion.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "WriterModule.h"
 #include "WriterToolbar.h"
@@ -20,6 +20,10 @@
 #include <QFileInfo>
 #include <QTextStream>
 #include <QIODevice>
+#include <QFileDialog>
+#include <QImage>
+#include <QBuffer>
+#include <QByteArray>
 
 namespace NativeOffice {
 
@@ -98,6 +102,10 @@ void WriterModule::buildUi() {
 
     // ── Wire toolbar → editor ─────────────────────────────────────────────
     m_toolbar->attachEditor(m_editor);
+
+    // Sprint 10: Wire Insert Image toolbar button to our handler
+    connect(m_toolbar, &WriterToolbar::insertImageRequested,
+            this,      &WriterModule::insertImage);
 
     // ── Dirty-state tracking ──────────────────────────────────────────────
     connect(m_editor->document(), &QTextDocument::contentsChanged,
@@ -235,6 +243,61 @@ QScrollArea#writerScroll > QWidget > QWidget {
     .arg(ThemeManager::cssColor(t.primary))
     .arg(ThemeManager::cssColor(t.secondary))
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 10: Image Insertion
+//
+// Pipeline: QFileDialog → QImage → scale to fit margins → Base64 → HTML <img>
+//
+// Max image width = A4 paper (794 px) minus left+right document margins (60+60).
+// Images are encoded as PNG Base64 data URIs so they embed directly inside
+// the HTML string that QTextEdit produces, which means they automatically
+// persist in our .noff file format without any file-system changes.
+// ─────────────────────────────────────────────────────────────────────────────
+void WriterModule::insertImage() {
+    if (!m_editor) return;
+
+    // 1. Open a file dialog for common image formats
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        tr("Insert Image"),
+        QString(),
+        tr("Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)"));
+
+    if (path.isEmpty()) return;
+
+    // 2. Load the image
+    QImage image(path);
+    if (image.isNull()) return;
+
+    // 3. Scale down to fit within the A4 paper content area
+    //    Paper width = 794 px, document margin = 60 px each side
+    //    Max usable width = 794 - 60 - 60 = 674 px
+    constexpr int maxWidth = 674;
+    if (image.width() > maxWidth) {
+        image = image.scaledToWidth(maxWidth, Qt::SmoothTransformation);
+    }
+
+    // 4. Encode the scaled image as PNG Base64
+    QByteArray imageData;
+    {
+        QBuffer buffer(&imageData);
+        buffer.open(QIODevice::WriteOnly);
+        image.save(&buffer, "PNG");
+    }
+    const QString base64 = QString::fromLatin1(imageData.toBase64());
+
+    // 5. Insert as an inline HTML <img> at the current cursor position
+    const QString html = QStringLiteral(
+        "<img src=\"data:image/png;base64,%1\"/>").arg(base64);
+
+    QTextCursor cursor = m_editor->textCursor();
+    cursor.insertHtml(html);
+
+    // The QTextDocument::contentsChanged signal fires automatically,
+    // which triggers onContentsChanged() and sets the dirty flag.
+    m_editor->setFocus();
 }
 
 } // namespace NativeOffice

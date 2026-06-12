@@ -1,26 +1,32 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// FormulaEngine.h  (Sprint 4)
+// FormulaEngine.h  (Sprint 4 → Sprint 9)
 // Stateless formula evaluator for NativeOffice Calc.
 //
-// Supported syntax (case-insensitive cell refs):
+// Supported syntax (case-insensitive cell refs and function names):
 //   Plain text / numbers  → returned as-is
 //   =<expr>               → evaluated arithmetic expression
 //
 // Expression grammar (recursive descent):
-//   expr   = term   { ('+' | '-') term   }
-//   term   = factor { ('*' | '/') factor }
-//   factor = number | cellRef | '(' expr ')'
-//   number = ['-'] digit+ ['.' digit+]
-//   cellRef= [A-Za-z]+ [0-9]+   (e.g. A1, BC3, Z100)
+//   expr     = term     { ('+' | '-') term     }
+//   term     = factor   { ('*' | '/') factor   }
+//   factor   = number | funcCall | cellRef | '(' expr ')' | unary '-' factor
+//   funcCall = IDENT '(' range { ',' range } ')'        (e.g. SUM, AVERAGE)
+//   range    = cellRef ':' cellRef                       (e.g. A1:A5, A1:C3)
+//   number   = ['-'] digit+ ['.' digit+]
+//   cellRef  = [A-Za-z]+ [0-9]+                         (e.g. A1, BC3, Z100)
 //
 // Cell references are resolved via a callback so the engine stays decoupled
 // from any particular model or storage backend.
 //
-// On error (divide-by-zero, unknown ref, parse failure) returns "#ERR".
+// Error tokens:
+//   #ERR  — parse failure, divide-by-zero, AVERAGE with no numeric cells
+//   #CIRC — circular reference (detected in SpreadsheetModel, not here)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QString>
+#include <QStringList>
+#include <QVector>
 #include <functional>
 
 namespace NativeOffice {
@@ -52,6 +58,12 @@ public:
     // Convert a (col, row) pair to a cell address string, e.g. (0,0) → "A1".
     [[nodiscard]] static QString cellAddress(int col, int row);
 
+    // ── Sprint 9: Range helpers ───────────────────────────────────────────
+    // Expand a range string like "A1:A5" into individual cell addresses.
+    // Handles vertical (A1:A5), horizontal (A1:C1), and rectangular (A1:C5).
+    // Returns an empty list if the input is not a valid range.
+    [[nodiscard]] static QStringList expandRange(const QString& rangeStr);
+
 private:
     // ── Recursive-descent parser internals ────────────────────────────────
     struct Parser {
@@ -66,6 +78,11 @@ private:
         double parseFactor();
         double parseNumber();
         double parseCellRef();
+
+        // Sprint 9: function call & range support
+        double parseFuncCall(const QString& funcName);
+        QVector<double> resolveRange(const QString& startRef, const QString& endRef);
+
         void   skipWs();
         char   peek() const;
         char   consume();
@@ -74,3 +91,4 @@ private:
 };
 
 } // namespace NativeOffice
+

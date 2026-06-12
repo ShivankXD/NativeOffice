@@ -1,6 +1,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// FormulaEngine.cpp  (Sprint 4)
+// FormulaEngine.cpp  (Sprint 4 → Sprint 9)
 // Recursive-descent arithmetic evaluator for NativeOffice Calc.
+//
+// Sprint 9 additions:
+//   - expandRange()  — expands "A1:A5" into individual cell addresses
+//   - parseFuncCall() — dispatches SUM(), AVERAGE() (case-insensitive)
+//   - resolveRange()  — resolves a cell range into a vector of doubles
+//   - Updated parseFactor() with function-call lookahead
 // ─────────────────────────────────────────────────────────────────────────────
 #include "FormulaEngine.h"
 
@@ -8,6 +14,7 @@
 #include <QChar>
 #include <cmath>
 #include <stdexcept>
+#include <algorithm>
 
 namespace NativeOffice {
 
@@ -55,6 +62,35 @@ bool FormulaEngine::parseCellRef(const QString& ref, int& col, int& row) {
     row = r - 1;   // 0-based
 
     return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 9: Expand a range string like "A1:A5" into individual cell addresses
+// ─────────────────────────────────────────────────────────────────────────────
+QStringList FormulaEngine::expandRange(const QString& rangeStr) {
+    const int colonIdx = rangeStr.indexOf(':');
+    if (colonIdx < 0) return {};
+
+    const QString startStr = rangeStr.left(colonIdx).trimmed();
+    const QString endStr   = rangeStr.mid(colonIdx + 1).trimmed();
+
+    int col1 = 0, row1 = 0, col2 = 0, row2 = 0;
+    if (!parseCellRef(startStr, col1, row1)) return {};
+    if (!parseCellRef(endStr,   col2, row2)) return {};
+
+    // Normalise so we iterate from min to max in both dimensions
+    if (col1 > col2) std::swap(col1, col2);
+    if (row1 > row2) std::swap(row1, row2);
+
+    QStringList result;
+    result.reserve((col2 - col1 + 1) * (row2 - row1 + 1));
+
+    for (int c = col1; c <= col2; ++c) {
+        for (int r = row1; r <= row2; ++r) {
+            result.append(cellAddress(c, r));
+        }
+    }
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,8 +181,11 @@ double FormulaEngine::Parser::parseTerm() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Grammar:  factor = number | cellRef | '(' expr ')'
+// Grammar:  factor = number | funcCall | cellRef | '(' expr ')'
 //                  | unary '-' factor
+//
+// Sprint 9: When a letter-sequence is followed by '(', it's a function call.
+//           Otherwise it falls through to the existing cellRef path.
 // ─────────────────────────────────────────────────────────────────────────────
 double FormulaEngine::Parser::parseFactor() {
     skipWs();
@@ -168,8 +207,26 @@ double FormulaEngine::Parser::parseFactor() {
         return -parseFactor();
     }
 
-    // Cell reference: starts with a letter
+    // Letter → could be a function call (SUM, AVERAGE) or a cell reference (A1)
     if (QChar(c).isLetter()) {
+        // Save position so we can backtrack if it's not a function call
+        const int savedPos = pos;
+
+        // Consume all letters
+        while (pos < src.size() && src[pos].isLetter()) ++pos;
+        const QString ident = src.mid(savedPos, pos - savedPos);
+
+        // Peek ahead (skipping whitespace) for '('
+        const int afterLetters = pos;
+        skipWs();
+
+        if (peek() == '(') {
+            // It's a function call like SUM(...) or AVERAGE(...)
+            return parseFuncCall(ident);
+        }
+
+        // Not a function call — backtrack and parse as a cell reference
+        pos = savedPos;
         return parseCellRef();
     }
 
@@ -228,4 +285,106 @@ double FormulaEngine::Parser::parseCellRef() {
     return val;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 9: Resolve a cell range (e.g. "A1" to "A5") into numeric values.
+// Non-numeric cells (empty or text) are silently skipped — matching Excel
+// behavior where SUM ignores text cells.
+// ─────────────────────────────────────────────────────────────────────────────
+QVector<double> FormulaEngine::Parser::resolveRange(const QString& startRef,
+                                                     const QString& endRef) {
+    const QStringList cells = FormulaEngine::expandRange(startRef + ":" + endRef);
+    QVector<double> values;
+    values.reserve(cells.size());
+
+    for (const QString& addr : cells) {
+        int col = 0, row = 0;
+        if (!FormulaEngine::parseCellRef(addr, col, row)) continue;
+
+        const QString raw = lookup(col, row).trimmed();
+        if (raw.isEmpty()) continue;   // skip empty cells
+
+        // Recursively evaluate (handles formulas within the range)
+        const QString evaled = engine.evaluate(raw, lookup);
+        if (evaled.startsWith('#')) {
+            // Propagate errors (#ERR, #CIRC) up
+            error = true;
+            return {};
+        }
+
+        bool ok = false;
+        const double val = evaled.toDouble(&ok);
+        if (ok) values.append(val);
+        // Non-numeric text cells are silently skipped (Excel behavior)
+    }
+    return values;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 9: Parse a function call — SUM(range) or AVERAGE(range)
+// The function name has already been consumed; pos is sitting just before '('.
+// Function names are case-insensitive.
+// ─────────────────────────────────────────────────────────────────────────────
+double FormulaEngine::Parser::parseFuncCall(const QString& funcName) {
+    const QString upperName = funcName.toUpper();
+
+    // Consume '('
+    if (!match('(')) { error = true; return 0.0; }
+
+    // Parse the argument — expect a cell range (e.g. A1:A5)
+    // Read the start cell reference
+    skipWs();
+    int refStart = pos;
+    while (pos < src.size() && src[pos].isLetter()) ++pos;
+    while (pos < src.size() && src[pos].isDigit())  ++pos;
+    const QString startRef = src.mid(refStart, pos - refStart);
+
+    // Expect ':'
+    skipWs();
+    if (!match(':')) { error = true; return 0.0; }
+
+    // Read the end cell reference
+    skipWs();
+    refStart = pos;
+    while (pos < src.size() && src[pos].isLetter()) ++pos;
+    while (pos < src.size() && src[pos].isDigit())  ++pos;
+    const QString endRef = src.mid(refStart, pos - refStart);
+
+    // Validate both references
+    int c1 = 0, r1 = 0, c2 = 0, r2 = 0;
+    if (!FormulaEngine::parseCellRef(startRef, c1, r1) ||
+        !FormulaEngine::parseCellRef(endRef,   c2, r2)) {
+        error = true;
+        return 0.0;
+    }
+
+    // Resolve the range into numeric values
+    const QVector<double> values = resolveRange(startRef, endRef);
+    if (error) return 0.0;
+
+    // Consume ')'
+    if (!match(')')) { error = true; return 0.0; }
+
+    // ── Dispatch to the requested function ─────────────────────────────
+    if (upperName == "SUM") {
+        double sum = 0.0;
+        for (double v : values) sum += v;
+        return sum;
+    }
+
+    if (upperName == "AVERAGE") {
+        if (values.isEmpty()) {
+            error = true;   // No numeric cells → #ERR
+            return 0.0;
+        }
+        double sum = 0.0;
+        for (double v : values) sum += v;
+        return sum / static_cast<double>(values.size());
+    }
+
+    // Unknown function name
+    error = true;
+    return 0.0;
+}
+
 } // namespace NativeOffice
+

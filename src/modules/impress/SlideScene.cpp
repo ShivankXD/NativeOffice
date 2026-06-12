@@ -13,6 +13,7 @@
 #include <QColor>
 #include <QTextCursor>
 #include <QCursor>
+#include <QGraphicsView>
 
 namespace NativeOffice {
 

@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// WriterModule.h  (Sprint 3)
+// WriterModule.h  (Sprint 3 → Sprint 10)
 // Full NativeOffice Word Processor module.
 //
 // Sprint 3 additions:
@@ -11,6 +11,9 @@
 //   • isDirty()         – true when unsaved changes exist
 //   • markClean()       – externally mark the document as saved
 //   • titleString()     – full window-title-ready string
+//
+// Sprint 10 additions:
+//   • insertImage()     – opens file dialog, scales, embeds as Base64 <img>
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QWidget>
@@ -57,6 +60,9 @@ signals:
 
 private slots:
     void onContentsChanged();
+
+    // Sprint 10: Image insertion
+    void insertImage();
 
 private:
     void buildUi();

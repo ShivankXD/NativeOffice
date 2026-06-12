@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// WriterToolbar.h  (Sprint 2)
+// WriterToolbar.h  (Sprint 2 → Sprint 10)
 // Formatting toolbar for the NativeOffice Writer (Word Processor).
 //
 // Provides real-time, selection-aware controls wired to a target QTextEdit:
@@ -10,6 +10,7 @@
 //   • Text colour picker (defaults to brand Charcoal #2C3140)
 //   • Paragraph alignment buttons (Left / Center / Right / Justify)
 //   • Undo / Redo buttons
+//   • Insert Image button (Sprint 10)
 //
 // Design: Charcoal (#2C3140) toolbar background, Scarlet (#E8372A) for
 //         checked/hovered/active states — consistent with ThemeManager palette.
@@ -43,6 +44,9 @@ public:
 signals:
     // Emitted when the user picks a text colour via the colour dialog.
     void textColorChanged(const QColor& color);
+
+    // Sprint 10: Emitted when the user clicks the Insert Image button.
+    void insertImageRequested();
 
 private slots:
     void onBoldToggled(bool checked);
@@ -94,6 +98,9 @@ private:
     QToolButton* m_btnAlignCenter  { nullptr };
     QToolButton* m_btnAlignRight   { nullptr };
     QToolButton* m_btnAlignJustify { nullptr };
+
+    // Sprint 10: Insert Image
+    QToolButton* m_btnInsertImage  { nullptr };
 
     bool m_syncing { false };   // guard against recursive signal loops
 };

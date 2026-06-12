@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// WriterToolbar.cpp  (Sprint 2)
+// WriterToolbar.cpp  (Sprint 2 → Sprint 10)
 // Full formatting toolbar implementation for NativeOffice Writer.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "WriterToolbar.h"
@@ -138,6 +138,11 @@ void WriterToolbar::buildUi() {
     connect(m_btnAlignRight,   &QToolButton::clicked, this, &WriterToolbar::onAlignRight);
     connect(m_btnAlignJustify, &QToolButton::clicked, this, &WriterToolbar::onAlignJustify);
 
+    // ── Insert Image (Sprint 10) ────────────────────────────────────────────
+    m_btnInsertImage = makeToolBtn(QStringLiteral("\U0001F5BC"), "Insert Image");
+    connect(m_btnInsertImage, &QToolButton::clicked,
+            this, &WriterToolbar::insertImageRequested);
+
     // ── Assemble ──────────────────────────────────────────────────────────
     m_layout->addWidget(m_btnUndo);
     m_layout->addWidget(m_btnRedo);
@@ -156,8 +161,11 @@ void WriterToolbar::buildUi() {
     m_layout->addWidget(m_btnAlignCenter);
     m_layout->addWidget(m_btnAlignRight);
     m_layout->addWidget(m_btnAlignJustify);
+    m_layout->addWidget(makeSeparator());
+    m_layout->addWidget(m_btnInsertImage);
     m_layout->addStretch();
 }
+
 
 QToolButton* WriterToolbar::makeToolBtn(const QString& text,
                                          const QString& tooltip,

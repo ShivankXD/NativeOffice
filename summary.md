@@ -1,7 +1,7 @@
 # NativeOffice — Project Summary
 
 > **Auto-maintained file.** Updated automatically at every development milestone.  
-> Last updated: **2026-06-11** · Status: **🟢 Sprint 8 Complete — Full File Persistence for Calc & Impress**
+> Last updated: **2026-06-12** · Status: **🟢 Sprint 10 Complete — Writer Image Insertion**
 
 ---
 
@@ -59,15 +59,15 @@ NativeOffice/
     │       ├── RecentFilesManager.h/cpp ← ✅ QSettings-backed file list
     │       └── FileRouter.h/cpp        ← ✅ NEW: Content-based file type detection
     ├── modules/
-    │   ├── writer/                      ← ✅ Word Processor (SPRINT 3 COMPLETE)
+    │   ├── writer/                      ← ✅ Word Processor (SPRINT 10 COMPLETE)
     │   │   ├── CMakeLists.txt
-    │   │   ├── WriterModule.h/cpp       ← File I/O: saveToPath / loadFromPath
-    │   │   └── WriterToolbar.h/cpp      ← Formatting toolbar
+    │   │   ├── WriterModule.h/cpp       ← File I/O + Image Insertion (Sprint 10)
+    │   │   └── WriterToolbar.h/cpp      ← Formatting toolbar + Insert Image button
     │   ├── calc/                        ← ✅ Spreadsheet Engine (SPRINT 8 COMPLETE)
     │   │   ├── CMakeLists.txt
     │   │   ├── CalcModule.h/cpp         ← Root widget + JSON file I/O (Sprint 8)
     │   │   ├── SpreadsheetModel.h/cpp   ← QAbstractTableModel (100x26 grid) + rawData()
-    │   │   ├── FormulaEngine.h/cpp      ← Recursive-descent formula parser
+    │   │   ├── FormulaEngine.h/cpp      ← Recursive-descent parser + SUM/AVERAGE/range math (Sprint 9)
     │   │   └── CalcHeaderView.h/cpp     ← Themed Charcoal/Scarlet headers
     │   └── impress/                     ← ✅ Presentation Tool (SPRINT 8 COMPLETE)
     │       ├── ImpressModule.h/cpp      ← Three-pane + JSON file I/O (Sprint 8)
@@ -253,6 +253,47 @@ NativeOffice/
 - **SlidePanelWidget** — added `clear()` method for deck reset during `loadFromPath()`
 - **SpreadsheetModel** — added `rawData()` const accessor for serialization
 
+### ✅ Sprint 9 — FormulaEngine Range Math & Office Functions (Complete)
+- **Range Parsing Layer (Colon Syntax)**
+  - `expandRange(rangeStr)` — static helper that expands `"A1:A5"` into `{"A1","A2","A3","A4","A5"}`
+  - Handles vertical ranges (same column), horizontal ranges (same row), and rectangular ranges (multi-col × multi-row)
+  - Normalises reversed ranges (e.g. `A5:A1` treated as `A1:A5`)
+- **`parseFactor()` upgraded** with function-call lookahead
+  - When a letter-sequence is followed by `(`, routes to `parseFuncCall()`
+  - Otherwise falls through to existing `parseCellRef()` logic — zero impact on existing formulas
+- **SUM() function**
+  - `=SUM(A1:A5)` sums all numeric cells in the range; text/empty cells silently skipped (Excel behavior)
+  - Works in expression context: `=SUM(A1:A3)+10` evaluates correctly
+  - Handles formulas within the range (recursive evaluation via existing `CellLookup` chain)
+- **AVERAGE() function**
+  - `=AVERAGE(A1:A3)` computes sum / count-of-numeric-cells
+  - Returns `#ERR` when zero numeric cells are found (empty range or all text)
+- **Case-insensitive** — `=sum(a1:a3)`, `=SUM(A1:A3)`, `=Sum(A1:A3)` all work identically
+- **Error handling**
+  - Errors within a range (`#ERR`, `#CIRC`) propagate up to the calling formula
+  - Circular references detected naturally: range resolution goes through the existing `CellLookup` → `evaluate()` path, so `SpreadsheetModel::m_evaluating` guard fires as expected
+  - Invalid range syntax, unknown function names → `#ERR`
+- **No model or CMake changes required** — all new code is inside `FormulaEngine.h/cpp`; the existing `CellLookup` callback pattern meant no `SpreadsheetModel` changes were needed
+
+### ✅ Sprint 10 — Writer Image Insertion (Complete)
+- **Toolbar Integration**
+  - New “Insert Image” button (🖼 icon) added to `WriterToolbar`, positioned after alignment buttons with a separator
+  - Styled consistently with ThemeManager Charcoal/Scarlet palette via existing `#toolbarBtn` stylesheet
+  - Emits `insertImageRequested()` signal — toolbar stays policy-free, `WriterModule` handles the logic
+- **Image Handling Pipeline**
+  - `QFileDialog::getOpenFileName()` filtered for `*.png *.jpg *.jpeg *.bmp`
+  - `QImage` loads the selected file; silently aborts if the image is null
+  - Auto-scaling: images wider than 674 px (= 794 A4 width − 60×2 document margins) are scaled down with `Qt::SmoothTransformation`
+- **Rich Text Embedding**
+  - Scaled image encoded to PNG Base64 via `QBuffer` + `QImage::save()`
+  - Inserted at cursor position as `<img src="data:image/png;base64,..."/>` using `QTextCursor::insertHtml()`
+  - Image flows inline with text — no absolute positioning
+- **File Persistence**
+  - Base64 images embed inside QTextEdit’s HTML output — no file-system changes needed
+  - `.noff` save/load already persists full HTML, so images round-trip automatically
+  - `QTextDocument::contentsChanged` fires on insert, correctly setting the dirty flag (`*` title prefix)
+- **No CMake changes** — `QImage`, `QBuffer`, `QFileDialog` are all in `Qt6::Gui`/`Qt6::Widgets`, already linked
+
 ### 🔲 Ongoing Backlog
 - Custom app icon
 - Unit tests (Catch2 / Google Test)
@@ -310,3 +351,14 @@ cmake --build build --config Debug --parallel
 | `rawData()` const accessor on SpreadsheetModel | Read-only; doesn't break encapsulation but allows CalcModule to iterate for serialization |
 | `#aarrggbb` color format in Impress JSON | Preserves alpha channel for translucent shape fills; `QColor::name(HexArgb)` is native Qt |
 | Header comments in `.noff` files | `FileRouter` uses these for instant detection without parsing JSON; different header per module |
+| Function-call lookahead in `parseFactor()` | Minimal grammar change: letter+`(` routes to function call, otherwise existing cellRef path; zero impact on Sprint 4 arithmetic |
+| `expandRange()` as a static public helper | Reusable outside the parser — future functions (COUNT, MIN, MAX) and unit tests can call it directly |
+| Range values skip non-numeric cells | Matches Excel/Sheets behavior: `SUM(A1:A3)` ignores text; `AVERAGE` divides by numeric count only |
+| `AVERAGE` returns `#ERR` on empty range | Prevents divide-by-zero; mirrors Excel's `#DIV/0!` semantics |
+| Case-insensitive function names via `toUpper()` | Standard Excel/Sheets behavior — users shouldn't need to remember capitalisation |
+| No `SpreadsheetModel` changes for Sprint 9 | Range resolution reuses the existing `CellLookup` → `evaluate()` chain; `#CIRC` detection works automatically |
+| `insertImageRequested()` signal in WriterToolbar | Toolbar stays policy-free; WriterModule owns the file-dialog and embedding logic |
+| Base64 PNG data URIs for image embedding | Images live inside the HTML string — no external files to manage; `.noff` save/load works unchanged |
+| 674 px max image width | A4 paper (794 px) minus 60 px margins on each side; images never overflow the printable area |
+| `Qt::SmoothTransformation` for scaling | Anti-aliased downscale looks sharp on screen and in PDF export |
+| PNG encoding for all inserted images | Lossless; preserves transparency; JPEG originals are re-encoded to PNG for consistency |
