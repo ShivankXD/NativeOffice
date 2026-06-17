@@ -8,8 +8,14 @@ add_library(ImpressModule STATIC
     SlideThumbnailWidget.h
     SlidePanelWidget.cpp
     SlidePanelWidget.h
-    ImpressToolbar.cpp
-    ImpressToolbar.h
+    OutlineWidget.cpp
+    OutlineWidget.h
+    ImpressRibbon.cpp
+    ImpressRibbon.h
+    ImpressStatusBar.cpp
+    ImpressStatusBar.h
+    PresentModeWindow.cpp
+    PresentModeWindow.h
 )
 
 target_include_directories(ImpressModule PUBLIC

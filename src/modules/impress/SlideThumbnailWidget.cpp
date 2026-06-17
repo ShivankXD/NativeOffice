@@ -7,7 +7,12 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QMouseEvent>
+#include <QContextMenuEvent>
 #include <QColor>
+#include <QDrag>
+#include <QMimeData>
+#include <QApplication>
+#include <QMenu>
 
 namespace NativeOffice {
 
@@ -85,9 +90,51 @@ void SlideThumbnailWidget::paintEvent(QPaintEvent*) {
 // ── Events ────────────────────────────────────────────────────────────────────
 void SlideThumbnailWidget::mousePressEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) {
-        emit clicked(m_slideIndex);
+        m_pressPos = e->pos();
+        m_dragging = false;
     }
     QWidget::mousePressEvent(e);
+}
+
+void SlideThumbnailWidget::mouseMoveEvent(QMouseEvent* e) {
+    if ((e->buttons() & Qt::LeftButton) && !m_dragging &&
+        (e->pos() - m_pressPos).manhattanLength() >= QApplication::startDragDistance()) {
+        m_dragging = true;
+        auto* mime = new QMimeData;
+        mime->setText(QString::number(m_slideIndex));
+        auto* drag = new QDrag(this);
+        drag->setMimeData(mime);
+        drag->setPixmap(m_pixmap.scaled(80, 45, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        drag->exec(Qt::MoveAction);
+        m_dragging = false;
+        return;
+    }
+    QWidget::mouseMoveEvent(e);
+}
+
+void SlideThumbnailWidget::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton && !m_dragging) {
+        emit clicked(m_slideIndex);
+    }
+    QWidget::mouseReleaseEvent(e);
+}
+
+void SlideThumbnailWidget::contextMenuEvent(QContextMenuEvent* e) {
+    QMenu menu(this);
+    menu.setStyleSheet(
+        "QMenu { background-color: #FFFFFF; color: #1C1E26; border: 1px solid #D5D8DF; padding: 4px; }"
+        "QMenu::item { padding: 6px 18px; border-radius: 4px; }"
+        "QMenu::item:selected { background-color: #E8372A; color: #FFFFFF; }"
+        "QMenu::separator { height: 1px; background: #E2E4E9; margin: 4px 8px; }");
+    QAction* actAdd = menu.addAction("➕  Add New Slide");
+    QAction* actDup = menu.addAction("⎘  Duplicate Slide");
+    menu.addSeparator();
+    QAction* actDel = menu.addAction("✕  Delete Slide");
+
+    QAction* chosen = menu.exec(e->globalPos());
+    if (chosen == actAdd)      emit addRequested();
+    else if (chosen == actDup) emit duplicateRequested(m_slideIndex);
+    else if (chosen == actDel) emit deleteRequested(m_slideIndex);
 }
 
 void SlideThumbnailWidget::enterEvent(QEnterEvent* e) {

@@ -565,6 +565,10 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
     auto* actClose = fileMenu->addAction("&Close");
     actClose->setShortcut(QKeySequence::Close);
 
+    auto* slideShowMenu  = mb->addMenu("&Slide Show");
+    auto* actPlayFromStart = slideShowMenu->addAction("▶ &Start Slide Show");
+    actPlayFromStart->setShortcut(Qt::Key_F5);
+
     mb->addMenu("&View");
     mb->addMenu("&Help");
 
@@ -587,6 +591,9 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
         impress->exportToPdf();
     });
     QObject::connect(actClose, &QAction::triggered, win, &QMainWindow::close);
+    QObject::connect(actPlayFromStart, &QAction::triggered, win, [impress]() {
+        impress->startSlideShow();
+    });
 
     return win;
 }
@@ -685,6 +692,16 @@ int main(int argc, char* argv[]) {
     });
 
     startWindow.show();
+
+    // ── Open any document passed on the command line (file association /
+    //    double-click-to-open). Each existing path is routed by content type.
+    const QStringList cliArgs = app.arguments();
+    for (int i = 1; i < cliArgs.size(); ++i) {
+        const QString path = cliArgs.at(i);
+        if (QFileInfo::exists(path))
+            openDocumentByPath(path);
+    }
+
     return app.exec();
 }
 

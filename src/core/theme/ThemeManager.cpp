@@ -40,6 +40,46 @@ QWidget {
     color: %2;
 }
 
+/* ── Dialogs & message boxes ──────────────────────────────────── */
+/* A globally-transparent QWidget background renders as black on a
+   top-level window, which made native QMessageBox text unreadable.
+   Give dialogs a solid surface and explicit, high-contrast text. */
+QMessageBox, QFileDialog {
+    background-color: %9;
+}
+QDialog QLabel {
+    background-color: transparent;
+    color: %2;
+    font-size: 13px;
+}
+QDialog QPushButton {
+    background-color: %9;
+    color: %2;
+    border: 1px solid %3;
+    border-radius: 6px;
+    padding: 6px 18px;
+    min-width: 78px;
+    font-size: 13px;
+    font-weight: 500;
+}
+QDialog QPushButton:hover {
+    background-color: %1;
+    border-color: %4;
+}
+QDialog QPushButton:pressed {
+    background-color: %3;
+}
+QDialog QPushButton:default {
+    background-color: %10;
+    color: %7;
+    border-color: %10;
+    font-weight: 600;
+}
+QDialog QPushButton:default:hover {
+    background-color: %11;
+    border-color: %11;
+}
+
 /* ── Scrollbars ──────────────────────────────────────────────── */
 QScrollBar:vertical {
     background: %3;
@@ -87,7 +127,10 @@ QToolTip {
     .arg(cssColor(t.textSecondary)) // %5 scrollbar handle hover
     .arg(cssColor(t.accent))        // %6 tooltip bg
     .arg(cssColor(t.textOnDark))    // %7 tooltip text
-    .arg(cssColor(t.borderFocus));  // %8 tooltip border
+    .arg(cssColor(t.borderFocus))   // %8 tooltip border
+    .arg(cssColor(t.surface))       // %9  dialog / button surface (white)
+    .arg(cssColor(t.secondary))     // %10 default button (scarlet)
+    .arg(cssColor(t.accentLight));  // %11 default button hover
 }
 
 } // namespace NativeOffice

@@ -44,9 +44,16 @@ public:
 
     [[nodiscard]] int  slideCount() const noexcept;
 
+    // Compute the insertion index for a vertical drop position (used by the
+    // internal drop-enabled list container)
+    [[nodiscard]] int dropIndexForY(int y) const;
+
 signals:
     void slideClicked(int slideIndex);
     void addSlideRequested();
+    void duplicateRequested(int slideIndex);
+    void deleteRequested(int slideIndex);
+    void reorderRequested(int fromIndex, int toIndex);
 
 private:
     QScrollArea*                          m_scroll    { nullptr };

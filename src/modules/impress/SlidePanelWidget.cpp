@@ -7,8 +7,40 @@
 
 #include <QPushButton>
 #include <QFrame>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 
 namespace NativeOffice {
+
+// ── Drop-enabled list container ──────────────────────────────────────────────
+// Accepts thumbnail drags (started in SlideThumbnailWidget) and forwards the
+// resolved drop index to the owning SlidePanelWidget.
+class ThumbListContainer : public QWidget {
+public:
+    explicit ThumbListContainer(SlidePanelWidget* panel, QWidget* parent = nullptr)
+        : QWidget(parent), m_panel(panel) {
+        setAcceptDrops(true);
+    }
+protected:
+    void dragEnterEvent(QDragEnterEvent* e) override {
+        if (e->mimeData()->hasText()) e->acceptProposedAction();
+    }
+    void dragMoveEvent(QDragMoveEvent* e) override {
+        if (e->mimeData()->hasText()) e->acceptProposedAction();
+    }
+    void dropEvent(QDropEvent* e) override {
+        if (!e->mimeData()->hasText()) return;
+        bool ok = false;
+        const int from = e->mimeData()->text().toInt(&ok);
+        if (!ok) return;
+        const int to = m_panel->dropIndexForY(e->position().toPoint().y());
+        e->acceptProposedAction();
+        emit m_panel->reorderRequested(from, to);
+    }
+private:
+    SlidePanelWidget* m_panel;
+};
 
 SlidePanelWidget::SlidePanelWidget(QWidget* parent)
     : QWidget(parent)
@@ -31,7 +63,7 @@ SlidePanelWidget::SlidePanelWidget(QWidget* parent)
     auto* sep = new QFrame(this);
     sep->setFrameShape(QFrame::HLine);
     sep->setFixedHeight(1);
-    sep->setStyleSheet("background: rgba(255,255,255,0.10); border: none;");
+    sep->setStyleSheet("background: #E2E4E9; border: none;");
 
     // ── Scroll area of thumbnails ─────────────────────────────────────────
     m_scroll = new QScrollArea(this);
@@ -40,7 +72,7 @@ SlidePanelWidget::SlidePanelWidget(QWidget* parent)
     m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scroll->setFrameShape(QFrame::NoFrame);
 
-    m_listWidget = new QWidget(m_scroll);
+    m_listWidget = new ThumbListContainer(this, m_scroll);
     m_listWidget->setObjectName("thumbListWidget");
     m_listLayout = new QVBoxLayout(m_listWidget);
     m_listLayout->setContentsMargins(0, 8, 0, 8);
@@ -55,7 +87,7 @@ SlidePanelWidget::SlidePanelWidget(QWidget* parent)
 
     setStyleSheet(R"(
 QWidget#slidePanelWidget {
-    background-color: #2C3140;
+    background-color: #F3F4F6;
 }
 QPushButton#addSlideBtn {
     background-color: #E8372A;
@@ -93,6 +125,22 @@ void SlidePanelWidget::addSlide(int slideIndex, SlideScene* scene) {
 
     connect(thumb, &SlideThumbnailWidget::clicked,
             this,  &SlidePanelWidget::slideClicked);
+    connect(thumb, &SlideThumbnailWidget::duplicateRequested,
+            this,  &SlidePanelWidget::duplicateRequested);
+    connect(thumb, &SlideThumbnailWidget::deleteRequested,
+            this,  &SlidePanelWidget::deleteRequested);
+    connect(thumb, &SlideThumbnailWidget::addRequested,
+            this,  &SlidePanelWidget::addSlideRequested);
+}
+
+int SlidePanelWidget::dropIndexForY(int y) const {
+    // Find the thumbnail whose vertical center is closest to the drop point
+    for (int i = 0; i < static_cast<int>(m_thumbnails.size()); ++i) {
+        const QRect geo = m_thumbnails[i]->geometry();
+        if (y < geo.center().y())
+            return i;
+    }
+    return static_cast<int>(m_thumbnails.size()) - 1;
 }
 
 void SlidePanelWidget::refreshSlide(int slideIndex) {

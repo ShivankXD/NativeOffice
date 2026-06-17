@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// SlideScene.h  (Sprint 5)
+// SlideScene.h  (Sprint 5 → Sprint 12)
 // QGraphicsScene subclass that renders one presentation slide.
 //
 // Slide dimensions: 960 × 540 px  (16:9 at 1x scale).
@@ -11,9 +11,14 @@
 //   TextBox   – next click inserts an editable QGraphicsTextItem
 //   Rectangle – next drag inserts a QGraphicsRectItem
 //   Ellipse   – next drag inserts a QGraphicsEllipseItem
+//   Image     – inserted directly via insertImage(), no drag needed
+//
+// Selected items show resize handles (corners) and a rotate handle. Handles
+// are plain QGraphicsScene items (not children of the target) so coordinate
+// math stays in scene space.
 //
 // Public signals:
-//   sceneModified()  – emitted after any item add/move/edit
+//   sceneModified()  – emitted after any item add/move/edit/resize/rotate
 //   insertModeLeft() – emitted after a shape is placed (so toolbar can reset)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -28,6 +33,7 @@ class QGraphicsItem;
 class QGraphicsRectItem;
 class QGraphicsEllipseItem;
 class QGraphicsTextItem;
+class QGraphicsPixmapItem;
 
 namespace NativeOffice {
 
@@ -36,6 +42,13 @@ enum class InsertMode {
     TextBox,
     Rectangle,
     Ellipse,
+    Image,
+};
+
+class SlideHandleItem;
+
+enum class HandleRole {
+    TopLeft, Top, TopRight, Right, BottomRight, Bottom, BottomLeft, Left, Rotate
 };
 
 class SlideScene : public QGraphicsScene {
@@ -58,29 +71,61 @@ public:
     void setInsertMode(InsertMode mode);
     [[nodiscard]] InsertMode insertMode() const noexcept { return m_insertMode; }
 
-    // ── Convenience: add default title + subtitle placeholders ────────────
+    // Insert an image (PNG bytes) centered on the slide
+    void insertImage(const QByteArray& pngData);
+
+    // ── Convenience: add default placeholders for a given layout ──────────
     void addDefaultPlaceholders();
+    void applyLayout(SlideLayout layout);
+
+    // ── Text formatting (operates on the currently focused text item) ─────
+    [[nodiscard]] QGraphicsTextItem* activeTextItem() const;
+    void deleteSelectedItem();
+
+    // ── Entrance animation on the selected item (Sprint 13) ───────────────
+    // Animation is stored on each QGraphicsItem via data(AnimationKey) so the
+    // slide-show window can read it back without index correlation.
+    static constexpr int AnimationKey = 0;
+    void setSelectedAnimation(ItemAnimation anim);
+    [[nodiscard]] ItemAnimation selectedAnimation() const;
+    [[nodiscard]] bool hasSelection() const;
 
 signals:
     void sceneModified();
     void insertModeLeft();
+    void selectionInfoChanged();   // selection changed -> ribbon should re-sync
 
 protected:
     void mousePressEvent  (QGraphicsSceneMouseEvent* event) override;
     void mouseMoveEvent   (QGraphicsSceneMouseEvent* event) override;
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
+    void keyPressEvent    (QKeyEvent* event) override;
+
+private slots:
+    void onSelectionChanged();
 
 private:
-    void addTextBox  (const QPointF& pos, const QString& placeholder = {}, qreal fontSize = 14.0);
-    void addRectangle(const QRectF&  rect);
-    void addEllipse  (const QRectF&  rect);
+    QGraphicsTextItem*    addTextBox  (const QPointF& pos, const QString& placeholder = {}, qreal fontSize = 14.0);
+    QGraphicsRectItem*    addRectangle(const QRectF&  rect);
+    QGraphicsEllipseItem* addEllipse  (const QRectF&  rect);
+    QGraphicsItem*        addImageItem(const QRectF& rect, const QByteArray& pngData);
 
     // Returns the slide background rect item (always the first item added)
     QGraphicsRectItem* backgroundItem() const;
 
-    InsertMode    m_insertMode  { InsertMode::None };
-    QPointF       m_dragStart;
-    QGraphicsItem* m_dragItem   { nullptr };   // temporary during drag
+    void rebuildHandles();
+    void clearHandles();
+    void resizeTargetTo(QGraphicsItem* target, HandleRole role, const QPointF& scenePos);
+
+    InsertMode     m_insertMode  { InsertMode::None };
+    QPointF        m_dragStart;
+    QGraphicsItem* m_dragItem    { nullptr };   // temporary during drag
+
+    std::vector<SlideHandleItem*> m_handles;
+    QGraphicsItem*                m_handleTarget { nullptr };
+    QGraphicsTextItem*            m_lastTextItem { nullptr };
+
+    friend class SlideHandleItem;
 };
 
 } // namespace NativeOffice

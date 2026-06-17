@@ -36,10 +36,16 @@ public:
 
 signals:
     void clicked(int slideIndex);
+    void duplicateRequested(int slideIndex);
+    void deleteRequested(int slideIndex);
+    void addRequested();
 
 protected:
     void paintEvent  (QPaintEvent* event) override;
-    void mousePressEvent(QMouseEvent* event) override;
+    void mousePressEvent  (QMouseEvent* event) override;
+    void mouseMoveEvent   (QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void contextMenuEvent (QContextMenuEvent* event) override;
     void enterEvent  (QEnterEvent* event) override;
     void leaveEvent  (QEvent*      event) override;
 
@@ -49,6 +55,8 @@ private:
     QPixmap    m_pixmap;
     bool       m_active     { false };
     bool       m_hovered    { false };
+    QPoint     m_pressPos;
+    bool       m_dragging   { false };
 };
 
 } // namespace NativeOffice
