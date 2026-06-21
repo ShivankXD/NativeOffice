@@ -25,6 +25,14 @@
 #include <QSplitter>
 #include <QTextEdit>
 #include <QLabel>
+#include <QListWidget>
+#include <QPushButton>
+#include <QInputDialog>
+#include <QDialog>
+#include <QScrollArea>
+#include <QGridLayout>
+#include <QToolButton>
+#include <QIcon>
 #include <QPixmap>
 #include <QSizePolicy>
 #include <QMessageBox>
@@ -191,6 +199,7 @@ void ImpressModule::buildUi() {
     bodyLayout->addWidget(m_leftTabs);
     bodyLayout->addWidget(sep);
     bodyLayout->addWidget(m_canvasSplitter, 1);
+    bodyLayout->addWidget(buildCommentsPanel());
 
     // ── Status bar ───────────────────────────────────────────────────────
     m_statusBar = new ImpressStatusBar(this);
@@ -248,6 +257,12 @@ void ImpressModule::buildUi() {
     connect(m_ribbon, &ImpressRibbon::transitionSelected,      this, &ImpressModule::applyTransitionToCurrentSlide);
     connect(m_ribbon, &ImpressRibbon::transitionApplyAllRequested, this, &ImpressModule::applyTransitionToAllSlides);
     connect(m_ribbon, &ImpressRibbon::animationSelected,       this, &ImpressModule::applyAnimationToSelection);
+    connect(m_ribbon, &ImpressRibbon::slideAnimationSelected, this, [this](SlideAnimation a) {
+        if (m_currentIdx < 0 || m_currentIdx >= static_cast<int>(m_slideData.size())) return;
+        m_slideData[m_currentIdx].slideAnimation = a;
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        commitUndoStep();
+    });
     connect(m_ribbon, &ImpressRibbon::insertImageRequested,    this, &ImpressModule::insertImageFromFile);
     connect(m_ribbon, &ImpressRibbon::insertTableRequested, this, [this](int rows, int cols) {
         if (m_currentIdx < 0) return;
@@ -289,6 +304,12 @@ void ImpressModule::buildUi() {
         m_notesEdit->setVisible(m_notesVisible);
     });
 
+    connect(m_ribbon, &ImpressRibbon::commentsToggleRequested, this, [this] {
+        m_commentsVisible = !m_commentsVisible;
+        m_commentsPanel->setVisible(m_commentsVisible);
+        if (m_commentsVisible) refreshComments();
+    });
+
     connect(m_ribbon, &ImpressRibbon::designColorSelected, this, [this](const QColor& c) {
         if (m_currentIdx < 0) return;
         auto* scene = m_scenes[m_currentIdx];
@@ -323,6 +344,7 @@ void ImpressModule::buildUi() {
         if (!m_dirty) { m_dirty = true; emit documentModified(); }
         commitUndoStep();
     };
+    connect(m_ribbon, &ImpressRibbon::templatesRequested, this, &ImpressModule::showTemplatesGallery);
     connect(m_ribbon, &ImpressRibbon::designColorAllRequested, this,
             [applyBgToAll](const QColor& c) { applyBgToAll(c, QColor()); });
     connect(m_ribbon, &ImpressRibbon::designThemeAllRequested, this,
@@ -497,6 +519,215 @@ QWidget* ImpressModule::buildBrandBar() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Comments panel — per-slide review comments (right dock, toggled from Review)
+// ─────────────────────────────────────────────────────────────────────────────
+QWidget* ImpressModule::buildCommentsPanel() {
+    m_commentsPanel = new QWidget(this);
+    m_commentsPanel->setObjectName("impressComments");
+    m_commentsPanel->setFixedWidth(232);
+    m_commentsPanel->setVisible(false);
+    m_commentsPanel->setStyleSheet(
+        "QWidget#impressComments { background:#F3F4F6; border-left:1px solid #D7DAE0; }");
+
+    auto* v = new QVBoxLayout(m_commentsPanel);
+    v->setContentsMargins(8, 8, 8, 8);
+    v->setSpacing(6);
+
+    auto* title = new QLabel("Comments", m_commentsPanel);
+    title->setStyleSheet("font-weight:600; font-size:13px; color:#1C1E26;");
+
+    m_commentList = new QListWidget(m_commentsPanel);
+    m_commentList->setWordWrap(true);
+    m_commentList->setStyleSheet("QListWidget{background:#FFFFFF; border:1px solid #D7DAE0; "
+                                 "border-radius:6px; font-size:12px;}");
+
+    auto* row = new QHBoxLayout;
+    auto* addBtn = new QPushButton("New", m_commentsPanel);
+    auto* delBtn = new QPushButton("Delete", m_commentsPanel);
+    row->addWidget(addBtn);
+    row->addWidget(delBtn);
+
+    v->addWidget(title);
+    v->addWidget(m_commentList, 1);
+    v->addLayout(row);
+
+    connect(addBtn, &QPushButton::clicked, this, [this] {
+        if (m_currentIdx < 0) return;
+        bool ok = false;
+        const QString t = QInputDialog::getMultiLineText(this, "New Comment", "Comment:", "", &ok);
+        if (!ok || t.trimmed().isEmpty()) return;
+        m_slideData[m_currentIdx].comments.push_back({ "You", t.trimmed() });
+        refreshComments();
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        commitUndoStep();
+    });
+    connect(delBtn, &QPushButton::clicked, this, [this] {
+        if (m_currentIdx < 0) return;
+        const int r = m_commentList->currentRow();
+        auto& cs = m_slideData[m_currentIdx].comments;
+        if (r < 0 || r >= static_cast<int>(cs.size())) return;
+        cs.erase(cs.begin() + r);
+        refreshComments();
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        commitUndoStep();
+    });
+
+    return m_commentsPanel;
+}
+
+void ImpressModule::refreshComments() {
+    if (!m_commentList) return;
+    m_commentList->clear();
+    if (m_currentIdx < 0 || m_currentIdx >= static_cast<int>(m_slideData.size())) return;
+    for (const auto& cm : m_slideData[m_currentIdx].comments) {
+        auto* item = new QListWidgetItem(QString("%1: %2").arg(cm.author, cm.text));
+        item->setToolTip(cm.text);
+        m_commentList->addItem(item);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Templates — ~24 ready-made slide designs (background + title/subtitle + accent)
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+std::vector<SlideData> builtinTemplates() {
+    auto txt = [](double x, double y, double w, double h, const QString& t,
+                  int sz, const QString& col, bool bold, const QString& align) {
+        SlideItem s;
+        s.type     = SlideItemType::TextBox;
+        s.rect     = QRectF(x, y, w, h);
+        s.text     = t;
+        s.fontSize = sz;
+        s.penColor = QColor(col);
+        s.html = QString("<p align=\"%1\" style=\"margin:0; font-size:%2pt; color:%3;\">%4%5%6</p>")
+                     .arg(align).arg(sz).arg(col)
+                     .arg(bold ? "<b>" : "", t, bold ? "</b>" : "");
+        return s;
+    };
+    auto shp = [](double x, double y, double w, double h, ShapeKind k, const QString& fill) {
+        SlideItem s;
+        s.type      = SlideItemType::Shape;
+        s.shapeKind = k;
+        s.rect      = QRectF(x, y, w, h);
+        s.fillColor = QColor(fill);
+        s.penColor  = QColor(fill);
+        s.penWidth  = 0.0;
+        return s;
+    };
+
+    struct Pal { const char* top; const char* bot; const char* title; const char* body; const char* accent; };
+    const Pal pals[] = {
+        { "#0F172A", "#1E293B", "#FFFFFF", "#CBD5E1", "#38BDF8" },
+        { "#FFFFFF", "#DBEAFE", "#1E3A8A", "#334155", "#2563EB" },
+        { "#FEF3C7", "#FDE68A", "#7C2D12", "#92400E", "#EA580C" },
+        { "#ECFDF5", "#A7F3D0", "#064E3B", "#065F46", "#10B981" },
+        { "#FDF2F8", "#FBCFE8", "#831843", "#9D174D", "#DB2777" },
+        { "#1A1F2E", "#2C3140", "#FFFFFF", "#C6CAD3", "#E8372A" },
+        { "#F5F3FF", "#DDD6FE", "#4C1D95", "#5B21B6", "#7C3AED" },
+        { "#FFFFFF", "#F1F5F9", "#0F172A", "#475569", "#0EA5E9" },
+        { "#082F49", "#0C4A6E", "#E0F2FE", "#BAE6FD", "#38BDF8" },
+        { "#1C1917", "#292524", "#FAFAF9", "#D6D3D1", "#F59E0B" },
+        { "#022C22", "#064E3B", "#ECFDF5", "#A7F3D0", "#34D399" },
+        { "#4A044E", "#701A75", "#FAE8FF", "#F5D0FE", "#E879F9" },
+    };
+
+    std::vector<SlideData> out;
+    for (const auto& p : pals) {
+        // Style A — centred title on a gradient, accent bar along the bottom.
+        {
+            SlideData d;
+            d.background  = QColor(p.top);
+            d.background2 = QColor(p.bot);
+            d.items.push_back(shp(0, 472, 960, 68, ShapeKind::Rectangle, p.accent));
+            d.items.push_back(txt(120, 168, 720, 90, "Presentation Title", 44, p.title, true, "center"));
+            d.items.push_back(txt(160, 286, 640, 50, "Your subtitle goes here", 22, p.body, false, "center"));
+            out.push_back(d);
+        }
+        // Style B — left-aligned heading, solid fill, vertical accent bar.
+        {
+            SlideData d;
+            d.background = QColor(p.top);
+            d.items.push_back(shp(70, 150, 12, 240, ShapeKind::Rectangle, p.accent));
+            d.items.push_back(txt(108, 158, 720, 90, "Section Heading", 40, p.title, true, "left"));
+            d.items.push_back(txt(108, 268, 700, 150,
+                                  "Add your key points or a short description here.", 20, p.body, false, "left"));
+            out.push_back(d);
+        }
+    }
+    return out;
+}
+} // namespace
+
+void ImpressModule::showTemplatesGallery() {
+    const std::vector<SlideData> templates = builtinTemplates();
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Choose a Template");
+    dlg.resize(840, 580);
+
+    auto* scroll = new QScrollArea(&dlg);
+    scroll->setWidgetResizable(true);
+    auto* container = new QWidget;
+    auto* grid = new QGridLayout(container);
+    grid->setSpacing(12);
+    grid->setContentsMargins(12, 12, 12, 12);
+
+    int col = 0, row = 0;
+    for (const SlideData& tpl : templates) {
+        SlideScene scene;
+        scene.loadFromData(tpl);
+        QPixmap pm(256, 144);
+        pm.fill(Qt::white);
+        {
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setRenderHint(QPainter::SmoothPixmapTransform);
+            p.setRenderHint(QPainter::TextAntialiasing);
+            scene.render(&p, QRectF(0, 0, 256, 144),
+                         QRectF(0, 0, SlideScene::SLIDE_W, SlideScene::SLIDE_H));
+        }
+
+        auto* btn = new QToolButton(container);
+        btn->setIcon(QIcon(pm));
+        btn->setIconSize(QSize(256, 144));
+        btn->setFixedSize(268, 160);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setStyleSheet("QToolButton{border:1px solid #D7DAE0; border-radius:6px; background:#fff;}"
+                           "QToolButton:hover{border:2px solid #E8372A;}");
+        const SlideData chosen = tpl;
+        connect(btn, &QToolButton::clicked, &dlg, [this, &dlg, chosen] {
+            applyTemplate(chosen);
+            dlg.accept();
+        });
+        grid->addWidget(btn, row, col);
+        if (++col == 3) { col = 0; ++row; }
+    }
+
+    scroll->setWidget(container);
+    auto* v = new QVBoxLayout(&dlg);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->addWidget(scroll);
+    dlg.exec();
+}
+
+void ImpressModule::applyTemplate(const SlideData& tpl) {
+    if (m_currentIdx < 0 || m_currentIdx >= static_cast<int>(m_slideData.size())) return;
+
+    SlideData d = tpl;
+    // Keep slide-level metadata the user already set; replace only the design.
+    d.notes          = m_slideData[m_currentIdx].notes;
+    d.transition     = m_slideData[m_currentIdx].transition;
+    d.slideAnimation = m_slideData[m_currentIdx].slideAnimation;
+    d.comments       = m_slideData[m_currentIdx].comments;
+
+    m_slideData[m_currentIdx] = d;
+    m_scenes[m_currentIdx]->loadFromData(d);
+    m_slidePanel->refreshSlide(m_currentIdx);
+    if (!m_dirty) { m_dirty = true; emit documentModified(); }
+    commitUndoStep();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Insert a ready-made text box (WordArt / Symbol / Slide Number / Date & Time)
 // ─────────────────────────────────────────────────────────────────────────────
 void ImpressModule::insertPresetText(const QString& text, double fontSize,
@@ -534,6 +765,14 @@ void ImpressModule::createSlide(const SlideData& data) {
         }
         if (!m_ignoreChange && !m_restoringUndo)
             m_undoDebounce->start();
+    });
+
+    // Non-visual changes (e.g. setting an object animation via right-click)
+    // don't fire QGraphicsScene::changed, so track them via sceneModified too.
+    connect(scene, &SlideScene::sceneModified, this, [this] {
+        if (m_ignoreChange) return;
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        if (!m_restoringUndo) m_undoDebounce->start();
     });
 
     // Reflect the current selection's formatting in the ribbon
@@ -615,6 +854,7 @@ void ImpressModule::switchToSlide(int index) {
     m_statusBar->setSlideInfo(index, static_cast<int>(m_scenes.size()));
 
     m_slidePanel->refreshSlide(index);   // force an immediate thumbnail refresh
+    refreshComments();
 }
 
 void ImpressModule::duplicateCurrentSlide() {
@@ -1726,6 +1966,39 @@ SlideTransition transitionFromString(const QString& s) {
     return SlideTransition::None;
 }
 
+QString slideAnimationToString(SlideAnimation a) {
+    switch (a) {
+    case SlideAnimation::FadeIn:      return "fadeIn";
+    case SlideAnimation::ZoomIn:      return "zoomIn";
+    case SlideAnimation::WhirlIn:     return "whirlIn";
+    case SlideAnimation::FlyInLeft:   return "flyInLeft";
+    case SlideAnimation::FlyInRight:  return "flyInRight";
+    case SlideAnimation::FlyInTop:    return "flyInTop";
+    case SlideAnimation::FlyInBottom: return "flyInBottom";
+    case SlideAnimation::Bounce:      return "bounce";
+    case SlideAnimation::RiseUp:      return "riseUp";
+    case SlideAnimation::SpiralIn:    return "spiralIn";
+    case SlideAnimation::Drop:        return "drop";
+    case SlideAnimation::None:
+    default:                          return "none";
+    }
+}
+
+SlideAnimation slideAnimationFromString(const QString& s) {
+    if (s == "fadeIn")      return SlideAnimation::FadeIn;
+    if (s == "zoomIn")      return SlideAnimation::ZoomIn;
+    if (s == "whirlIn")     return SlideAnimation::WhirlIn;
+    if (s == "flyInLeft")   return SlideAnimation::FlyInLeft;
+    if (s == "flyInRight")  return SlideAnimation::FlyInRight;
+    if (s == "flyInTop")    return SlideAnimation::FlyInTop;
+    if (s == "flyInBottom") return SlideAnimation::FlyInBottom;
+    if (s == "bounce")      return SlideAnimation::Bounce;
+    if (s == "riseUp")      return SlideAnimation::RiseUp;
+    if (s == "spiralIn")    return SlideAnimation::SpiralIn;
+    if (s == "drop")        return SlideAnimation::Drop;
+    return SlideAnimation::None;
+}
+
 QString animationToString(ItemAnimation a) {
     switch (a) {
     case ItemAnimation::FadeIn:      return "fadeIn";
@@ -1738,6 +2011,10 @@ QString animationToString(ItemAnimation a) {
     case ItemAnimation::EmphasisPulse: return "emphasisPulse";
     case ItemAnimation::EmphasisSpin:  return "emphasisSpin";
     case ItemAnimation::EmphasisBlink: return "emphasisBlink";
+    case ItemAnimation::ExitFadeOut:   return "exitFadeOut";
+    case ItemAnimation::ExitFlyLeft:   return "exitFlyLeft";
+    case ItemAnimation::ExitFlyRight:  return "exitFlyRight";
+    case ItemAnimation::ExitZoomOut:   return "exitZoomOut";
     case ItemAnimation::None:
     default:                         return "none";
     }
@@ -1754,6 +2031,10 @@ ItemAnimation animationFromString(const QString& s) {
     if (s == "emphasisPulse") return ItemAnimation::EmphasisPulse;
     if (s == "emphasisSpin")  return ItemAnimation::EmphasisSpin;
     if (s == "emphasisBlink") return ItemAnimation::EmphasisBlink;
+    if (s == "exitFadeOut")   return ItemAnimation::ExitFadeOut;
+    if (s == "exitFlyLeft")   return ItemAnimation::ExitFlyLeft;
+    if (s == "exitFlyRight")  return ItemAnimation::ExitFlyRight;
+    if (s == "exitZoomOut")   return ItemAnimation::ExitZoomOut;
     return ItemAnimation::None;
 }
 
@@ -1769,7 +2050,20 @@ QJsonObject ImpressModule::deckToJson() const {
             slideObj["background2"] = slide.background2.name(QColor::HexArgb);
         slideObj["layout"]     = layoutToString(slide.layout);
         slideObj["transition"] = transitionToString(slide.transition);
+        if (slide.slideAnimation != SlideAnimation::None)
+            slideObj["slideAnimation"] = slideAnimationToString(slide.slideAnimation);
         slideObj["notes"]      = slide.notes;
+
+        if (!slide.comments.empty()) {
+            QJsonArray commentsArr;
+            for (const auto& cm : slide.comments) {
+                QJsonObject co;
+                co["author"] = cm.author;
+                co["text"]   = cm.text;
+                commentsArr.append(co);
+            }
+            slideObj["comments"] = commentsArr;
+        }
 
         QJsonArray itemsArray;
         for (const auto& item : slide.items) {
@@ -1850,7 +2144,13 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
             data.background2 = QColor(slideObj["background2"].toString());
         data.layout      = layoutFromString(slideObj["layout"].toString("blank"));
         data.transition  = transitionFromString(slideObj["transition"].toString("none"));
+        data.slideAnimation = slideAnimationFromString(slideObj["slideAnimation"].toString("none"));
         data.notes       = slideObj["notes"].toString();
+
+        for (const auto& cv : slideObj["comments"].toArray()) {
+            const QJsonObject co = cv.toObject();
+            data.comments.push_back({ co["author"].toString(), co["text"].toString() });
+        }
 
         const QJsonArray items = slideObj["items"].toArray();
         for (const auto& itemVal : items) {

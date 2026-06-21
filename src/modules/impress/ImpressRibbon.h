@@ -77,18 +77,21 @@ signals:
 
     void designColorSelected(const QColor& color);
     void designThemeSelected(const QColor& top, const QColor& bottom);
+    void templatesRequested();
     void designColorAllRequested(const QColor& color);
     void designThemeAllRequested(const QColor& top, const QColor& bottom);
 
     void transitionSelected(NativeOffice::SlideTransition transition);
     void transitionApplyAllRequested(NativeOffice::SlideTransition transition);
     void animationSelected(NativeOffice::ItemAnimation animation);
+    void slideAnimationSelected(NativeOffice::SlideAnimation animation);
 
     void slideShowFromBeginningRequested();
     void slideShowFromCurrentRequested();
     void presenterViewRequested();
 
     void notesToggleRequested();
+    void commentsToggleRequested();
 
     void viewModeChanged(NativeOffice::ImpressViewMode mode);
 

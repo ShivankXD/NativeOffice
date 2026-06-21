@@ -813,6 +813,35 @@ void SlideScene::contextMenuEvent(QGraphicsSceneContextMenuEvent* event) {
     QAction* aShadow = menu.addAction("Toggle Shadow");
     connect(aShadow, &QAction::triggered, this, [this] { toggleSelectedShadow(); });
 
+    // ── Animate this object ─────────────────────────────────────────────
+    QMenu* anim = menu.addMenu("Animate");
+    struct An { const char* label; ItemAnimation a; };
+    const An ans[] = {
+        { "None",                ItemAnimation::None },
+        { "Entrance: Fade In",   ItemAnimation::FadeIn },
+        { "Entrance: Fly Left",  ItemAnimation::FlyInLeft },
+        { "Entrance: Fly Right", ItemAnimation::FlyInRight },
+        { "Entrance: Fly Top",   ItemAnimation::FlyInTop },
+        { "Entrance: Fly Bottom",ItemAnimation::FlyInBottom },
+        { "Entrance: Zoom In",   ItemAnimation::ZoomIn },
+        { "Entrance: Spin In",   ItemAnimation::SpinIn },
+        { "Emphasis: Pulse",     ItemAnimation::EmphasisPulse },
+        { "Emphasis: Spin",      ItemAnimation::EmphasisSpin },
+        { "Emphasis: Blink",     ItemAnimation::EmphasisBlink },
+        { "Exit: Fade Out",      ItemAnimation::ExitFadeOut },
+        { "Exit: Fly Left",      ItemAnimation::ExitFlyLeft },
+        { "Exit: Fly Right",     ItemAnimation::ExitFlyRight },
+        { "Exit: Zoom Out",      ItemAnimation::ExitZoomOut },
+    };
+    const ItemAnimation curAnim = static_cast<ItemAnimation>(it->data(AnimationKey).toInt());
+    for (const auto& an : ans) {
+        QAction* a = anim->addAction(an.label);
+        a->setCheckable(true);
+        a->setChecked(an.a == curAnim);
+        const ItemAnimation av = an.a;
+        connect(a, &QAction::triggered, this, [this, av] { setSelectedAnimation(av); });
+    }
+
     if (auto* simg = dynamic_cast<SlideImageItem*>(it)) {
         QAction* aImg = menu.addAction("Image Effects…");
         connect(aImg, &QAction::triggered, this, [this, simg] {

@@ -36,6 +36,7 @@ class QSplitter;
 class QJsonObject;
 class QTabWidget;
 class QTimer;
+class QListWidget;
 
 namespace NativeOffice {
 
@@ -101,6 +102,10 @@ private:
     void buildUi();
     void launchShow(bool presenter);
     QWidget* buildBrandBar();
+    QWidget* buildCommentsPanel();
+    void refreshComments();
+    void showTemplatesGallery();
+    void applyTemplate(const SlideData& tpl);
     void insertPresetText(const QString& text, double fontSize, bool bold, const QColor& color);
     void applyStyles();
     void createSlide(const SlideData& data);   // low-level: allocates scene + thumb
@@ -130,6 +135,9 @@ private:
     QTextEdit*        m_notesEdit { nullptr };
     ImpressStatusBar* m_statusBar { nullptr };
     QSplitter*        m_canvasSplitter { nullptr };
+    QWidget*          m_commentsPanel { nullptr };
+    QListWidget*      m_commentList   { nullptr };
+    bool              m_commentsVisible { false };
 
     // Deck: parallel arrays (scenes own their data; we hold pointers)
     std::vector<SlideScene*> m_scenes;

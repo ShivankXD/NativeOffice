@@ -88,6 +88,24 @@ enum class SlideTransition {
     Blinds,    // vertical blinds reveal the new slide
 };
 
+// ── Whole-slide entrance animation (applied via the Animations tab) ──────────
+// Plays when the slide appears in the show: the entire slide animates in, then
+// settles. Distinct from per-object ItemAnimation and from slide transitions.
+enum class SlideAnimation {
+    None,
+    FadeIn,
+    ZoomIn,
+    WhirlIn,
+    FlyInLeft,
+    FlyInRight,
+    FlyInTop,
+    FlyInBottom,
+    Bounce,
+    RiseUp,
+    SpiralIn,
+    Drop,
+};
+
 // ── Per-object animation (entrance + emphasis), played in slide show ─────────
 enum class ItemAnimation {
     None,
@@ -103,6 +121,11 @@ enum class ItemAnimation {
     EmphasisPulse,
     EmphasisSpin,
     EmphasisBlink,
+    // Exit effects — the object animates away when advancing to the next slide.
+    ExitFadeOut,
+    ExitFlyLeft,
+    ExitFlyRight,
+    ExitZoomOut,
 };
 
 struct SlideItem {
@@ -137,6 +160,12 @@ struct SlideItem {
     std::vector<double>  chartValues;
 };
 
+// ── Review comment attached to a slide ───────────────────────────────────────
+struct SlideComment {
+    QString author;
+    QString text;
+};
+
 struct SlideData {
     QString               title { "Untitled Slide" };
     QColor                background { Qt::white };
@@ -146,8 +175,10 @@ struct SlideData {
     QColor                background2 {};
     SlideLayout            layout { SlideLayout::Blank };
     SlideTransition        transition { SlideTransition::None };
+    SlideAnimation         slideAnimation { SlideAnimation::None };
     QString                notes;
     std::vector<SlideItem> items;
+    std::vector<SlideComment> comments;
 };
 
 } // namespace NativeOffice

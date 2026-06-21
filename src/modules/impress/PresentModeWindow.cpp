@@ -28,6 +28,11 @@ namespace NativeOffice {
 namespace {
 constexpr int kTransitionMs = 500;
 constexpr int kObjectMs     = 600;
+
+bool isExitAnim(ItemAnimation a) {
+    return a == ItemAnimation::ExitFadeOut || a == ItemAnimation::ExitFlyLeft
+        || a == ItemAnimation::ExitFlyRight || a == ItemAnimation::ExitZoomOut;
+}
 }
 
 PresentModeWindow::PresentModeWindow(const std::vector<SlideData>& deck,
@@ -49,6 +54,7 @@ PresentModeWindow::PresentModeWindow(const std::vector<SlideData>& deck,
         scene->loadFromData(data);
         m_scenes.push_back(scene);
         m_transitions.push_back(data.transition);
+        m_slideAnims.push_back(data.slideAnimation);
         m_notes.push_back(data.notes);
     }
 
@@ -334,6 +340,90 @@ void PresentModeWindow::runTransition(const QPixmap& oldPm, const QPixmap& newPm
     m_transitionAnim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
+// ── Whole-slide entrance animation ───────────────────────────────────────────
+namespace {
+double easeOutBounce(double t) {
+    if (t < 1.0 / 2.75)        return 7.5625 * t * t;
+    else if (t < 2.0 / 2.75) { t -= 1.5 / 2.75;  return 7.5625 * t * t + 0.75; }
+    else if (t < 2.5 / 2.75) { t -= 2.25 / 2.75; return 7.5625 * t * t + 0.9375; }
+    else                     { t -= 2.625 / 2.75; return 7.5625 * t * t + 0.984375; }
+}
+}
+
+QPixmap PresentModeWindow::compositeSlideAnim(const QPixmap& oldPm, const QPixmap& newPm,
+                                              SlideAnimation type, double t) const {
+    const QSize sz = size();
+    const int W = sz.width(), H = sz.height();
+    QPixmap out(sz);
+    out.fill(Qt::black);
+    QPainter p(&out);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+
+    if (!oldPm.isNull()) p.drawPixmap(0, 0, oldPm);   // backdrop
+
+    const QPointF c(W / 2.0, H / 2.0);
+    auto centred = [&](double rotDeg, double scale) {
+        QTransform tr;
+        tr.translate(c.x(), c.y());
+        tr.rotate(rotDeg);
+        tr.scale(scale, scale);
+        tr.translate(-c.x(), -c.y());
+        p.setTransform(tr);
+    };
+
+    switch (type) {
+    case SlideAnimation::FadeIn:
+        p.setOpacity(t); p.drawPixmap(0, 0, newPm); break;
+    case SlideAnimation::ZoomIn:
+        p.setOpacity(t); centred(0, 0.2 + 0.8 * t); p.drawPixmap(0, 0, newPm); break;
+    case SlideAnimation::WhirlIn:
+        p.setOpacity(t); centred(-360.0 * (1.0 - t), std::max(0.05, t)); p.drawPixmap(0, 0, newPm); break;
+    case SlideAnimation::SpiralIn:
+        p.setOpacity(t); centred(-720.0 * (1.0 - t), std::max(0.05, t)); p.drawPixmap(0, 0, newPm); break;
+    case SlideAnimation::FlyInLeft:
+        p.drawPixmap(static_cast<int>(-(1.0 - t) * W), 0, newPm); break;
+    case SlideAnimation::FlyInRight:
+        p.drawPixmap(static_cast<int>((1.0 - t) * W), 0, newPm); break;
+    case SlideAnimation::FlyInTop:
+        p.drawPixmap(0, static_cast<int>(-(1.0 - t) * H), newPm); break;
+    case SlideAnimation::FlyInBottom:
+        p.drawPixmap(0, static_cast<int>((1.0 - t) * H), newPm); break;
+    case SlideAnimation::Bounce:
+        p.drawPixmap(0, static_cast<int>(-(1.0 - easeOutBounce(t)) * H), newPm); break;
+    case SlideAnimation::RiseUp:
+        p.setOpacity(t); p.drawPixmap(0, static_cast<int>((1.0 - t) * H * 0.35), newPm); break;
+    case SlideAnimation::Drop: {
+        const double e = 1.0 - (1.0 - t) * (1.0 - t);   // ease-out
+        p.drawPixmap(0, static_cast<int>(-(1.0 - e) * H), newPm); break;
+    }
+    case SlideAnimation::None:
+    default:
+        p.drawPixmap(0, 0, newPm); break;
+    }
+    return out;
+}
+
+void PresentModeWindow::runSlideAnimation(const QPixmap& oldPm, const QPixmap& newPm,
+                                          SlideAnimation type, std::function<void()> onDone) {
+    if (m_transitionAnim) { m_transitionAnim->stop(); m_transitionAnim->deleteLater(); }
+    m_transitionAnim = new QVariantAnimation(this);
+    m_transitionAnim->setStartValue(0.0);
+    m_transitionAnim->setEndValue(1.0);
+    m_transitionAnim->setDuration(kTransitionMs + 150);
+
+    connect(m_transitionAnim, &QVariantAnimation::valueChanged, this,
+            [this, oldPm, newPm, type](const QVariant& v) {
+        if (m_black) return;
+        m_slideLabel->setPixmap(compositeSlideAnim(oldPm, newPm, type, v.toDouble()));
+    });
+    connect(m_transitionAnim, &QVariantAnimation::finished, this,
+            [this, newPm, onDone]() {
+        if (!m_black) m_slideLabel->setPixmap(newPm);
+        if (onDone) onDone();
+    });
+    m_transitionAnim->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
 // ── Per-object entrance animations ───────────────────────────────────────────
 ItemAnimation PresentModeWindow::animOf(QGraphicsItem* item) const {
     return static_cast<ItemAnimation>(item->data(SlideScene::AnimationKey).toInt());
@@ -478,6 +568,65 @@ void PresentModeWindow::finishPendingAnimations() {
     m_orig.clear();
 }
 
+bool PresentModeWindow::sceneHasExitAnimations(SlideScene* scene) const {
+    for (auto* it : scene->items()) {
+        if (it->zValue() < 0) continue;
+        if (isExitAnim(animOf(it))) return true;
+    }
+    return false;
+}
+
+void PresentModeWindow::playExitAnimations(SlideScene* scene, std::function<void()> onDone) {
+    m_animItems.clear();
+    m_orig.clear();
+    for (auto* it : scene->items()) {
+        if (it->zValue() < 0) continue;
+        if (!isExitAnim(animOf(it))) continue;
+        m_orig.insert(it, { it->pos(), it->opacity(), it->scale(), it->rotation() });
+        m_animItems.append(it);
+        if (animOf(it) == ItemAnimation::ExitZoomOut)
+            it->setTransformOriginPoint(it->boundingRect().center());
+    }
+    if (m_animItems.isEmpty()) { if (onDone) onDone(); return; }
+
+    if (m_objectAnim) { m_objectAnim->stop(); m_objectAnim->deleteLater(); }
+    m_objectAnim = new QVariantAnimation(this);
+    m_objectAnim->setStartValue(0.0);
+    m_objectAnim->setEndValue(1.0);
+    m_objectAnim->setDuration(kObjectMs);
+
+    connect(m_objectAnim, &QVariantAnimation::valueChanged, this, [this, scene](const QVariant& v) {
+        const double t = v.toDouble();
+        for (auto* it : m_animItems) {
+            const OrigState& o = m_orig[it];
+            switch (animOf(it)) {
+            case ItemAnimation::ExitFadeOut:
+                it->setOpacity(o.opacity * (1.0 - t));
+                break;
+            case ItemAnimation::ExitFlyLeft:
+                it->setPos(o.pos - QPointF(SlideScene::SLIDE_W * 0.6 * t, 0));
+                it->setOpacity(o.opacity * (1.0 - t));
+                break;
+            case ItemAnimation::ExitFlyRight:
+                it->setPos(o.pos + QPointF(SlideScene::SLIDE_W * 0.6 * t, 0));
+                it->setOpacity(o.opacity * (1.0 - t));
+                break;
+            case ItemAnimation::ExitZoomOut:
+                it->setScale(o.scale * (1.0 - 0.8 * t));
+                it->setOpacity(o.opacity * (1.0 - t));
+                break;
+            default: break;
+            }
+        }
+        if (!m_black) m_slideLabel->setPixmap(renderScene(scene));
+    });
+    connect(m_objectAnim, &QVariantAnimation::finished, this, [this, onDone]() {
+        finishPendingAnimations();   // restore objects so returning to the slide is clean
+        if (onDone) onDone();
+    });
+    m_objectAnim->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
 // ── Navigation ────────────────────────────────────────────────────────────────
 void PresentModeWindow::goTo(int index, bool animate) {
     if (index < 0 || index >= static_cast<int>(m_scenes.size())) return;
@@ -491,7 +640,12 @@ void PresentModeWindow::goTo(int index, bool animate) {
 
     const SlideTransition trans = (index < static_cast<int>(m_transitions.size()))
                                       ? m_transitions[index] : SlideTransition::None;
-    const bool doTransition = animate && !oldPm.isNull() && trans != SlideTransition::None;
+    const SlideAnimation slideAnim = (index < static_cast<int>(m_slideAnims.size()))
+                                      ? m_slideAnims[index] : SlideAnimation::None;
+    const bool doSlideAnim  = animate && slideAnim != SlideAnimation::None;
+    // A whole-slide animation takes the place of a slide transition.
+    const bool doTransition = animate && !doSlideAnim && !oldPm.isNull()
+                              && trans != SlideTransition::None;
     const bool doObjectAnim = animate && sceneHasAnimations(scene);
 
     if (doObjectAnim) setItemsToStart(scene);
@@ -499,7 +653,11 @@ void PresentModeWindow::goTo(int index, bool animate) {
 
     if (m_black) { m_slideLabel->setPixmap(QPixmap()); return; }
 
-    if (doTransition) {
+    if (doSlideAnim) {
+        runSlideAnimation(oldPm, newPm, slideAnim, [this, scene, doObjectAnim] {
+            if (doObjectAnim) playObjectAnimations(scene);
+        });
+    } else if (doTransition) {
         runTransition(oldPm, newPm, trans, [this, scene, doObjectAnim] {
             if (doObjectAnim) playObjectAnimations(scene);
         });
@@ -512,7 +670,13 @@ void PresentModeWindow::goTo(int index, bool animate) {
 }
 
 void PresentModeWindow::next() {
-    if (m_index + 1 < static_cast<int>(m_scenes.size())) goTo(m_index + 1, true);
+    if (m_index + 1 >= static_cast<int>(m_scenes.size())) return;
+    SlideScene* scene = m_scenes[m_index];
+    if (sceneHasExitAnimations(scene)) {
+        playExitAnimations(scene, [this] { goTo(m_index + 1, true); });
+    } else {
+        goTo(m_index + 1, true);
+    }
 }
 
 void PresentModeWindow::prev() {

@@ -59,14 +59,22 @@ private:
     void runTransition(const QPixmap& oldPm, const QPixmap& newPm,
                        SlideTransition type, std::function<void()> onDone);
 
+    QPixmap compositeSlideAnim(const QPixmap& oldPm, const QPixmap& newPm,
+                               SlideAnimation type, double t) const;
+    void runSlideAnimation(const QPixmap& oldPm, const QPixmap& newPm,
+                           SlideAnimation type, std::function<void()> onDone);
+
     [[nodiscard]] bool sceneHasAnimations(SlideScene* scene) const;
+    [[nodiscard]] bool sceneHasExitAnimations(SlideScene* scene) const;
     void setItemsToStart(SlideScene* scene);
     void playObjectAnimations(SlideScene* scene);
+    void playExitAnimations(SlideScene* scene, std::function<void()> onDone);
     void finishPendingAnimations();
     [[nodiscard]] ItemAnimation animOf(QGraphicsItem* item) const;
 
     std::vector<SlideScene*>     m_scenes;        // owned (parented to this)
     std::vector<SlideTransition> m_transitions;
+    std::vector<SlideAnimation>  m_slideAnims;
     std::vector<QString>         m_notes;
     int                          m_index { 0 };
     bool                         m_black { false };

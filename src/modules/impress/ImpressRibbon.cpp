@@ -151,6 +151,15 @@ QIcon glyphIcon(const QString& glyph, int px = 20) {
     return QIcon(pm);
 }
 
+QIcon templatesIcon() {
+    return paintIcon([](QPainter& p) {
+        p.drawRoundedRect(QRectF(6, 8, 12, 10), 1.5, 1.5);
+        p.drawRoundedRect(QRectF(22, 8, 12, 10), 1.5, 1.5);
+        p.drawRoundedRect(QRectF(6, 22, 12, 10), 1.5, 1.5);
+        p.drawRoundedRect(QRectF(22, 22, 12, 10), 1.5, 1.5);
+    });
+}
+
 QIcon tableIcon() {
     return paintIcon([](QPainter& p) {
         p.drawRect(QRectF(7, 9, 26, 22));
@@ -412,6 +421,66 @@ QIcon animIcon(ItemAnimation a) { return paintIcon([a](QPainter& p) {
         p.drawLine(QPointF(8, 20), QPointF(32, 20));
         p.drawLine(QPointF(12, 12), QPointF(28, 28));
         p.drawLine(QPointF(28, 12), QPointF(12, 28)); break;
+    case ItemAnimation::ExitFadeOut: {
+        QPen pen = p.pen(); pen.setStyle(Qt::DashLine); p.setPen(pen);
+        p.drawRoundedRect(QRectF(11, 11, 18, 18), 2, 2); break;
+    }
+    case ItemAnimation::ExitFlyLeft:
+        p.drawRoundedRect(QRectF(18, 14, 12, 12), 2, 2);
+        p.drawLine(QPointF(16, 20), QPointF(5, 20));
+        head(QPolygonF() << QPointF(9, 16) << QPointF(4, 20) << QPointF(9, 24)); break;
+    case ItemAnimation::ExitFlyRight:
+        p.drawRoundedRect(QRectF(10, 14, 12, 12), 2, 2);
+        p.drawLine(QPointF(24, 20), QPointF(35, 20));
+        head(QPolygonF() << QPointF(31, 16) << QPointF(36, 20) << QPointF(31, 24)); break;
+    case ItemAnimation::ExitZoomOut:
+        p.drawRoundedRect(QRectF(13, 13, 14, 14), 1.5, 1.5);
+        p.drawRoundedRect(QRectF(7, 7, 26, 26), 2, 2); break;
+    }
+}); }
+
+// Whole-slide animation icons: a slide outline plus an effect indicator.
+QIcon slideAnimIcon(SlideAnimation a) { return paintIcon([a](QPainter& p) {
+    auto slide = [&] { p.drawRoundedRect(QRectF(9, 12, 22, 16), 2, 2); };
+    auto head  = [&](const QPolygonF& h) { p.setBrush(kIconColor); p.setPen(Qt::NoPen); p.drawPolygon(h); };
+    switch (a) {
+    case SlideAnimation::None:
+        p.drawLine(QPointF(12, 20), QPointF(28, 20)); break;
+    case SlideAnimation::FadeIn: {
+        QPen pen = p.pen(); pen.setStyle(Qt::DashLine); p.setPen(pen); slide(); break;
+    }
+    case SlideAnimation::ZoomIn:
+        p.drawRoundedRect(QRectF(7, 10, 26, 20), 2, 2);
+        p.drawRoundedRect(QRectF(15, 16, 10, 8), 1, 1); break;
+    case SlideAnimation::WhirlIn: {
+        QPainterPath path; path.arcMoveTo(QRectF(11, 11, 18, 18), 90);
+        path.arcTo(QRectF(11, 11, 18, 18), 90, 300); p.drawPath(path);
+        head(QPolygonF() << QPointF(18, 7) << QPointF(25, 10) << QPointF(19, 15)); break;
+    }
+    case SlideAnimation::SpiralIn:
+        p.drawArc(QRectF(9, 9, 22, 22), 0, 360 * 16);
+        p.drawArc(QRectF(14, 14, 12, 12), 30 * 16, 300 * 16); break;
+    case SlideAnimation::FlyInLeft:
+        slide(); p.drawLine(QPointF(3, 20), QPointF(8, 20));
+        head(QPolygonF() << QPointF(6, 17) << QPointF(10, 20) << QPointF(6, 23)); break;
+    case SlideAnimation::FlyInRight:
+        slide(); p.drawLine(QPointF(37, 20), QPointF(32, 20));
+        head(QPolygonF() << QPointF(34, 17) << QPointF(30, 20) << QPointF(34, 23)); break;
+    case SlideAnimation::FlyInTop:
+        slide(); p.drawLine(QPointF(20, 3), QPointF(20, 8));
+        head(QPolygonF() << QPointF(17, 6) << QPointF(20, 10) << QPointF(23, 6)); break;
+    case SlideAnimation::FlyInBottom:
+        slide(); p.drawLine(QPointF(20, 37), QPointF(20, 32));
+        head(QPolygonF() << QPointF(17, 34) << QPointF(20, 30) << QPointF(23, 34)); break;
+    case SlideAnimation::Bounce:
+        slide(); p.drawArc(QRectF(12, 4, 16, 12), 0, 180 * 16);
+        head(QPolygonF() << QPointF(17, 10) << QPointF(20, 14) << QPointF(23, 10)); break;
+    case SlideAnimation::RiseUp:
+        slide(); p.drawLine(QPointF(20, 36), QPointF(20, 30));
+        head(QPolygonF() << QPointF(16, 33) << QPointF(20, 28) << QPointF(24, 33)); break;
+    case SlideAnimation::Drop:
+        slide(); p.drawLine(QPointF(20, 2), QPointF(20, 9));
+        head(QPolygonF() << QPointF(16, 6) << QPointF(20, 11) << QPointF(24, 6)); break;
     }
 }); }
 
@@ -871,6 +940,13 @@ QWidget* ImpressRibbon::buildDesignTab() {
     layout->addWidget(makeGroup("Themes", { themeRow }));
     layout->addWidget(makeSeparator());
 
+    // ── Templates ───────────────────────────────────────────────────────
+    auto* btnTemplates = makeBigBtn(templatesIcon(), "Templates",
+                                    "Browse and apply a ready-made slide design");
+    connect(btnTemplates, &QToolButton::clicked, this, &ImpressRibbon::templatesRequested);
+    layout->addWidget(makeGroup("Templates", { btnTemplates }));
+    layout->addWidget(makeSeparator());
+
     // ── Background swatches + custom ────────────────────────────────────
     auto* swatchRow = new QWidget(tab);
     auto* swl = new QHBoxLayout(swatchRow);
@@ -974,7 +1050,9 @@ QWidget* ImpressRibbon::buildTransitionsTab() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Animations tab — per-object entrance effects
+// Animations tab — whole-slide entrance animations. Clicking one applies it to
+// the CURRENT slide (the slide animates in when it appears in the show). To
+// animate a single object, right-click it on the canvas → "Animate".
 // ─────────────────────────────────────────────────────────────────────────────
 QWidget* ImpressRibbon::buildAnimationsTab() {
     auto* tab = new QWidget(this);
@@ -982,43 +1060,30 @@ QWidget* ImpressRibbon::buildAnimationsTab() {
     layout->setContentsMargins(8, 4, 8, 2);
     layout->setSpacing(0);
 
-    struct AItem { const char* label; const char* glyph; const char* tip; ItemAnimation a; };
-    const AItem items[] = {
-        { "None",        "—",  "No entrance animation",             ItemAnimation::None },
-        { "Fade\nIn",    "◐",  "Object fades in",                   ItemAnimation::FadeIn },
-        { "Fly\nLeft",   "➡",  "Flies in from the left",            ItemAnimation::FlyInLeft },
-        { "Fly\nRight",  "⬅",  "Flies in from the right",           ItemAnimation::FlyInRight },
-        { "Fly\nTop",    "⬇",  "Flies in from the top",             ItemAnimation::FlyInTop },
-        { "Fly\nBottom", "⬆",  "Flies in from the bottom",          ItemAnimation::FlyInBottom },
-        { "Zoom\nIn",    "⌕",  "Zooms in from its centre",          ItemAnimation::ZoomIn },
-        { "Spin\nIn",    "↻",  "Spins and scales in",               ItemAnimation::SpinIn },
+    struct SAItem { const char* label; const char* tip; SlideAnimation a; };
+    const SAItem items[] = {
+        { "None",       "No slide animation",            SlideAnimation::None },
+        { "Fade\nIn",   "Whole slide fades in",          SlideAnimation::FadeIn },
+        { "Zoom\nIn",   "Whole slide zooms in",          SlideAnimation::ZoomIn },
+        { "Whirl\nIn",  "Whirlwind in (rotate + scale)", SlideAnimation::WhirlIn },
+        { "Spiral",     "Spirals in",                    SlideAnimation::SpiralIn },
+        { "Fly\nLeft",  "Slide flies in from the left",  SlideAnimation::FlyInLeft },
+        { "Fly\nRight", "Slide flies in from the right", SlideAnimation::FlyInRight },
+        { "Fly\nTop",   "Slide flies in from the top",   SlideAnimation::FlyInTop },
+        { "Fly\nBottom","Slide flies in from the bottom",SlideAnimation::FlyInBottom },
+        { "Bounce",     "Drops in with a bounce",        SlideAnimation::Bounce },
+        { "Rise\nUp",   "Rises up while fading in",      SlideAnimation::RiseUp },
+        { "Drop",       "Drops down into place",         SlideAnimation::Drop },
     };
-    QList<QWidget*> aBtns;
+    QList<QWidget*> btns;
     for (const auto& it : items) {
-        auto* b = makeBigBtn(animIcon(it.a), it.label, it.tip);
+        auto* b = makeBigBtn(slideAnimIcon(it.a), it.label, it.tip);
         b->setMinimumWidth(56);
-        const ItemAnimation a = it.a;
-        connect(b, &QToolButton::clicked, this, [this, a]{ emit animationSelected(a); });
-        aBtns.append(b);
+        const SlideAnimation a = it.a;
+        connect(b, &QToolButton::clicked, this, [this, a]{ emit slideAnimationSelected(a); });
+        btns.append(b);
     }
-    layout->addWidget(makeGroup("Entrance (applies to selected object)", aBtns));
-    layout->addWidget(makeSeparator());
-
-    // ── Emphasis effects ────────────────────────────────────────────────
-    const AItem emph[] = {
-        { "Pulse", "\xE2\x97\x89", "Pulses larger then back",  ItemAnimation::EmphasisPulse },
-        { "Spin",  "\xE2\x86\xBB", "Spins a full turn",        ItemAnimation::EmphasisSpin  },
-        { "Blink", "\xE2\x97\x8B", "Blinks to draw attention", ItemAnimation::EmphasisBlink },
-    };
-    QList<QWidget*> eBtns;
-    for (const auto& it : emph) {
-        auto* b = makeBigBtn(animIcon(it.a), it.label, it.tip);
-        b->setMinimumWidth(56);
-        const ItemAnimation a = it.a;
-        connect(b, &QToolButton::clicked, this, [this, a]{ emit animationSelected(a); });
-        eBtns.append(b);
-    }
-    layout->addWidget(makeGroup("Emphasis", eBtns));
+    layout->addWidget(makeGroup("Animate this slide", btns));
     layout->addStretch();
     return tab;
 }
@@ -1058,10 +1123,14 @@ QWidget* ImpressRibbon::buildReviewTab() {
     layout->setContentsMargins(8, 4, 8, 2);
     layout->setSpacing(0);
 
-    auto* btnNotes = makeCmdBtn("🗒  Notes", "Show or hide the speaker notes panel", 88);
+    auto* btnNotes = makeBigBtn(textBoxIcon(), "Speaker\nNotes", "Show or hide the speaker notes panel");
     connect(btnNotes, &QToolButton::clicked, this, &ImpressRibbon::notesToggleRequested);
-
     layout->addWidget(makeGroup("Notes", { btnNotes }));
+    layout->addWidget(makeSeparator());
+
+    auto* btnComments = makeBigBtn(commentsIcon(), "Comments", "Show or hide review comments");
+    connect(btnComments, &QToolButton::clicked, this, &ImpressRibbon::commentsToggleRequested);
+    layout->addWidget(makeGroup("Comments", { btnComments }));
     layout->addStretch();
     return tab;
 }
