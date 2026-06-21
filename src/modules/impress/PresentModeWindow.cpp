@@ -14,6 +14,9 @@
 #include <QGuiApplication>
 #include <QScreen>
 #include <QGraphicsItem>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QtMath>
 #include <algorithm>
 
 namespace NativeOffice {
@@ -132,6 +135,59 @@ QPixmap PresentModeWindow::compositeFrame(const QPixmap& oldPm, const QPixmap& n
         p.drawPixmap(QRect((W - w) / 2, (H - h) / 2, w, h), newPm);
         break;
     }
+    case SlideTransition::Cut:
+        // Hard cut: show the old frame for the first half, then snap to new.
+        p.drawPixmap(0, 0, t < 0.5 ? oldPm : newPm);
+        break;
+    case SlideTransition::Cover: {
+        // New slide slides in from the right, covering the stationary old one.
+        const int dx = static_cast<int>((1.0 - t) * W);
+        p.drawPixmap(0, 0, oldPm);
+        p.drawPixmap(dx, 0, newPm);
+        break;
+    }
+    case SlideTransition::Uncover: {
+        // Old slide slides out to the left, revealing the stationary new one.
+        const int dx = static_cast<int>(t * W);
+        p.drawPixmap(0, 0, newPm);
+        p.drawPixmap(-dx, 0, oldPm);
+        break;
+    }
+    case SlideTransition::Blinds: {
+        // Six vertical blinds: each column reveals the new slide left-to-right.
+        p.drawPixmap(0, 0, oldPm);
+        const int strips = 6;
+        const double stripW = static_cast<double>(W) / strips;
+        for (int i = 0; i < strips; ++i) {
+            const double x = i * stripW;
+            p.setClipRect(QRectF(x, 0, stripW * t, H));
+            p.drawPixmap(0, 0, newPm);
+        }
+        p.setClipping(false);
+        break;
+    }
+    case SlideTransition::Dissolve: {
+        // Deterministic block dissolve: a growing share of an 32×18 grid of
+        // tiles flips to the new slide as t advances.
+        p.drawPixmap(0, 0, oldPm);
+        const int cols = 32, rows = 18;
+        const double cw = static_cast<double>(W) / cols;
+        const double ch = static_cast<double>(H) / rows;
+        unsigned seed = 0x9E3779B9u;
+        for (int r = 0; r < rows; ++r) {
+            for (int c = 0; c < cols; ++c) {
+                seed = seed * 1664525u + 1013904223u;          // LCG
+                const double threshold = (seed >> 8) / 16777216.0;
+                if (threshold <= t) {
+                    const QRectF cell(c * cw, r * ch, cw + 1, ch + 1);
+                    p.setClipRect(cell);
+                    p.drawPixmap(0, 0, newPm);
+                }
+            }
+        }
+        p.setClipping(false);
+        break;
+    }
     case SlideTransition::Fade:
     default:
         p.drawPixmap(0, 0, newPm);
@@ -184,7 +240,7 @@ void PresentModeWindow::setItemsToStart(SlideScene* scene) {
         const ItemAnimation a = animOf(it);
         if (a == ItemAnimation::None) continue;
 
-        m_orig.insert(it, { it->pos(), it->opacity(), it->scale() });
+        m_orig.insert(it, { it->pos(), it->opacity(), it->scale(), it->rotation() });
         m_animItems.append(it);
 
         switch (a) {
@@ -194,11 +250,32 @@ void PresentModeWindow::setItemsToStart(SlideScene* scene) {
         case ItemAnimation::FlyInLeft:
             it->setPos(it->pos() - QPointF(SlideScene::SLIDE_W * 0.6, 0));
             break;
+        case ItemAnimation::FlyInRight:
+            it->setPos(it->pos() + QPointF(SlideScene::SLIDE_W * 0.6, 0));
+            break;
+        case ItemAnimation::FlyInTop:
+            it->setPos(it->pos() - QPointF(0, SlideScene::SLIDE_H * 0.6));
+            break;
+        case ItemAnimation::FlyInBottom:
+            it->setPos(it->pos() + QPointF(0, SlideScene::SLIDE_H * 0.6));
+            break;
         case ItemAnimation::ZoomIn:
             it->setTransformOriginPoint(it->boundingRect().center());
             it->setScale(0.2);
             it->setOpacity(0.0);
             break;
+        case ItemAnimation::SpinIn:
+            it->setTransformOriginPoint(it->boundingRect().center());
+            it->setRotation(-180.0);
+            it->setScale(0.3);
+            it->setOpacity(0.0);
+            break;
+        case ItemAnimation::EmphasisPulse:
+        case ItemAnimation::EmphasisSpin:
+            // Emphasis effects start from the object's natural state.
+            it->setTransformOriginPoint(it->boundingRect().center());
+            break;
+        case ItemAnimation::EmphasisBlink:
         default: break;
         }
     }
@@ -227,9 +304,38 @@ void PresentModeWindow::playObjectAnimations(SlideScene* scene) {
                 it->setPos(start + (o.pos - start) * t);
                 break;
             }
+            case ItemAnimation::FlyInRight: {
+                const QPointF start = o.pos + QPointF(SlideScene::SLIDE_W * 0.6, 0);
+                it->setPos(start + (o.pos - start) * t);
+                break;
+            }
+            case ItemAnimation::FlyInTop: {
+                const QPointF start = o.pos - QPointF(0, SlideScene::SLIDE_H * 0.6);
+                it->setPos(start + (o.pos - start) * t);
+                break;
+            }
+            case ItemAnimation::FlyInBottom: {
+                const QPointF start = o.pos + QPointF(0, SlideScene::SLIDE_H * 0.6);
+                it->setPos(start + (o.pos - start) * t);
+                break;
+            }
             case ItemAnimation::ZoomIn:
                 it->setScale(0.2 + 0.8 * t);
                 it->setOpacity(o.opacity * t);
+                break;
+            case ItemAnimation::SpinIn:
+                it->setRotation(-180.0 * (1.0 - t));
+                it->setScale(0.3 + 0.7 * t);
+                it->setOpacity(o.opacity * t);
+                break;
+            case ItemAnimation::EmphasisPulse:
+                it->setScale(o.scale * (1.0 + 0.3 * std::sin(M_PI * t)));
+                break;
+            case ItemAnimation::EmphasisSpin:
+                it->setRotation(o.rotation + 360.0 * t);
+                break;
+            case ItemAnimation::EmphasisBlink:
+                it->setOpacity(o.opacity * (0.5 + 0.5 * std::cos(2.0 * M_PI * t)));
                 break;
             default: break;
             }
@@ -251,6 +357,7 @@ void PresentModeWindow::finishPendingAnimations() {
         it->setPos(o.pos);
         it->setOpacity(o.opacity);
         it->setScale(o.scale);
+        it->setRotation(o.rotation);
     }
     m_animItems.clear();
     m_orig.clear();
@@ -337,8 +444,38 @@ void PresentModeWindow::keyPressEvent(QKeyEvent* event) {
 
 void PresentModeWindow::mousePressEvent(QMouseEvent* event) {
     if (m_black) { toggleBlack(); return; }
-    if (event->button() == Qt::RightButton) prev();
-    else next();
+    if (event->button() == Qt::RightButton) { prev(); return; }
+
+    // Left click: if it landed on a hyperlinked object, follow the link instead
+    // of advancing the show.
+    if (m_index >= 0 && m_index < static_cast<int>(m_scenes.size())) {
+        SlideScene* scene = m_scenes[m_index];
+        const QSize tsz = size();
+        const qreal aspect = SlideScene::SLIDE_W / SlideScene::SLIDE_H;
+        QRectF dest(0, 0, tsz.width(), tsz.height());
+        if (dest.width() / dest.height() > aspect) {
+            const qreal w = dest.height() * aspect;
+            dest.setLeft((dest.width() - w) / 2.0); dest.setWidth(w);
+        } else {
+            const qreal h = dest.width() / aspect;
+            dest.setTop((dest.height() - h) / 2.0); dest.setHeight(h);
+        }
+        const QPointF cp = event->position();
+        if (dest.contains(cp)) {
+            const qreal sx = (cp.x() - dest.left()) / dest.width()  * SlideScene::SLIDE_W;
+            const qreal sy = (cp.y() - dest.top())  / dest.height() * SlideScene::SLIDE_H;
+            QGraphicsItem* it = scene->itemAt(QPointF(sx, sy), QTransform());
+            while (it && it->parentItem()) it = it->parentItem();
+            if (it) {
+                const QString link = it->data(SlideScene::HyperlinkKey).toString();
+                if (!link.isEmpty()) {
+                    QDesktopServices::openUrl(QUrl::fromUserInput(link));
+                    return;
+                }
+            }
+        }
+    }
+    next();
 }
 
 void PresentModeWindow::resizeEvent(QResizeEvent* event) {

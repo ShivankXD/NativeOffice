@@ -62,9 +62,20 @@ signals:
     void layoutSelected(NativeOffice::SlideLayout layout);
 
     void insertModeChanged(NativeOffice::InsertMode mode);
+    void shapeInsertRequested(NativeOffice::ShapeKind kind);
+    void smartArtRequested(NativeOffice::SmartArtKind kind);
+    void shapeFillRequested(const QColor& color);
+    void shapeOutlineRequested(const QColor& color);
+    void shadowToggleRequested();
+    void insertTableRequested(int rows, int cols);
     void insertImageRequested();
+    void wordArtRequested();
+    void symbolRequested(const QString& symbol);
+    void slideNumberRequested();
+    void dateTimeRequested();
 
     void designColorSelected(const QColor& color);
+    void designThemeSelected(const QColor& top, const QColor& bottom);
 
     void transitionSelected(NativeOffice::SlideTransition transition);
     void transitionApplyAllRequested(NativeOffice::SlideTransition transition);
@@ -93,6 +104,9 @@ private:
     // Flexible-width text command button (fixed height only) — e.g. "New Slide".
     QToolButton* makeCmdBtn(const QString& text, const QString& tooltip,
                             int minWidth, bool checkable = false);
+    // WPS-style large button: icon on top, caption beneath (icon-over-text).
+    QToolButton* makeBigBtn(const QIcon& icon, const QString& text,
+                            const QString& tooltip, bool checkable = false);
     QWidget*     makeSeparator();
     // Wrap a row of controls into a labelled WPS-style ribbon group.
     QWidget*     makeGroup(const QString& name, const QList<QWidget*>& widgets);

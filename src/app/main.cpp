@@ -545,6 +545,32 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
 
     // ── Menu bar ──────────────────────────────────────────────────────────
     auto* mb       = win->menuBar();
+    // Light menu bar so the top of the window reads as a clean branded strip
+    // rather than the old flat-black hero band.
+    mb->setStyleSheet(R"(
+QMenuBar {
+    background-color: #F3F4F6;
+    color: #2C3140;
+    border-bottom: 1px solid #E2E4E9;
+    padding: 2px 6px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+}
+QMenuBar::item {
+    background: transparent;
+    color: #2C3140;
+    padding: 5px 12px;
+    border-radius: 6px;
+}
+QMenuBar::item:selected {
+    background-color: #E7E9EE;
+    color: #1C1E26;
+}
+QMenuBar::item:pressed {
+    background-color: #FCE4E2;
+    color: #C0271C;
+}
+)");
     auto* fileMenu = mb->addMenu("&File");
 
     auto* actNew = fileMenu->addAction("&New Presentation");
@@ -558,6 +584,8 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
     actSaveAs->setShortcut(QKeySequence::SaveAs);
     fileMenu->addSeparator();
     // Sprint 6: Export to PDF
+    auto* actExportPptx = fileMenu->addAction("Save as &PowerPoint (*.pptx)…");
+    actExportPptx->setToolTip("Export this presentation as a PowerPoint .pptx file");
     auto* actExportPdf = fileMenu->addAction("★ Export to PDF…");
     actExportPdf->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     actExportPdf->setToolTip("Export all slides to a PDF file");
@@ -565,12 +593,29 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
     auto* actClose = fileMenu->addAction("&Close");
     actClose->setShortcut(QKeySequence::Close);
 
-    auto* slideShowMenu  = mb->addMenu("&Slide Show");
-    auto* actPlayFromStart = slideShowMenu->addAction("▶ &Start Slide Show");
+    // Slide Show is driven from the ribbon's "Slide Show" tab, so there's no
+    // duplicate top-level menu. We still register F5 / Shift+F5 as window-level
+    // shortcuts so the keyboard flow keeps working.
+    auto* actPlayFromStart = new QAction(win);
     actPlayFromStart->setShortcut(Qt::Key_F5);
+    win->addAction(actPlayFromStart);
+    auto* actPlayFromCurrent = new QAction(win);
+    actPlayFromCurrent->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F5));
+    win->addAction(actPlayFromCurrent);
 
-    mb->addMenu("&View");
-    mb->addMenu("&Help");
+    auto* viewMenu      = mb->addMenu("&View");
+    auto* actViewNormal = viewMenu->addAction("&Normal");
+    auto* actViewOutline = viewMenu->addAction("&Outline");
+    auto* actViewSorter = viewMenu->addAction("Slide &Sorter");
+    viewMenu->addSeparator();
+    auto* actNewSlide   = viewMenu->addAction("New Sli&de");
+    actNewSlide->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
+    auto* actDupSlide   = viewMenu->addAction("Du&plicate Slide");
+
+    auto* helpMenu      = mb->addMenu("&Help");
+    auto* actShortcuts  = helpMenu->addAction("&Keyboard Shortcuts");
+    helpMenu->addSeparator();
+    auto* actAbout      = helpMenu->addAction("&About NativeOffice");
 
     // ── Wire actions ──────────────────────────────────────────────────────
     QObject::connect(actNew, &QAction::triggered, win, []() {
@@ -590,9 +635,58 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
     QObject::connect(actExportPdf, &QAction::triggered, win, [impress]() {
         impress->exportToPdf();
     });
+    QObject::connect(actExportPptx, &QAction::triggered, win, [impress]() {
+        impress->exportToPptx();
+    });
     QObject::connect(actClose, &QAction::triggered, win, &QMainWindow::close);
     QObject::connect(actPlayFromStart, &QAction::triggered, win, [impress]() {
+        impress->switchToSlide(0);
         impress->startSlideShow();
+    });
+    QObject::connect(actPlayFromCurrent, &QAction::triggered, win, [impress]() {
+        impress->startSlideShow();
+    });
+
+    using NativeOffice::ImpressViewMode;
+    QObject::connect(actViewNormal,  &QAction::triggered, win, [impress]() {
+        impress->setViewMode(ImpressViewMode::Normal);
+    });
+    QObject::connect(actViewOutline, &QAction::triggered, win, [impress]() {
+        impress->setViewMode(ImpressViewMode::Outline);
+    });
+    QObject::connect(actViewSorter,  &QAction::triggered, win, [impress]() {
+        impress->setViewMode(ImpressViewMode::SlideSorter);
+    });
+    QObject::connect(actNewSlide, &QAction::triggered, win, [impress]() {
+        impress->addNewSlide();
+    });
+    QObject::connect(actDupSlide, &QAction::triggered, win, [impress]() {
+        impress->duplicateCurrentSlide();
+    });
+
+    QObject::connect(actShortcuts, &QAction::triggered, win, [win]() {
+        QMessageBox::information(win, "Keyboard Shortcuts",
+            "Slide Show\n"
+            "  F5\t\tStart from beginning\n"
+            "  Shift+F5\tStart from current slide\n"
+            "  Esc\t\tExit slide show\n"
+            "  →/Space\tNext slide\n"
+            "  ←/Backspace\tPrevious slide\n"
+            "  B\t\tBlack screen\n\n"
+            "Editing\n"
+            "  Ctrl+S\t\tSave\n"
+            "  Ctrl+Shift+S\tSave As\n"
+            "  Ctrl+M\t\tNew slide\n"
+            "  Ctrl+Z / Ctrl+Y\tUndo / Redo\n"
+            "  Ctrl+Shift+E\tExport to PDF\n"
+            "  Delete\t\tDelete selected object");
+    });
+    QObject::connect(actAbout, &QAction::triggered, win, [win]() {
+        QMessageBox::about(win, "About NativeOffice",
+            "<h3>NativeOffice Impress</h3>"
+            "<p>A high-performance, cross-platform presentation tool.</p>"
+            "<p>Version 0.4.0</p>"
+            "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
     return win;

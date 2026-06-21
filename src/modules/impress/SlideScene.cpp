@@ -7,9 +7,23 @@
 #include <QGraphicsEllipseItem>
 #include <QGraphicsTextItem>
 #include <QGraphicsPixmapItem>
+#include <QGraphicsPathItem>
+#include <QGraphicsDropShadowEffect>
+#include <QPainterPath>
+#include <QPolygonF>
+#include <QStyleOptionGraphicsItem>
+#include <QFocusEvent>
+#include <QTextOption>
+#include <QTextCharFormat>
+#include <QGraphicsSceneContextMenuEvent>
+#include <QMenu>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <algorithm>
 #include <QGraphicsSceneMouseEvent>
 #include <QPen>
 #include <QBrush>
+#include <QLinearGradient>
 #include <QFont>
 #include <QColor>
 #include <QTextCursor>
@@ -32,6 +46,143 @@ public:
     QPixmap original() const { return m_original; }
 private:
     QPixmap m_original;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlideShapeItem — QGraphicsPathItem that remembers its ShapeKind and logical
+// rect so it can rebuild its geometry when resized, and report both back when
+// the scene is serialised.
+// ─────────────────────────────────────────────────────────────────────────────
+class SlideShapeItem : public QGraphicsPathItem {
+public:
+    explicit SlideShapeItem(ShapeKind kind) : m_kind(kind) {}
+    void setRect(const QRectF& r) { m_rect = r; setPath(SlideScene::shapePath(m_kind, r)); }
+    QRectF    rect() const { return m_rect; }
+    ShapeKind kind() const { return m_kind; }
+private:
+    ShapeKind m_kind;
+    QRectF    m_rect;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TableCellItem — one editable cell. Cells display read-only until the table is
+// double-clicked on that cell; on focus loss they revert to read-only so a
+// single click/drag moves the whole table rather than editing a cell.
+// ─────────────────────────────────────────────────────────────────────────────
+class TableCellItem : public QGraphicsTextItem {
+public:
+    using QGraphicsTextItem::QGraphicsTextItem;
+protected:
+    void focusOutEvent(QFocusEvent* e) override {
+        QGraphicsTextItem::focusOutEvent(e);
+        setTextInteractionFlags(Qt::NoTextInteraction);
+        QTextCursor c = textCursor();
+        c.clearSelection();
+        setTextCursor(c);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlideTableItem — a rows×cols grid. Cells are child TableCellItems; the table
+// itself owns the geometry, paints grid lines + a shaded header row, and lays
+// the cells out on resize.
+// ─────────────────────────────────────────────────────────────────────────────
+class SlideTableItem : public QGraphicsRectItem {
+public:
+    SlideTableItem(int rows, int cols, const QRectF& r)
+        : QGraphicsRectItem(r), m_rows(rows), m_cols(cols)
+    {
+        setPen(Qt::NoPen);
+        setBrush(Qt::white);
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < cols; ++col) {
+                auto* c = new TableCellItem(this);
+                QFont f("Segoe UI", 14);
+                if (row == 0) f.setBold(true);
+                c->setFont(f);
+                c->setDefaultTextColor(QColor("#1C1E26"));
+                c->setTextInteractionFlags(Qt::NoTextInteraction);
+                c->setFlag(QGraphicsItem::ItemIsFocusable, true);
+                m_cells.push_back(c);
+            }
+        }
+        relayout();
+    }
+
+    int rows() const { return m_rows; }
+    int cols() const { return m_cols; }
+    const std::vector<TableCellItem*>& cells() const { return m_cells; }
+
+    void setRectAndLayout(const QRectF& r) { setRect(r); relayout(); }
+
+    void relayout() {
+        const QRectF r = rect();
+        const qreal cw = r.width()  / m_cols;
+        const qreal ch = r.height() / m_rows;
+        const qreal pad = 5.0;
+        for (int row = 0; row < m_rows; ++row)
+            for (int col = 0; col < m_cols; ++col) {
+                auto* c = m_cells[row * m_cols + col];
+                c->setTextWidth(std::max(10.0, cw - 2 * pad));
+                c->setPos(r.left() + col * cw + pad, r.top() + row * ch + pad);
+            }
+    }
+
+    std::vector<QString> texts() const {
+        std::vector<QString> t;
+        t.reserve(m_cells.size());
+        for (auto* c : m_cells) t.push_back(c->toPlainText());
+        return t;
+    }
+
+protected:
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* e) override {
+        const QRectF r = rect();
+        const qreal cw = r.width()  / m_cols;
+        const qreal ch = r.height() / m_rows;
+        const int col = std::clamp(static_cast<int>((e->pos().x() - r.left()) / cw), 0, m_cols - 1);
+        const int row = std::clamp(static_cast<int>((e->pos().y() - r.top())  / ch), 0, m_rows - 1);
+        auto* c = m_cells[row * m_cols + col];
+        c->setTextInteractionFlags(Qt::TextEditorInteraction);
+        c->setFocus();
+        QTextCursor cur = c->textCursor();
+        cur.select(QTextCursor::Document);
+        c->setTextCursor(cur);
+        e->accept();
+    }
+
+    void paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*) override {
+        const QRectF r = rect();
+        const qreal cw = r.width()  / m_cols;
+        const qreal ch = r.height() / m_rows;
+
+        p->fillRect(r, Qt::white);
+        p->fillRect(QRectF(r.left(), r.top(), r.width(), ch), QColor("#F0F2F6"));  // header
+
+        QPen grid(QColor("#B9BEC9"));
+        grid.setWidthF(1.0);
+        p->setPen(grid);
+        for (int col = 0; col <= m_cols; ++col) {
+            const qreal x = r.left() + col * cw;
+            p->drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
+        }
+        for (int row = 0; row <= m_rows; ++row) {
+            const qreal y = r.top() + row * ch;
+            p->drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
+        }
+
+        if (isSelected()) {
+            QPen sel(QColor("#E8372A"));
+            sel.setWidthF(1.5);
+            p->setPen(sel);
+            p->setBrush(Qt::NoBrush);
+            p->drawRect(r);
+        }
+    }
+
+private:
+    int m_rows, m_cols;
+    std::vector<TableCellItem*> m_cells;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +301,20 @@ QGraphicsRectItem* SlideScene::backgroundItem() const {
     return nullptr;
 }
 
+// ── Background brush (solid or top→bottom gradient) ─────────────────────────────
+void SlideScene::applyBackgroundBrush() {
+    auto* bg = backgroundItem();
+    if (!bg) return;
+    if (m_bg2.isValid()) {
+        QLinearGradient grad(0, 0, 0, SLIDE_H);
+        grad.setColorAt(0.0, m_bg1);
+        grad.setColorAt(1.0, m_bg2);
+        bg->setBrush(QBrush(grad));
+    } else {
+        bg->setBrush(m_bg1.isValid() ? m_bg1 : QColor(Qt::white));
+    }
+}
+
 // ── Default placeholders ──────────────────────────────────────────────────────
 void SlideScene::addDefaultPlaceholders() {
     // Title
@@ -160,7 +325,12 @@ void SlideScene::addDefaultPlaceholders() {
 
 void SlideScene::applyLayout(SlideLayout layout) {
     m_lastTextItem = nullptr;
-    // Clear all non-background items first
+    // Remove selection handles FIRST. Handles are themselves scene items, so
+    // the bulk delete below would free them — and clearHandles() would then
+    // free the same pointers a second time (heap corruption). Clearing first
+    // empties m_handles and removes the handle items from the scene.
+    clearHandles();
+    // Clear all remaining non-background items
     const QList<QGraphicsItem*> all = items();
     for (auto* it : all) {
         if (it != backgroundItem()) {
@@ -168,7 +338,6 @@ void SlideScene::applyLayout(SlideLayout layout) {
             delete it;
         }
     }
-    clearHandles();
 
     switch (layout) {
     case SlideLayout::Title:
@@ -197,6 +366,119 @@ void SlideScene::setInsertMode(InsertMode mode) {
     for (auto* v : views()) v->setCursor(shape);
 }
 
+void SlideScene::beginInsertShape(ShapeKind kind) {
+    m_pendingShape = kind;
+    setInsertMode(InsertMode::Shape);
+}
+
+void SlideScene::insertTable(int rows, int cols) {
+    rows = std::clamp(rows, 1, 20);
+    cols = std::clamp(cols, 1, 12);
+    const qreal w = 640.0;
+    const qreal h = std::min(360.0, 54.0 * rows);
+    const QRectF rect((SLIDE_W - w) / 2.0, (SLIDE_H - h) / 2.0, w, h);
+    auto* t = addTable(rect, rows, cols);
+    clearSelection();
+    if (t) t->setSelected(true);
+    emit sceneModified();
+}
+
+void SlideScene::insertSmartArt(SmartArtKind kind) {
+    // Build the diagram out of ordinary Shape + TextBox items so it persists,
+    // exports, and is individually editable like anything else on the slide.
+    auto box = [this](const QRectF& r, ShapeKind k, const QColor& fill) {
+        auto* it = addShape(r, k);
+        if (auto* sh = dynamic_cast<SlideShapeItem*>(it)) {
+            sh->setBrush(fill);
+            sh->setPen(QPen(QColor("#2C3140"), 2));
+        }
+    };
+    auto label = [this](const QRectF& r, const QString& text, qreal fs,
+                        Qt::Alignment al = Qt::AlignCenter) {
+        auto* t = addTextBox(QPointF(r.left() + 6, r.center().y() - fs), text, fs);
+        t->setDefaultTextColor(QColor("#1C1E26"));
+        t->setTextWidth(std::max(20.0, r.width() - 12));
+        QTextOption opt = t->document()->defaultTextOption();
+        opt.setAlignment(al);
+        t->document()->setDefaultTextOption(opt);
+    };
+
+    switch (kind) {
+    case SmartArtKind::ProcessFlow: {
+        const qreal xs[3] = { 55, 375, 695 };
+        const QColor cols[3] = { QColor("#DBEAFE"), QColor("#DCFCE7"), QColor("#FEF3C7") };
+        const char* names[3] = { "Step 1", "Step 2", "Step 3" };
+        for (int i = 0; i < 3; ++i) {
+            const QRectF r(xs[i], 235, 210, 90);
+            box(r, ShapeKind::RoundedRect, cols[i]);
+            label(r, names[i], 18);
+        }
+        box(QRectF(275, 262, 90, 36), ShapeKind::Arrow, QColor("#9CA3AF"));
+        box(QRectF(595, 262, 90, 36), ShapeKind::Arrow, QColor("#9CA3AF"));
+        break;
+    }
+    case SmartArtKind::Cycle: {
+        struct P { qreal x, y; const char* t; };
+        const P ps[4] = { { 405, 50, "Plan" }, { 740, 215, "Do" },
+                          { 405, 380, "Check" }, { 70, 215, "Act" } };
+        const QColor cols[4] = { QColor("#DBEAFE"), QColor("#DCFCE7"),
+                                 QColor("#FEF3C7"), QColor("#FCE7F3") };
+        for (int i = 0; i < 4; ++i) {
+            const QRectF r(ps[i].x, ps[i].y, 150, 110);
+            box(r, ShapeKind::Ellipse, cols[i]);
+            label(r, ps[i].t, 18);
+        }
+        break;
+    }
+    case SmartArtKind::Hierarchy: {
+        const QRectF top(370, 60, 220, 80);
+        const qreal cy = 300;
+        const qreal xs[3] = { 120, 390, 660 };
+        for (int i = 0; i < 3; ++i) {
+            const QRectF r(xs[i], cy, 180, 80);
+            box(QRectF(QPointF(top.center().x(), top.bottom()),
+                       QPointF(r.center().x(), cy)), ShapeKind::Line, QColor("#9CA3AF"));
+            box(r, ShapeKind::RoundedRect, QColor("#DCFCE7"));
+            label(r, QString("Team %1").arg(i + 1), 16);
+        }
+        box(top, ShapeKind::RoundedRect, QColor("#DBEAFE"));
+        label(top, "Manager", 18);
+        break;
+    }
+    case SmartArtKind::Pyramid: {
+        box(QRectF(260, 70, 440, 380), ShapeKind::Triangle, QColor("#FDE68A"));
+        label(QRectF(360, 110, 240, 40), "Vision", 20);
+        label(QRectF(320, 230, 320, 40), "Strategy", 20);
+        label(QRectF(280, 350, 400, 40), "Execution", 20);
+        break;
+    }
+    case SmartArtKind::BulletList: {
+        const QRectF title(160, 55, 640, 70);
+        box(title, ShapeKind::RoundedRect, QColor("#DBEAFE"));
+        label(title, "Title", 22);
+        const char* items[4] = { "First point", "Second point", "Third point", "Fourth point" };
+        for (int i = 0; i < 4; ++i) {
+            const QRectF r(200, 155 + i * 80, 560, 60);
+            box(r, ShapeKind::RoundedRect, QColor("#F1F5F9"));
+            label(r, items[i], 18, Qt::AlignLeft);
+        }
+        break;
+    }
+    case SmartArtKind::Venn: {
+        box(QRectF(310, 60, 340, 340), ShapeKind::Ellipse, QColor(37, 99, 235, 90));
+        box(QRectF(170, 260, 340, 340), ShapeKind::Ellipse, QColor(22, 163, 74, 90));
+        box(QRectF(450, 260, 340, 340), ShapeKind::Ellipse, QColor(232, 55, 42, 90));
+        label(QRectF(420, 120, 120, 40), "A", 22);
+        label(QRectF(240, 470, 120, 40), "B", 22);
+        label(QRectF(600, 470, 120, 40), "C", 22);
+        break;
+    }
+    }
+
+    clearSelection();
+    emit sceneModified();
+}
+
 void SlideScene::insertImage(const QByteArray& pngData) {
     QPixmap pm;
     if (!pm.loadFromData(pngData, "PNG")) return;
@@ -211,6 +493,21 @@ void SlideScene::insertImage(const QByteArray& pngData) {
                                (SLIDE_H - size.height()) / 2.0),
                        size);
     addImageItem(rect, pngData);
+    emit sceneModified();
+}
+
+void SlideScene::insertPresetText(const QString& text, qreal fontSize,
+                                  bool bold, const QColor& color) {
+    // Drop it a little below the slide top, horizontally roughly centred.
+    auto* item = addTextBox(QPointF(120, 120), text, fontSize);
+    QFont f = item->font();
+    f.setBold(bold);
+    item->setFont(f);
+    item->setDefaultTextColor(color);
+
+    clearSelection();
+    item->setSelected(true);
+    m_lastTextItem = item;
     emit sceneModified();
 }
 
@@ -232,18 +529,24 @@ void SlideScene::mousePressEvent(QGraphicsSceneMouseEvent* event) {
         return;
     }
 
-    // For rect / ellipse: show a zero-size preview item during drag
+    // For rect / ellipse / gallery shape: show a zero-size preview during drag
     const QRectF r(m_dragStart, QSizeF(1, 1));
     if (m_insertMode == InsertMode::Rectangle) {
         auto* rect = new QGraphicsRectItem(r);
         rect->setPen(QPen(QColor("#E8372A"), 2, Qt::DashLine));
         rect->setBrush(Qt::NoBrush);
         m_dragItem = rect;
-    } else {
+    } else if (m_insertMode == InsertMode::Ellipse) {
         auto* ell = new QGraphicsEllipseItem(r);
         ell->setPen(QPen(QColor("#E8372A"), 2, Qt::DashLine));
         ell->setBrush(Qt::NoBrush);
         m_dragItem = ell;
+    } else {   // InsertMode::Shape
+        auto* sh = new SlideShapeItem(m_pendingShape);
+        sh->setRect(r);
+        sh->setPen(QPen(QColor("#E8372A"), 2, Qt::DashLine));
+        sh->setBrush(Qt::NoBrush);
+        m_dragItem = sh;
     }
     addItem(m_dragItem);
     event->accept();
@@ -262,6 +565,8 @@ void SlideScene::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
         ri->setRect(rect);
     else if (auto* ei = qgraphicsitem_cast<QGraphicsEllipseItem*>(m_dragItem))
         ei->setRect(rect);
+    else if (auto* sh = dynamic_cast<SlideShapeItem*>(m_dragItem))
+        sh->setRect(rect);
 
     event->accept();
 }
@@ -288,6 +593,8 @@ void SlideScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
         addRectangle(rect);
     } else if (m_insertMode == InsertMode::Ellipse) {
         addEllipse(rect);
+    } else if (m_insertMode == InsertMode::Shape) {
+        addShape(rect, m_pendingShape);
     }
 
     setInsertMode(InsertMode::None);
@@ -315,6 +622,68 @@ void SlideScene::keyPressEvent(QKeyEvent* event) {
     QGraphicsScene::keyPressEvent(event);
 }
 
+// Apply (or clear) the standard hyperlink look (blue + underline) on a text
+// item, merging into the document so it persists through save/load.
+static void styleTextLink(QGraphicsTextItem* ti, bool linked) {
+    QTextCursor c(ti->document());
+    c.select(QTextCursor::Document);
+    QTextCharFormat f;
+    f.setFontUnderline(linked);
+    f.setForeground(linked ? QColor("#2563EB") : QColor("#1C1E26"));
+    c.mergeCharFormat(f);
+    ti->setDefaultTextColor(linked ? QColor("#2563EB") : QColor("#1C1E26"));
+}
+
+void SlideScene::contextMenuEvent(QGraphicsSceneContextMenuEvent* event) {
+    QGraphicsItem* it = itemAt(event->scenePos(), QTransform());
+    while (it && it->parentItem()) it = it->parentItem();
+    if (!it || it == backgroundItem() || dynamic_cast<SlideHandleItem*>(it)) {
+        QGraphicsScene::contextMenuEvent(event);
+        return;
+    }
+
+    clearSelection();
+    it->setSelected(true);
+
+    QMenu menu;
+    QAction* aLink   = menu.addAction("Add / Edit Hyperlink…");
+    QAction* aUnlink = menu.addAction("Remove Hyperlink");
+    aUnlink->setEnabled(!it->data(HyperlinkKey).toString().isEmpty());
+    menu.addSeparator();
+    QAction* aFront = menu.addAction("Bring to Front");
+    QAction* aBack  = menu.addAction("Send to Back");
+    menu.addSeparator();
+    QAction* aDelete = menu.addAction("Delete");
+
+    QAction* chosen = menu.exec(event->screenPos());
+    if (chosen == aLink) {
+        bool ok = false;
+        const QString cur = it->data(HyperlinkKey).toString();
+        const QString url = QInputDialog::getText(nullptr, "Hyperlink",
+            "Address (e.g. https://example.com):", QLineEdit::Normal, cur, &ok);
+        if (ok && !url.isEmpty()) {
+            it->setData(HyperlinkKey, url);
+            if (auto* ti = qgraphicsitem_cast<QGraphicsTextItem*>(it)) styleTextLink(ti, true);
+            emit sceneModified();
+        }
+    } else if (chosen == aUnlink) {
+        it->setData(HyperlinkKey, QString());
+        if (auto* ti = qgraphicsitem_cast<QGraphicsTextItem*>(it)) styleTextLink(ti, false);
+        emit sceneModified();
+    } else if (chosen == aFront) {
+        qreal top = 0.0;
+        for (auto* o : items()) top = std::max(top, o->zValue());
+        it->setZValue(top + 1.0);
+        emit sceneModified();
+    } else if (chosen == aBack) {
+        it->setZValue(0.0);   // still above the background (z = -1)
+        emit sceneModified();
+    } else if (chosen == aDelete) {
+        deleteSelectedItem();
+    }
+    event->accept();
+}
+
 QGraphicsTextItem* SlideScene::activeTextItem() const {
     if (auto* fi = qgraphicsitem_cast<QGraphicsTextItem*>(focusItem()))
         return fi;
@@ -332,6 +701,69 @@ void SlideScene::deleteSelectedItem() {
     }
     clearHandles();
     emit sceneModified();
+}
+
+// Build the standard soft drop shadow used across the editor and exports.
+static QGraphicsDropShadowEffect* makeSoftShadow() {
+    auto* e = new QGraphicsDropShadowEffect;
+    e->setBlurRadius(18.0);
+    e->setOffset(4.0, 4.0);
+    e->setColor(QColor(0, 0, 0, 120));
+    return e;
+}
+
+bool SlideScene::hasShapeSelection() const {
+    for (auto* it : selectedItems()) {
+        if (it == backgroundItem()) continue;
+        if (dynamic_cast<SlideShapeItem*>(it)) return true;
+        if (qgraphicsitem_cast<QGraphicsRectItem*>(it)) return true;
+        if (qgraphicsitem_cast<QGraphicsEllipseItem*>(it)) return true;
+    }
+    return false;
+}
+
+void SlideScene::setSelectedFill(const QColor& color) {
+    bool changed = false;
+    for (auto* it : selectedItems()) {
+        if (it == backgroundItem()) continue;
+        if (auto* sh = dynamic_cast<SlideShapeItem*>(it)) {
+            if (sh->kind() != ShapeKind::Line) { sh->setBrush(color); changed = true; }
+        } else if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(it)) {
+            ri->setBrush(color); changed = true;
+        } else if (auto* ei = qgraphicsitem_cast<QGraphicsEllipseItem*>(it)) {
+            ei->setBrush(color); changed = true;
+        }
+    }
+    if (changed) emit sceneModified();
+}
+
+void SlideScene::setSelectedOutline(const QColor& color) {
+    bool changed = false;
+    for (auto* it : selectedItems()) {
+        if (it == backgroundItem()) continue;
+        if (auto* sh = dynamic_cast<SlideShapeItem*>(it)) {
+            QPen p = sh->pen(); p.setColor(color); sh->setPen(p); changed = true;
+        } else if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(it)) {
+            QPen p = ri->pen(); p.setColor(color); ri->setPen(p); changed = true;
+        } else if (auto* ei = qgraphicsitem_cast<QGraphicsEllipseItem*>(it)) {
+            QPen p = ei->pen(); p.setColor(color); ei->setPen(p); changed = true;
+        }
+    }
+    if (changed) emit sceneModified();
+}
+
+void SlideScene::toggleSelectedShadow() {
+    bool changed = false;
+    for (auto* it : selectedItems()) {
+        if (it == backgroundItem()) continue;
+        if (dynamic_cast<SlideHandleItem*>(it)) continue;
+        if (it->graphicsEffect())
+            it->setGraphicsEffect(nullptr);
+        else
+            it->setGraphicsEffect(makeSoftShadow());
+        changed = true;
+    }
+    if (changed) emit sceneModified();
 }
 
 void SlideScene::setSelectedAnimation(ItemAnimation anim) {
@@ -424,7 +856,11 @@ void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QP
     }
 
     QRectF r;
-    if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(target)) {
+    if (auto* tb = dynamic_cast<SlideTableItem*>(target)) {
+        r = tb->rect();
+    } else if (auto* sh = dynamic_cast<SlideShapeItem*>(target)) {
+        r = sh->rect();
+    } else if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(target)) {
         r = ri->rect();
     } else if (auto* ei = qgraphicsitem_cast<QGraphicsEllipseItem*>(target)) {
         r = ei->rect();
@@ -449,7 +885,11 @@ void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QP
     if (r.width()  < 20) r.setWidth(20);
     if (r.height() < 20) r.setHeight(20);
 
-    if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(target)) {
+    if (auto* tb = dynamic_cast<SlideTableItem*>(target)) {
+        tb->setRectAndLayout(r);
+    } else if (auto* sh = dynamic_cast<SlideShapeItem*>(target)) {
+        sh->setRect(r);
+    } else if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(target)) {
         ri->setRect(r);
     } else if (auto* ei = qgraphicsitem_cast<QGraphicsEllipseItem*>(target)) {
         ei->setRect(r);
@@ -509,6 +949,146 @@ QGraphicsEllipseItem* SlideScene::addEllipse(const QRectF& rect) {
     return item;
 }
 
+// ── Gallery shape geometry ──────────────────────────────────────────────────
+QPainterPath SlideScene::shapePath(ShapeKind kind, const QRectF& r) {
+    QPainterPath p;
+    const qreal x = r.x(), y = r.y(), w = r.width(), h = r.height();
+    const qreal cx = r.center().x(), cy = r.center().y();
+
+    switch (kind) {
+    case ShapeKind::Rectangle:
+        p.addRect(r);
+        break;
+    case ShapeKind::RoundedRect: {
+        const qreal rad = std::min(w, h) * 0.18;
+        p.addRoundedRect(r, rad, rad);
+        break;
+    }
+    case ShapeKind::Ellipse:
+        p.addEllipse(r);
+        break;
+    case ShapeKind::Triangle: {
+        QPolygonF poly;
+        poly << QPointF(cx, y) << QPointF(x + w, y + h) << QPointF(x, y + h);
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::RightTriangle: {
+        QPolygonF poly;
+        poly << QPointF(x, y) << QPointF(x, y + h) << QPointF(x + w, y + h);
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::Diamond: {
+        QPolygonF poly;
+        poly << QPointF(cx, y) << QPointF(x + w, cy) << QPointF(cx, y + h) << QPointF(x, cy);
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::Pentagon: {
+        QPolygonF poly;
+        for (int i = 0; i < 5; ++i) {
+            const double a = -M_PI / 2 + i * 2 * M_PI / 5;
+            poly << QPointF(cx + (w / 2) * std::cos(a), cy + (h / 2) * std::sin(a));
+        }
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::Hexagon: {
+        QPolygonF poly;
+        for (int i = 0; i < 6; ++i) {
+            const double a = i * M_PI / 3;
+            poly << QPointF(cx + (w / 2) * std::cos(a), cy + (h / 2) * std::sin(a));
+        }
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::Star5: {
+        QPolygonF poly;
+        for (int i = 0; i < 10; ++i) {
+            const double a  = -M_PI / 2 + i * M_PI / 5;
+            const qreal rx = (i % 2 == 0) ? w / 2 : w / 5;
+            const qreal ry = (i % 2 == 0) ? h / 2 : h / 5;
+            poly << QPointF(cx + rx * std::cos(a), cy + ry * std::sin(a));
+        }
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::Arrow: {
+        const qreal shaftTop = cy - h * 0.18;
+        const qreal shaftBot = cy + h * 0.18;
+        const qreal headX    = x + w * 0.6;
+        QPolygonF poly;
+        poly << QPointF(x, shaftTop) << QPointF(headX, shaftTop) << QPointF(headX, y)
+             << QPointF(x + w, cy)   << QPointF(headX, y + h)    << QPointF(headX, shaftBot)
+             << QPointF(x, shaftBot);
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::Chevron: {
+        const qreal notch = w * 0.25;
+        QPolygonF poly;
+        poly << QPointF(x, y) << QPointF(x + w - notch, y) << QPointF(x + w, cy)
+             << QPointF(x + w - notch, y + h) << QPointF(x, y + h) << QPointF(x + notch, cy);
+        p.addPolygon(poly); p.closeSubpath();
+        break;
+    }
+    case ShapeKind::Line:
+        p.moveTo(r.topLeft());
+        p.lineTo(r.bottomRight());
+        break;
+    case ShapeKind::Cloud: {
+        QPainterPath c;
+        c.addEllipse(QRectF(x,            y + h * 0.35, w * 0.45, h * 0.50));
+        c.addEllipse(QRectF(x + w * 0.20, y + h * 0.10, w * 0.45, h * 0.55));
+        c.addEllipse(QRectF(x + w * 0.45, y + h * 0.20, w * 0.40, h * 0.50));
+        c.addEllipse(QRectF(x + w * 0.50, y + h * 0.40, w * 0.45, h * 0.50));
+        c.addEllipse(QRectF(x + w * 0.25, y + h * 0.45, w * 0.50, h * 0.50));
+        p = c.simplified();
+        break;
+    }
+    case ShapeKind::Heart: {
+        const qreal topY = y + h * 0.30;
+        p.moveTo(cx, y + h);
+        p.cubicTo(x - w * 0.10, cy,         x + w * 0.20, y, cx, topY);
+        p.cubicTo(x + w * 0.80, y,          x + w * 1.10, cy, cx, y + h);
+        break;
+    }
+    }
+    return p;
+}
+
+QGraphicsItem* SlideScene::addShape(const QRectF& rect, ShapeKind kind) {
+    auto* item = new SlideShapeItem(kind);
+    item->setRect(rect);
+    if (kind == ShapeKind::Line) {
+        item->setPen(QPen(QColor("#2C3140"), 2.5));
+        item->setBrush(Qt::NoBrush);
+    } else {
+        item->setPen(QPen(QColor("#2C3140"), 2));
+        item->setBrush(QBrush(QColor(232, 55, 42, 40)));  // translucent scarlet fill
+    }
+    item->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable);
+    addItem(item);
+    return item;
+}
+
+QGraphicsItem* SlideScene::addTable(const QRectF& rect, int rows, int cols,
+                                    const std::vector<QString>& texts) {
+    auto* item = new SlideTableItem(rows, cols, rect);
+    item->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable);
+
+    const auto& cells = item->cells();
+    for (size_t i = 0; i < cells.size(); ++i) {
+        if (i < texts.size()) cells[i]->setPlainText(texts[i]);
+        connect(cells[i]->document(), &QTextDocument::contentsChanged,
+                this, &SlideScene::sceneModified);
+    }
+    item->relayout();
+    addItem(item);
+    return item;
+}
+
 QGraphicsItem* SlideScene::addImageItem(const QRectF& rect, const QByteArray& pngData) {
     QPixmap original;
     if (!original.loadFromData(pngData, "PNG")) return nullptr;
@@ -536,9 +1116,10 @@ void SlideScene::loadFromData(const SlideData& data) {
         }
     }
 
-    // Restore background color
-    if (auto* bg = backgroundItem())
-        bg->setBrush(data.background);
+    // Restore background fill (solid, or a vertical two-colour gradient)
+    m_bg1 = data.background;
+    m_bg2 = data.background2;
+    applyBackgroundBrush();
 
     // Recreate items
     for (const auto& si : data.items) {
@@ -581,26 +1162,66 @@ void SlideScene::loadFromData(const SlideData& data) {
                 created = pi;
             }
             break;
+        case SlideItemType::Table:
+            if (auto* tb = addTable(si.rect, std::max(1, si.rows), std::max(1, si.cols), si.cells)) {
+                tb->setTransformOriginPoint(tb->boundingRect().center());
+                tb->setRotation(si.rotation);
+                created = tb;
+            }
+            break;
+        case SlideItemType::Shape:
+            if (auto* sh = addShape(si.rect, si.shapeKind)) {
+                if (auto* ssh = dynamic_cast<SlideShapeItem*>(sh)) {
+                    ssh->setPen(QPen(si.penColor, si.penWidth));
+                    ssh->setBrush(si.shapeKind == ShapeKind::Line ? QBrush(Qt::NoBrush)
+                                                                  : QBrush(si.fillColor));
+                }
+                sh->setTransformOriginPoint(sh->boundingRect().center());
+                sh->setRotation(si.rotation);
+                created = sh;
+            }
+            break;
         }
-        if (created)
+        if (created) {
             created->setData(AnimationKey, static_cast<int>(si.animation));
+            if (!si.hyperlink.isEmpty()) created->setData(HyperlinkKey, si.hyperlink);
+            if (si.shadow) created->setGraphicsEffect(makeSoftShadow());
+        }
     }
 }
 
 void SlideScene::saveToData(SlideData& data) const {
     data.items.clear();
-    if (auto* bg = backgroundItem())
-        data.background = bg->brush().color();
+    // Persist the logical background colours (the brush itself may be a
+    // gradient, whose .color() is meaningless — so read our cached values).
+    data.background  = m_bg1;
+    data.background2 = m_bg2;
 
     for (auto* it : items()) {
         if (it == backgroundItem()) continue;
         if (dynamic_cast<SlideHandleItem*>(it)) continue;
+        if (it->parentItem()) continue;          // table cells are saved with their table
 
         SlideItem si;
         si.rotation  = it->rotation();
         si.animation = static_cast<ItemAnimation>(it->data(AnimationKey).toInt());
+        si.shadow    = (it->graphicsEffect() != nullptr);
+        si.hyperlink = it->data(HyperlinkKey).toString();
 
-        if (auto* ti = qgraphicsitem_cast<QGraphicsTextItem*>(it)) {
+        if (auto* tb = dynamic_cast<SlideTableItem*>(it)) {
+            si.type  = SlideItemType::Table;
+            si.rect  = tb->rect().translated(tb->pos());
+            si.rows  = tb->rows();
+            si.cols  = tb->cols();
+            si.cells = tb->texts();
+        } else if (auto* sh = dynamic_cast<SlideShapeItem*>(it)) {
+            si.type      = SlideItemType::Shape;
+            si.shapeKind = sh->kind();
+            si.rect      = sh->rect().translated(sh->pos());
+            si.fillColor = sh->brush().color();
+            si.penColor  = sh->pen().color();
+            si.penWidth  = sh->pen().widthF();
+        } else if (auto* ti = qgraphicsitem_cast<QGraphicsTextItem*>(it)) {
             si.type     = SlideItemType::TextBox;
             si.rect     = QRectF(ti->pos(), QSizeF(ti->textWidth(), ti->boundingRect().height()));
             si.text     = ti->toPlainText();

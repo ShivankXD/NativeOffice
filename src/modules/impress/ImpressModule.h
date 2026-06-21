@@ -76,6 +76,10 @@ public slots:
     void moveSlide(int fromIndex, int toIndex);
 
     void exportToPdf();
+    void exportToPptx();
+    // Write the deck to a PowerPoint .pptx at `path` (no dialogs). Returns
+    // false on a write failure. exportToPptx() is the interactive wrapper.
+    bool exportPptxTo(const QString& path);
     void insertImageFromFile();
     void applyLayoutToCurrentSlide(SlideLayout layout);
     void applyTransitionToCurrentSlide(SlideTransition transition);
@@ -94,6 +98,8 @@ signals:
 
 private:
     void buildUi();
+    QWidget* buildBrandBar();
+    void insertPresetText(const QString& text, double fontSize, bool bold, const QColor& color);
     void applyStyles();
     void createSlide(const SlideData& data);   // low-level: allocates scene + thumb
     void clearDeck();                           // remove all slides

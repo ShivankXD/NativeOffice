@@ -71,7 +71,7 @@ private:
     QVariantAnimation* m_transitionAnim { nullptr };
     QVariantAnimation* m_objectAnim     { nullptr };
 
-    struct OrigState { QPointF pos; qreal opacity; qreal scale; };
+    struct OrigState { QPointF pos; qreal opacity; qreal scale; qreal rotation; };
     QList<QGraphicsItem*>            m_animItems;
     QHash<QGraphicsItem*, OrigState> m_orig;
 };

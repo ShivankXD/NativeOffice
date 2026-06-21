@@ -43,6 +43,7 @@ enum class InsertMode {
     Rectangle,
     Ellipse,
     Image,
+    Shape,       // drag-insert a gallery shape (kind set via beginInsertShape)
 };
 
 class SlideHandleItem;
@@ -71,8 +72,26 @@ public:
     void setInsertMode(InsertMode mode);
     [[nodiscard]] InsertMode insertMode() const noexcept { return m_insertMode; }
 
+    // Enter Shape-insert mode for a specific gallery shape. The next drag (or
+    // click) on the canvas places that shape.
+    void beginInsertShape(ShapeKind kind);
+
+    // Build the QPainterPath for a gallery shape within `rect` (scene units).
+    static QPainterPath shapePath(ShapeKind kind, const QRectF& rect);
+
     // Insert an image (PNG bytes) centered on the slide
     void insertImage(const QByteArray& pngData);
+
+    // Insert a rows×cols table, centred on the slide, ready to edit.
+    void insertTable(int rows, int cols);
+
+    // Drop a pre-arranged SmartArt diagram (shapes + labels) on the slide.
+    void insertSmartArt(SmartArtKind kind);
+
+    // Insert a ready-made text box (WordArt / Symbol / Slide Number / Date …),
+    // centred horizontally near the top, then select it for editing.
+    void insertPresetText(const QString& text, qreal fontSize = 28.0,
+                          bool bold = false, const QColor& color = QColor("#1C1E26"));
 
     // ── Convenience: add default placeholders for a given layout ──────────
     void addDefaultPlaceholders();
@@ -82,10 +101,17 @@ public:
     [[nodiscard]] QGraphicsTextItem* activeTextItem() const;
     void deleteSelectedItem();
 
+    // ── Selected-object styling (shapes / rectangles / ellipses) ──────────
+    void setSelectedFill(const QColor& color);
+    void setSelectedOutline(const QColor& color);
+    void toggleSelectedShadow();
+    [[nodiscard]] bool hasShapeSelection() const;
+
     // ── Entrance animation on the selected item (Sprint 13) ───────────────
     // Animation is stored on each QGraphicsItem via data(AnimationKey) so the
     // slide-show window can read it back without index correlation.
     static constexpr int AnimationKey = 0;
+    static constexpr int HyperlinkKey = 1;   // QString URL stored on each item
     void setSelectedAnimation(ItemAnimation anim);
     [[nodiscard]] ItemAnimation selectedAnimation() const;
     [[nodiscard]] bool hasSelection() const;
@@ -100,6 +126,7 @@ protected:
     void mouseMoveEvent   (QGraphicsSceneMouseEvent* event) override;
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
     void keyPressEvent    (QKeyEvent* event) override;
+    void contextMenuEvent (QGraphicsSceneContextMenuEvent* event) override;
 
 private slots:
     void onSelectionChanged();
@@ -109,15 +136,25 @@ private:
     QGraphicsRectItem*    addRectangle(const QRectF&  rect);
     QGraphicsEllipseItem* addEllipse  (const QRectF&  rect);
     QGraphicsItem*        addImageItem(const QRectF& rect, const QByteArray& pngData);
+    QGraphicsItem*        addShape    (const QRectF& rect, ShapeKind kind);
+    QGraphicsItem*        addTable    (const QRectF& rect, int rows, int cols,
+                                       const std::vector<QString>& texts = {});
 
     // Returns the slide background rect item (always the first item added)
     QGraphicsRectItem* backgroundItem() const;
+
+    // Paint the background rect from m_bg1/m_bg2 (solid, or top→bottom gradient
+    // when m_bg2 is valid).
+    void applyBackgroundBrush();
 
     void rebuildHandles();
     void clearHandles();
     void resizeTargetTo(QGraphicsItem* target, HandleRole role, const QPointF& scenePos);
 
     InsertMode     m_insertMode  { InsertMode::None };
+    ShapeKind      m_pendingShape { ShapeKind::Rectangle };  // kind for InsertMode::Shape
+    QColor         m_bg1 { Qt::white };   // background top / solid colour
+    QColor         m_bg2;                  // background bottom (invalid = solid)
     QPointF        m_dragStart;
     QGraphicsItem* m_dragItem    { nullptr };   // temporary during drag
 

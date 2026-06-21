@@ -119,6 +119,39 @@ QToolTip {
     padding: 6px 10px;
     font-size: 12px;
 }
+
+/* ── Menus (menu-bar dropdowns) ───────────────────────────────── */
+/* Popup menus are separate top-level windows; without an explicit
+   surface the globally-transparent QWidget rule renders them black. */
+QMenu {
+    background-color: #FFFFFF;
+    color: #1C1E26;
+    border: 1px solid #D5D8DF;
+    border-radius: 8px;
+    padding: 6px;
+    font-size: 13px;
+}
+QMenu::item {
+    background: transparent;
+    padding: 6px 28px 6px 18px;
+    border-radius: 6px;
+    margin: 1px 4px;
+}
+QMenu::item:selected {
+    background-color: #FCE4E2;
+    color: #C0271C;
+}
+QMenu::item:disabled {
+    color: #B0B4BD;
+}
+QMenu::separator {
+    height: 1px;
+    background: #E2E4E9;
+    margin: 5px 10px;
+}
+QMenu::icon {
+    padding-left: 8px;
+}
 )")
     .arg(cssColor(t.background))    // %1 app background
     .arg(cssColor(t.textPrimary))   // %2 primary text
