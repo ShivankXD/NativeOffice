@@ -45,6 +45,9 @@
 #include <QUndoStack>
 #include <QUndoCommand>
 #include <QTimer>
+#include <QVariantAnimation>
+#include <QAbstractAnimation>
+#include <QPolygon>
 #include <algorithm>
 #include <QFile>
 #include <QFileInfo>
@@ -125,6 +128,10 @@ ImpressModule::ImpressModule(QWidget* parent)
     // Create the first slide automatically
     addNewSlide();
     captureUndoBaseline();
+    // Creating the initial slide is not a user edit — start with a clean undo
+    // history so the Undo button is disabled until the user actually changes
+    // something (and so undo can never empty the whole deck).
+    m_undoStack->clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +269,7 @@ void ImpressModule::buildUi() {
         m_slideData[m_currentIdx].slideAnimation = a;
         if (!m_dirty) { m_dirty = true; emit documentModified(); }
         commitUndoStep();
+        previewSlideAnimation(a);   // play it once so the user sees it applied
     });
     connect(m_ribbon, &ImpressRibbon::insertImageRequested,    this, &ImpressModule::insertImageFromFile);
     connect(m_ribbon, &ImpressRibbon::insertTableRequested, this, [this](int rows, int cols) {
@@ -310,15 +318,8 @@ void ImpressModule::buildUi() {
         if (m_commentsVisible) refreshComments();
     });
 
-    connect(m_ribbon, &ImpressRibbon::designColorSelected, this, [this](const QColor& c) {
-        if (m_currentIdx < 0) return;
-        auto* scene = m_scenes[m_currentIdx];
-        SlideData snap; scene->saveToData(snap);
-        snap.background  = c;
-        snap.background2 = QColor();   // solid fill — clear any gradient
-        scene->loadFromData(snap);
-        commitUndoStep();
-    });
+    connect(m_ribbon, &ImpressRibbon::designColorSelected, this,
+            &ImpressModule::applyDesignColor);
 
     connect(m_ribbon, &ImpressRibbon::designThemeSelected, this,
             [this](const QColor& top, const QColor& bottom) {
@@ -587,7 +588,8 @@ void ImpressModule::refreshComments() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Templates — ~24 ready-made slide designs (background + title/subtitle + accent)
+// Templates — ~60 ready-made slide designs across 5 layout styles & 12 palettes
+// (centred title, left heading, two-tone split, top banner, minimalist accent)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
 std::vector<SlideData> builtinTemplates() {
@@ -651,6 +653,40 @@ std::vector<SlideData> builtinTemplates() {
             d.items.push_back(txt(108, 158, 720, 90, "Section Heading", 40, p.title, true, "left"));
             d.items.push_back(txt(108, 268, 700, 150,
                                   "Add your key points or a short description here.", 20, p.body, false, "left"));
+            out.push_back(d);
+        }
+        // Style C — two-tone vertical split: a coloured left panel (the larger
+        // division part) beside a content column on the slide background.
+        {
+            SlideData d;
+            d.background = QColor(p.top);
+            d.items.push_back(shp(0, 0, 372, 540, ShapeKind::Rectangle, p.bot));
+            d.items.push_back(txt(44, 196, 300, 150, "Title\nGoes Here", 36, p.title, true, "left"));
+            d.items.push_back(txt(420, 150, 480, 90, "Key Message", 30, p.title, true, "left"));
+            d.items.push_back(txt(420, 244, 480, 220,
+                                  "Use the wider column for supporting detail, bullet points or a short paragraph.",
+                                  20, p.body, false, "left"));
+            out.push_back(d);
+        }
+        // Style D — bold top banner bar with the title reversed out in white.
+        {
+            SlideData d;
+            d.background = QColor(p.top);
+            d.items.push_back(shp(0, 0, 960, 132, ShapeKind::Rectangle, p.accent));
+            d.items.push_back(txt(60, 38, 840, 70, "Presentation Title", 36, "#FFFFFF", true, "left"));
+            d.items.push_back(txt(60, 200, 840, 60, "A clear, concise subtitle", 24, p.title, true, "left"));
+            d.items.push_back(txt(60, 300, 840, 180,
+                                  "Add an overview of what this section covers here.", 20, p.body, false, "left"));
+            out.push_back(d);
+        }
+        // Style E — minimalist: big centred title with a corner accent triangle.
+        {
+            SlideData d;
+            d.background = QColor(p.top);
+            d.items.push_back(shp(700, 360, 260, 180, ShapeKind::Triangle, p.accent));
+            d.items.push_back(shp(0, 0, 200, 140, ShapeKind::Triangle, p.bot));
+            d.items.push_back(txt(120, 196, 720, 100, "The Big Idea", 48, p.title, true, "center"));
+            d.items.push_back(txt(180, 312, 600, 50, "one line that says it all", 22, p.body, false, "center"));
             out.push_back(d);
         }
     }
@@ -778,6 +814,12 @@ void ImpressModule::createSlide(const SlideData& data) {
     // Reflect the current selection's formatting in the ribbon
     connect(scene, &SlideScene::selectionInfoChanged,
             this, &ImpressModule::syncRibbonToSelection);
+
+    // When an object animation is applied (ribbon or right-click → Animate),
+    // play a one-shot preview on the canvas so the user sees it take effect.
+    connect(scene, &SlideScene::animationApplied, this, [this, scene](ItemAnimation) {
+        if (indexOfScene(scene) == m_currentIdx) previewObjectAnimations();
+    });
 
     // When insert mode completes → reset ribbon button
     connect(scene, &SlideScene::insertModeLeft,
@@ -933,6 +975,7 @@ void ImpressModule::applyTransitionToCurrentSlide(SlideTransition transition) {
     if (m_currentIdx < 0) return;
     m_slideData[m_currentIdx].transition = transition;
     commitUndoStep();
+    previewTransition(transition);   // play it once so the user sees it applied
 }
 
 void ImpressModule::applyTransitionToAllSlides(SlideTransition transition) {
@@ -941,6 +984,7 @@ void ImpressModule::applyTransitionToAllSlides(SlideTransition transition) {
         slide.transition = transition;
     if (!m_dirty) { m_dirty = true; emit documentModified(); }
     commitUndoStep();
+    previewTransition(transition);
 }
 
 void ImpressModule::applyAnimationToSelection(ItemAnimation anim) {
@@ -1169,6 +1213,158 @@ void ImpressModule::refitView() {
     t.scale(scale, scale);
     m_view->setTransform(t);
     m_view->centerOn(SlideScene::SLIDE_W / 2.0, SlideScene::SLIDE_H / 2.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-editor effect previews
+//
+// When the user picks a transition, a whole-slide animation, or an object
+// animation, we play it once right on the canvas so they get immediate visual
+// confirmation that the effect was applied. The preview is rendered into a
+// transient QLabel overlaid on the canvas and uses the exact same compositing
+// maths as the real slide show (PresentModeWindow), so it is faithful.
+// ─────────────────────────────────────────────────────────────────────────────
+QPixmap ImpressModule::renderSceneToPixmap(SlideScene* scene, const QSize& sz) const {
+    QPixmap pm(sz);
+    pm.fill(Qt::transparent);
+    if (!scene || sz.isEmpty()) return pm;
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    p.setRenderHint(QPainter::TextAntialiasing);
+    scene->render(&p, QRectF(QPointF(0, 0), QSizeF(sz)),
+                  QRectF(0, 0, SlideScene::SLIDE_W, SlideScene::SLIDE_H));
+    return pm;
+}
+
+void ImpressModule::runOverlayPreview(int durationMs,
+                                      const std::function<QPixmap(double)>& frame,
+                                      QObject* owned) {
+    if (!m_view || m_currentIdx < 0) { if (owned) owned->deleteLater(); return; }
+
+    // The slide's on-screen rectangle inside the viewport.
+    const QRect r = m_view->mapFromScene(
+        QRectF(0, 0, SlideScene::SLIDE_W, SlideScene::SLIDE_H)).boundingRect();
+    if (r.width() < 8 || r.height() < 8) { if (owned) owned->deleteLater(); return; }
+
+    // Tear down any preview still in flight.
+    if (m_previewAnim) { m_previewAnim->stop(); m_previewAnim = nullptr; }
+    if (m_previewOverlay) { m_previewOverlay->deleteLater(); m_previewOverlay = nullptr; }
+
+    auto* ov = new QLabel(m_view->viewport());
+    ov->setAttribute(Qt::WA_TransparentForMouseEvents);
+    ov->setGeometry(r);
+    ov->setPixmap(frame(0.0));
+    ov->show();
+    ov->raise();
+    m_previewOverlay = ov;
+    if (owned) owned->setParent(ov);   // tie the temp scene's lifetime to the overlay
+
+    auto* anim = new QVariantAnimation(this);
+    anim->setStartValue(0.0);
+    anim->setEndValue(1.0);
+    anim->setDuration(durationMs);
+    connect(anim, &QVariantAnimation::valueChanged, ov, [ov, frame](const QVariant& v) {
+        ov->setPixmap(frame(v.toDouble()));
+    });
+    connect(anim, &QVariantAnimation::finished, this, [this, ov] {
+        if (m_previewOverlay == ov) m_previewOverlay = nullptr;
+        m_previewAnim = nullptr;
+        ov->deleteLater();
+    });
+    m_previewAnim = anim;
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void ImpressModule::previewTransition(SlideTransition transition) {
+    if (transition == SlideTransition::None) return;
+    if (m_currentIdx < 0) return;
+    const QRect r = m_view->mapFromScene(
+        QRectF(0, 0, SlideScene::SLIDE_W, SlideScene::SLIDE_H)).boundingRect();
+    const QSize sz = r.size();
+    if (sz.isEmpty()) return;
+
+    const QPixmap newPm = renderSceneToPixmap(m_scenes[m_currentIdx], sz);
+    QPixmap oldPm;
+    if (m_currentIdx > 0) {
+        oldPm = renderSceneToPixmap(m_scenes[m_currentIdx - 1], sz);
+    } else {
+        oldPm = QPixmap(sz);
+        oldPm.fill(QColor("#C6CAD3"));   // neutral backdrop when there's no prior slide
+    }
+    runOverlayPreview(450, [sz, oldPm, newPm, transition](double t) {
+        return PresentModeWindow::compositeFrame(sz, oldPm, newPm, transition, t);
+    });
+}
+
+void ImpressModule::previewSlideAnimation(SlideAnimation anim) {
+    if (anim == SlideAnimation::None) return;
+    if (m_currentIdx < 0) return;
+    const QRect r = m_view->mapFromScene(
+        QRectF(0, 0, SlideScene::SLIDE_W, SlideScene::SLIDE_H)).boundingRect();
+    const QSize sz = r.size();
+    if (sz.isEmpty()) return;
+
+    const QPixmap newPm = renderSceneToPixmap(m_scenes[m_currentIdx], sz);
+    QPixmap backdrop(sz);
+    backdrop.fill(QColor("#C6CAD3"));    // neutral backdrop behind the entering slide
+    runOverlayPreview(650, [sz, backdrop, newPm, anim](double t) {
+        return PresentModeWindow::compositeSlideAnim(sz, backdrop, newPm, anim, t);
+    });
+}
+
+void ImpressModule::previewObjectAnimations() {
+    if (m_currentIdx < 0) return;
+    syncCurrentSceneToData();
+
+    const QRect r = m_view->mapFromScene(
+        QRectF(0, 0, SlideScene::SLIDE_W, SlideScene::SLIDE_H)).boundingRect();
+    const QSize sz = r.size();
+    if (sz.isEmpty()) return;
+
+    // Build a throwaway scene from the current slide data so the live editor
+    // scene (and its selection handles / undo) is never disturbed.
+    auto* tmp = new SlideScene(this);
+    tmp->loadFromData(m_slideData[m_currentIdx]);
+
+    struct AnimRec { QGraphicsItem* it; ItemAnimation a; PresentModeWindow::ItemNatural nat; };
+    auto* recs = new std::vector<AnimRec>();   // owned via the overlay (cleaned on finish)
+    for (auto* it : tmp->items()) {
+        if (it->zValue() < 0) continue;        // background
+        if (it->parentItem()) continue;        // child (e.g. table cell)
+        const auto a = static_cast<ItemAnimation>(it->data(SlideScene::AnimationKey).toInt());
+        if (a == ItemAnimation::None) continue;
+        it->setTransformOriginPoint(it->boundingRect().center());
+        recs->push_back({ it, a, { it->pos(), it->opacity(), it->scale(), it->rotation() } });
+    }
+    if (recs->empty()) { delete recs; delete tmp; return; }
+
+    // Free the helper vector when the temp scene (its parent-to-be) dies.
+    connect(tmp, &QObject::destroyed, this, [recs] { delete recs; });
+
+    runOverlayPreview(700, [this, tmp, recs, sz](double t) {
+        for (const auto& rec : *recs)
+            PresentModeWindow::applyItemAnimFrame(rec.it, rec.a, rec.nat, t);
+        return renderSceneToPixmap(tmp, sz);
+    }, tmp);
+}
+
+void ImpressModule::applyDesignColor(const QColor& color) {
+    if (m_currentIdx < 0 || !color.isValid()) return;
+    auto* scene = m_scenes[m_currentIdx];
+
+    // If the user has selected a colour-division part (a shape) on the slide,
+    // recolour just that part. Otherwise recolour the whole-slide background,
+    // which is the largest portion of the slide.
+    if (scene->hasShapeSelection()) {
+        scene->setSelectedFill(color);
+    } else {
+        SlideData snap; scene->saveToData(snap);
+        snap.background  = color;
+        snap.background2 = QColor();   // solid fill — clear any gradient
+        scene->loadFromData(snap);
+    }
+    commitUndoStep();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

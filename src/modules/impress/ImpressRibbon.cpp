@@ -585,14 +585,14 @@ QWidget* ImpressRibbon::buildHomeTab() {
     layout->setContentsMargins(8, 4, 8, 2);
     layout->setSpacing(0);
 
-    // ── Quick access: undo / redo ───────────────────────────────────────
-    m_btnUndo = makeIconBtn(undoIcon(), "Undo  (Ctrl+Z)");
-    m_btnRedo = makeIconBtn(redoIcon(), "Redo  (Ctrl+Y)");
+    // ── Quick access: undo / redo (no group caption; hover shows the name) ─
+    m_btnUndo = makeIconBtn(undoIcon(), "Undo");
+    m_btnRedo = makeIconBtn(redoIcon(), "Redo");
     m_btnUndo->setEnabled(false);
     m_btnRedo->setEnabled(false);
     connect(m_btnUndo, &QToolButton::clicked, this, &ImpressRibbon::undoRequested);
     connect(m_btnRedo, &QToolButton::clicked, this, &ImpressRibbon::redoRequested);
-    layout->addWidget(makeGroup("Undo", { m_btnUndo, m_btnRedo }));
+    layout->addWidget(makeGroup("", { m_btnUndo, m_btnRedo }));
     layout->addWidget(makeSeparator());
 
     // ── Slides group ────────────────────────────────────────────────────

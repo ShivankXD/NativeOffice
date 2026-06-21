@@ -37,6 +37,24 @@ public:
                                QWidget* parent = nullptr);
     ~PresentModeWindow() override;
 
+    // ── Reusable compositing / animation maths ───────────────────────────
+    // These are shared with the in-editor preview (ImpressModule) so the
+    // editor preview is pixel-identical to the actual slide show.
+
+    // Natural (settled) state of a graphics item, captured before animating.
+    struct ItemNatural { QPointF pos; qreal opacity; qreal scale; qreal rotation; };
+
+    // Composite one frame of a slide transition (old → new) at progress t∈[0,1].
+    static QPixmap compositeFrame(const QSize& sz, const QPixmap& oldPm,
+                                  const QPixmap& newPm, SlideTransition type, double t);
+    // Composite one frame of a whole-slide entrance animation at t∈[0,1].
+    static QPixmap compositeSlideAnim(const QSize& sz, const QPixmap& oldPm,
+                                      const QPixmap& newPm, SlideAnimation type, double t);
+    // Position a single graphics item for per-object animation `a` at t∈[0,1],
+    // where `nat` is the item's settled state (t == 1 → natural for entrances).
+    static void applyItemAnimFrame(QGraphicsItem* it, ItemAnimation a,
+                                   const ItemNatural& nat, double t);
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
@@ -54,13 +72,9 @@ private:
     void updateConsole();
 
     QPixmap renderScene(SlideScene* scene) const;
-    QPixmap compositeFrame(const QPixmap& oldPm, const QPixmap& newPm,
-                           SlideTransition type, double t) const;
     void runTransition(const QPixmap& oldPm, const QPixmap& newPm,
                        SlideTransition type, std::function<void()> onDone);
 
-    QPixmap compositeSlideAnim(const QPixmap& oldPm, const QPixmap& newPm,
-                               SlideAnimation type, double t) const;
     void runSlideAnimation(const QPixmap& oldPm, const QPixmap& newPm,
                            SlideAnimation type, std::function<void()> onDone);
 

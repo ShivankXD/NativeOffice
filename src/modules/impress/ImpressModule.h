@@ -28,6 +28,8 @@
 
 #include <QWidget>
 #include <QGraphicsView>
+#include <QPixmap>
+#include <functional>
 #include <vector>
 
 class QUndoStack;
@@ -37,6 +39,8 @@ class QJsonObject;
 class QTabWidget;
 class QTimer;
 class QListWidget;
+class QLabel;
+class QVariantAnimation;
 
 namespace NativeOffice {
 
@@ -112,6 +116,20 @@ private:
     void clearDeck();                           // remove all slides
     void refitView();                           // fit slide to viewport at current zoom
 
+    // ── In-editor effect previews (so the user immediately sees the chosen
+    //    transition / slide animation / object animation play once) ─────────
+    [[nodiscard]] QPixmap renderSceneToPixmap(SlideScene* scene, const QSize& sz) const;
+    void runOverlayPreview(int durationMs,
+                           const std::function<QPixmap(double)>& frame,
+                           QObject* owned = nullptr);
+    void previewTransition(SlideTransition transition);
+    void previewSlideAnimation(SlideAnimation anim);
+    void previewObjectAnimations();
+    // Apply a design background colour, honouring an on-slide selection: a
+    // selected shape (a colour-division part) is recoloured; otherwise the
+    // whole-slide background (the largest portion) is recoloured.
+    void applyDesignColor(const QColor& color);
+
     void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
 
@@ -158,6 +176,10 @@ private:
 
     bool m_notesVisible { true };
     int  m_zoomPercent  { 100 };   // 100% == fit-to-window
+
+    // ── Effect-preview overlay (sits over the canvas during a preview) ────
+    QLabel*            m_previewOverlay { nullptr };
+    QVariantAnimation* m_previewAnim    { nullptr };
 };
 
 } // namespace NativeOffice

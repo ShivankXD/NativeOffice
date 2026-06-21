@@ -130,6 +130,7 @@ signals:
     void sceneModified();
     void insertModeLeft();
     void selectionInfoChanged();   // selection changed -> ribbon should re-sync
+    void animationApplied(ItemAnimation anim);  // object animation set -> preview it
 
 protected:
     void mousePressEvent  (QGraphicsSceneMouseEvent* event) override;

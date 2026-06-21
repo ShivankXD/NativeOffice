@@ -193,7 +193,10 @@ void PresentModeWindow::showEvent(QShowEvent* event) {
         // Defer first render until geometry is final (fullscreen settled).
         QTimer::singleShot(0, this, [this] {
             m_slideLabel->setGeometry(rect());
-            goTo(m_index, /*animate=*/false);
+            // Play the first slide's entrance (whole-slide + per-object) animation
+            // when the show opens, just like PowerPoint. There is no previous
+            // slide, so any slide *transition* is correctly skipped (null oldPm).
+            goTo(m_index, /*animate=*/true);
         });
     }
 }
@@ -225,9 +228,8 @@ QPixmap PresentModeWindow::renderScene(SlideScene* scene) const {
     return pm;
 }
 
-QPixmap PresentModeWindow::compositeFrame(const QPixmap& oldPm, const QPixmap& newPm,
-                                          SlideTransition type, double t) const {
-    const QSize sz = size();
+QPixmap PresentModeWindow::compositeFrame(const QSize& sz, const QPixmap& oldPm,
+                                          const QPixmap& newPm, SlideTransition type, double t) {
     const int W = sz.width(), H = sz.height();
     QPixmap out(sz);
     out.fill(Qt::black);
@@ -330,7 +332,7 @@ void PresentModeWindow::runTransition(const QPixmap& oldPm, const QPixmap& newPm
     connect(m_transitionAnim, &QVariantAnimation::valueChanged, this,
             [this, oldPm, newPm, type](const QVariant& v) {
         if (m_black) return;
-        m_slideLabel->setPixmap(compositeFrame(oldPm, newPm, type, v.toDouble()));
+        m_slideLabel->setPixmap(compositeFrame(size(), oldPm, newPm, type, v.toDouble()));
     });
     connect(m_transitionAnim, &QVariantAnimation::finished, this,
             [this, newPm, onDone]() {
@@ -350,9 +352,8 @@ double easeOutBounce(double t) {
 }
 }
 
-QPixmap PresentModeWindow::compositeSlideAnim(const QPixmap& oldPm, const QPixmap& newPm,
-                                              SlideAnimation type, double t) const {
-    const QSize sz = size();
+QPixmap PresentModeWindow::compositeSlideAnim(const QSize& sz, const QPixmap& oldPm,
+                                              const QPixmap& newPm, SlideAnimation type, double t) {
     const int W = sz.width(), H = sz.height();
     QPixmap out(sz);
     out.fill(Qt::black);
@@ -414,7 +415,7 @@ void PresentModeWindow::runSlideAnimation(const QPixmap& oldPm, const QPixmap& n
     connect(m_transitionAnim, &QVariantAnimation::valueChanged, this,
             [this, oldPm, newPm, type](const QVariant& v) {
         if (m_black) return;
-        m_slideLabel->setPixmap(compositeSlideAnim(oldPm, newPm, type, v.toDouble()));
+        m_slideLabel->setPixmap(compositeSlideAnim(size(), oldPm, newPm, type, v.toDouble()));
     });
     connect(m_transitionAnim, &QVariantAnimation::finished, this,
             [this, newPm, onDone]() {
@@ -425,6 +426,70 @@ void PresentModeWindow::runSlideAnimation(const QPixmap& oldPm, const QPixmap& n
 }
 
 // ── Per-object entrance animations ───────────────────────────────────────────
+void PresentModeWindow::applyItemAnimFrame(QGraphicsItem* it, ItemAnimation a,
+                                           const ItemNatural& o, double t) {
+    switch (a) {
+    case ItemAnimation::FadeIn:
+        it->setOpacity(o.opacity * t);
+        break;
+    case ItemAnimation::FlyInLeft: {
+        const QPointF start = o.pos - QPointF(SlideScene::SLIDE_W * 0.6, 0);
+        it->setPos(start + (o.pos - start) * t);
+        break;
+    }
+    case ItemAnimation::FlyInRight: {
+        const QPointF start = o.pos + QPointF(SlideScene::SLIDE_W * 0.6, 0);
+        it->setPos(start + (o.pos - start) * t);
+        break;
+    }
+    case ItemAnimation::FlyInTop: {
+        const QPointF start = o.pos - QPointF(0, SlideScene::SLIDE_H * 0.6);
+        it->setPos(start + (o.pos - start) * t);
+        break;
+    }
+    case ItemAnimation::FlyInBottom: {
+        const QPointF start = o.pos + QPointF(0, SlideScene::SLIDE_H * 0.6);
+        it->setPos(start + (o.pos - start) * t);
+        break;
+    }
+    case ItemAnimation::ZoomIn:
+        it->setScale(0.2 + 0.8 * t);
+        it->setOpacity(o.opacity * t);
+        break;
+    case ItemAnimation::SpinIn:
+        it->setRotation(-180.0 * (1.0 - t));
+        it->setScale(0.3 + 0.7 * t);
+        it->setOpacity(o.opacity * t);
+        break;
+    case ItemAnimation::EmphasisPulse:
+        it->setScale(o.scale * (1.0 + 0.3 * std::sin(M_PI * t)));
+        break;
+    case ItemAnimation::EmphasisSpin:
+        it->setRotation(o.rotation + 360.0 * t);
+        break;
+    case ItemAnimation::EmphasisBlink:
+        it->setOpacity(o.opacity * (0.5 + 0.5 * std::cos(2.0 * M_PI * t)));
+        break;
+    case ItemAnimation::ExitFadeOut:
+        it->setOpacity(o.opacity * (1.0 - t));
+        break;
+    case ItemAnimation::ExitFlyLeft:
+        it->setPos(o.pos - QPointF(SlideScene::SLIDE_W * 0.6 * t, 0));
+        it->setOpacity(o.opacity * (1.0 - t));
+        break;
+    case ItemAnimation::ExitFlyRight:
+        it->setPos(o.pos + QPointF(SlideScene::SLIDE_W * 0.6 * t, 0));
+        it->setOpacity(o.opacity * (1.0 - t));
+        break;
+    case ItemAnimation::ExitZoomOut:
+        it->setScale(o.scale * (1.0 - 0.8 * t));
+        it->setOpacity(o.opacity * (1.0 - t));
+        break;
+    default:
+        break;
+    }
+}
+
 ItemAnimation PresentModeWindow::animOf(QGraphicsItem* item) const {
     return static_cast<ItemAnimation>(item->data(SlideScene::AnimationKey).toInt());
 }
@@ -500,50 +565,7 @@ void PresentModeWindow::playObjectAnimations(SlideScene* scene) {
         const double t = v.toDouble();
         for (auto* it : m_animItems) {
             const OrigState& o = m_orig[it];
-            switch (animOf(it)) {
-            case ItemAnimation::FadeIn:
-                it->setOpacity(o.opacity * t);
-                break;
-            case ItemAnimation::FlyInLeft: {
-                const QPointF start = o.pos - QPointF(SlideScene::SLIDE_W * 0.6, 0);
-                it->setPos(start + (o.pos - start) * t);
-                break;
-            }
-            case ItemAnimation::FlyInRight: {
-                const QPointF start = o.pos + QPointF(SlideScene::SLIDE_W * 0.6, 0);
-                it->setPos(start + (o.pos - start) * t);
-                break;
-            }
-            case ItemAnimation::FlyInTop: {
-                const QPointF start = o.pos - QPointF(0, SlideScene::SLIDE_H * 0.6);
-                it->setPos(start + (o.pos - start) * t);
-                break;
-            }
-            case ItemAnimation::FlyInBottom: {
-                const QPointF start = o.pos + QPointF(0, SlideScene::SLIDE_H * 0.6);
-                it->setPos(start + (o.pos - start) * t);
-                break;
-            }
-            case ItemAnimation::ZoomIn:
-                it->setScale(0.2 + 0.8 * t);
-                it->setOpacity(o.opacity * t);
-                break;
-            case ItemAnimation::SpinIn:
-                it->setRotation(-180.0 * (1.0 - t));
-                it->setScale(0.3 + 0.7 * t);
-                it->setOpacity(o.opacity * t);
-                break;
-            case ItemAnimation::EmphasisPulse:
-                it->setScale(o.scale * (1.0 + 0.3 * std::sin(M_PI * t)));
-                break;
-            case ItemAnimation::EmphasisSpin:
-                it->setRotation(o.rotation + 360.0 * t);
-                break;
-            case ItemAnimation::EmphasisBlink:
-                it->setOpacity(o.opacity * (0.5 + 0.5 * std::cos(2.0 * M_PI * t)));
-                break;
-            default: break;
-            }
+            applyItemAnimFrame(it, animOf(it), { o.pos, o.opacity, o.scale, o.rotation }, t);
         }
         if (!m_black) m_slideLabel->setPixmap(renderScene(scene));
     });
@@ -599,24 +621,7 @@ void PresentModeWindow::playExitAnimations(SlideScene* scene, std::function<void
         const double t = v.toDouble();
         for (auto* it : m_animItems) {
             const OrigState& o = m_orig[it];
-            switch (animOf(it)) {
-            case ItemAnimation::ExitFadeOut:
-                it->setOpacity(o.opacity * (1.0 - t));
-                break;
-            case ItemAnimation::ExitFlyLeft:
-                it->setPos(o.pos - QPointF(SlideScene::SLIDE_W * 0.6 * t, 0));
-                it->setOpacity(o.opacity * (1.0 - t));
-                break;
-            case ItemAnimation::ExitFlyRight:
-                it->setPos(o.pos + QPointF(SlideScene::SLIDE_W * 0.6 * t, 0));
-                it->setOpacity(o.opacity * (1.0 - t));
-                break;
-            case ItemAnimation::ExitZoomOut:
-                it->setScale(o.scale * (1.0 - 0.8 * t));
-                it->setOpacity(o.opacity * (1.0 - t));
-                break;
-            default: break;
-            }
+            applyItemAnimFrame(it, animOf(it), { o.pos, o.opacity, o.scale, o.rotation }, t);
         }
         if (!m_black) m_slideLabel->setPixmap(renderScene(scene));
     });

@@ -1012,7 +1012,10 @@ void SlideScene::setSelectedAnimation(ItemAnimation anim) {
         it->setData(AnimationKey, static_cast<int>(anim));
         changed = true;
     }
-    if (changed) emit sceneModified();
+    if (changed) {
+        emit sceneModified();
+        emit animationApplied(anim);   // let the editor play a quick preview
+    }
 }
 
 ItemAnimation SlideScene::selectedAnimation() const {
