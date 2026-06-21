@@ -88,6 +88,15 @@ public:
     // Drop a pre-arranged SmartArt diagram (shapes + labels) on the slide.
     void insertSmartArt(SmartArtKind kind);
 
+    // Insert a chart (with sample data) centred on the slide.
+    void insertChart(ChartKind kind);
+
+    // Render a chart with QPainter — shared by the on-slide item and by PPTX
+    // export (which rasterises it to an embedded image).
+    static void paintChart(QPainter& p, const QRectF& rect, ChartKind kind,
+                           const std::vector<QString>& labels,
+                           const std::vector<double>& values, const QString& title);
+
     // Insert a ready-made text box (WordArt / Symbol / Slide Number / Date …),
     // centred horizontally near the top, then select it for editing.
     void insertPresetText(const QString& text, qreal fontSize = 28.0,
@@ -104,6 +113,7 @@ public:
     // ── Selected-object styling (shapes / rectangles / ellipses) ──────────
     void setSelectedFill(const QColor& color);
     void setSelectedOutline(const QColor& color);
+    void setSelectedOpacity(qreal opacity);
     void toggleSelectedShadow();
     [[nodiscard]] bool hasShapeSelection() const;
 
@@ -139,6 +149,9 @@ private:
     QGraphicsItem*        addShape    (const QRectF& rect, ShapeKind kind);
     QGraphicsItem*        addTable    (const QRectF& rect, int rows, int cols,
                                        const std::vector<QString>& texts = {});
+    QGraphicsItem*        addChart    (const QRectF& rect, ChartKind kind, const QString& title,
+                                       const std::vector<QString>& labels,
+                                       const std::vector<double>& values);
 
     // Returns the slide background rect item (always the first item added)
     QGraphicsRectItem* backgroundItem() const;
@@ -148,6 +161,7 @@ private:
     void applyBackgroundBrush();
 
     void rebuildHandles();
+    void positionHandles();   // reposition existing handles without recreating them
     void clearHandles();
     void resizeTargetTo(QGraphicsItem* target, HandleRole role, const QPointF& scenePos);
 

@@ -14,11 +14,25 @@
 #include <QStyleOptionGraphicsItem>
 #include <QFocusEvent>
 #include <QTextOption>
+#include <QPainter>
+#include <QPolygonF>
 #include <QTextCharFormat>
 #include <QGraphicsSceneContextMenuEvent>
 #include <QMenu>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QColorDialog>
+#include <QDialog>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QPushButton>
+#include <QDialogButtonBox>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QSlider>
+#include <QLabel>
+#include <QApplication>
+#include <QImage>
 #include <algorithm>
 #include <QGraphicsSceneMouseEvent>
 #include <QPen>
@@ -36,16 +50,52 @@
 
 namespace NativeOffice {
 
+// Brightness (-100..100 added) + contrast (-100..100 scaled) adjustment.
+static QImage adjustImage(const QImage& src, int brightness, int contrast) {
+    if (brightness == 0 && contrast == 0) return src;
+    QImage img = src.convertToFormat(QImage::Format_ARGB32);
+    const double factor = (100.0 + contrast) / 100.0;
+    auto adj = [&](int v) {
+        return qBound(0, static_cast<int>((v - 128) * factor + 128 + brightness), 255);
+    };
+    for (int y = 0; y < img.height(); ++y) {
+        QRgb* line = reinterpret_cast<QRgb*>(img.scanLine(y));
+        for (int x = 0; x < img.width(); ++x) {
+            const QRgb px = line[x];
+            line[x] = qRgba(adj(qRed(px)), adj(qGreen(px)), adj(qBlue(px)), qAlpha(px));
+        }
+    }
+    return img;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SlideImageItem — QGraphicsPixmapItem that remembers its full-res source so
-// repeated resizes don't compound quality loss.
+// repeated resizes don't compound quality loss, plus brightness/contrast.
 // ─────────────────────────────────────────────────────────────────────────────
 class SlideImageItem : public QGraphicsPixmapItem {
 public:
     explicit SlideImageItem(const QPixmap& original) : m_original(original) {}
     QPixmap original() const { return m_original; }
+
+    int brightness() const { return m_brightness; }
+    int contrast()   const { return m_contrast; }
+
+    // Adjusted full-res source (used when re-scaling on resize).
+    QPixmap adjustedSource() const {
+        return QPixmap::fromImage(adjustImage(m_original.toImage(), m_brightness, m_contrast));
+    }
+
+    void setAdjust(int brightness, int contrast) {
+        m_brightness = brightness;
+        m_contrast   = contrast;
+        const QSize sz = pixmap().size().isEmpty() ? m_original.size() : pixmap().size();
+        setPixmap(adjustedSource().scaled(sz, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    }
+
 private:
     QPixmap m_original;
+    int     m_brightness { 0 };
+    int     m_contrast   { 0 };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -186,6 +236,93 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SlideChartItem — a data chart rendered with QPainter. Double-click opens a
+// small data editor (title + label/value rows).
+// ─────────────────────────────────────────────────────────────────────────────
+class SlideChartItem : public QGraphicsRectItem {
+public:
+    SlideChartItem(ChartKind k, const QRectF& r) : QGraphicsRectItem(r), m_kind(k) {}
+
+    ChartKind kind() const { return m_kind; }
+    QString   title() const { return m_title; }
+    const std::vector<QString>& labels() const { return m_labels; }
+    const std::vector<double>&  values() const { return m_values; }
+
+    void setTitle(const QString& t) { m_title = t; update(); }
+    void setData(const std::vector<QString>& l, const std::vector<double>& v) {
+        m_labels = l; m_values = v; update();
+    }
+    void setRectKeep(const QRectF& r) { setRect(r); update(); }
+
+protected:
+    void paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*) override {
+        SlideScene::paintChart(*p, rect(), m_kind, m_labels, m_values, m_title);
+        if (isSelected()) {
+            QPen sel(QColor("#E8372A")); sel.setWidthF(1.5);
+            p->setPen(sel); p->setBrush(Qt::NoBrush); p->drawRect(rect());
+        }
+    }
+
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent*) override {
+        QDialog dlg(QApplication::activeWindow());
+        dlg.setWindowTitle("Edit Chart Data");
+        dlg.resize(320, 360);
+        auto* v = new QVBoxLayout(&dlg);
+
+        auto* titleEdit = new QLineEdit(m_title, &dlg);
+        titleEdit->setPlaceholderText("Chart title");
+        v->addWidget(titleEdit);
+
+        auto* table = new QTableWidget(static_cast<int>(m_labels.size()), 2, &dlg);
+        table->setHorizontalHeaderLabels({ "Label", "Value" });
+        table->horizontalHeader()->setStretchLastSection(true);
+        for (size_t i = 0; i < m_labels.size(); ++i) {
+            table->setItem(static_cast<int>(i), 0, new QTableWidgetItem(m_labels[i]));
+            table->setItem(static_cast<int>(i), 1,
+                           new QTableWidgetItem(QString::number(m_values[i])));
+        }
+        v->addWidget(table);
+
+        auto* btnRow = new QHBoxLayout;
+        auto* addBtn = new QPushButton("Add Row", &dlg);
+        auto* delBtn = new QPushButton("Remove Row", &dlg);
+        btnRow->addWidget(addBtn); btnRow->addWidget(delBtn); btnRow->addStretch();
+        v->addLayout(btnRow);
+        QObject::connect(addBtn, &QPushButton::clicked, &dlg, [table] {
+            table->insertRow(table->rowCount());
+        });
+        QObject::connect(delBtn, &QPushButton::clicked, &dlg, [table] {
+            if (table->currentRow() >= 0) table->removeRow(table->currentRow());
+            else if (table->rowCount() > 0) table->removeRow(table->rowCount() - 1);
+        });
+
+        auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+        v->addWidget(bb);
+        QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+        if (dlg.exec() != QDialog::Accepted) return;
+
+        m_title = titleEdit->text();
+        std::vector<QString> nl; std::vector<double> nv;
+        for (int r = 0; r < table->rowCount(); ++r) {
+            const auto* li = table->item(r, 0);
+            const auto* vi = table->item(r, 1);
+            nl.push_back(li ? li->text() : QString());
+            nv.push_back(vi ? vi->text().toDouble() : 0.0);
+        }
+        if (!nl.empty()) { m_labels = nl; m_values = nv; }
+        update();
+    }
+
+private:
+    ChartKind m_kind;
+    QString   m_title { "Chart" };
+    std::vector<QString> m_labels;
+    std::vector<double>  m_values;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SlideHandleItem — small square (or circular, for rotate) handle drawn on
 // top of the currently-selected item. Lives directly in the scene (not as a
 // child of the target) so its own geometry stays simple to reason about.
@@ -231,7 +368,9 @@ protected:
         } else {
             m_scene->resizeTargetTo(m_target, m_role, e->scenePos());
         }
-        m_scene->rebuildHandles();
+        // Reposition (do NOT rebuild) the handles: rebuilding would delete this
+        // very handle mid-drag and abort the resize/rotate.
+        m_scene->positionHandles();
         e->accept();
     }
 
@@ -555,6 +694,10 @@ void SlideScene::mousePressEvent(QGraphicsSceneMouseEvent* event) {
 void SlideScene::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
     if (m_insertMode == InsertMode::None || !m_dragItem) {
         QGraphicsScene::mouseMoveEvent(event);
+        // While the user drags a selected object's body, keep its handles glued
+        // to it (the handles are separate scene items, not children).
+        if ((event->buttons() & Qt::LeftButton) && m_handleTarget)
+            positionHandles();
         return;
     }
 
@@ -574,6 +717,7 @@ void SlideScene::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
 void SlideScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
     if (m_insertMode == InsertMode::None || !m_dragItem) {
         QGraphicsScene::mouseReleaseEvent(event);
+        if (m_handleTarget) positionHandles();   // settle handles after a body drag
         return;
     }
 
@@ -646,6 +790,61 @@ void SlideScene::contextMenuEvent(QGraphicsSceneContextMenuEvent* event) {
     it->setSelected(true);
 
     QMenu menu;
+
+    // ── Format (Figma-style quick styling for the object) ───────────────
+    QMenu* fmt = menu.addMenu("Format");
+    QAction* aFill    = fmt->addAction("Fill Colour…");
+    QAction* aOutline = fmt->addAction("Outline Colour…");
+    QMenu* opac = fmt->addMenu("Opacity");
+    for (int pct : { 100, 75, 50, 25, 10 }) {
+        QAction* a = opac->addAction(QString("%1%").arg(pct));
+        const qreal o = pct / 100.0;
+        connect(a, &QAction::triggered, this, [this, o] { setSelectedOpacity(o); });
+    }
+    connect(aFill, &QAction::triggered, this, [this] {
+        const QColor c = QColorDialog::getColor(QColor("#E8372A"), nullptr, "Fill Colour",
+                                                QColorDialog::ShowAlphaChannel);
+        if (c.isValid()) setSelectedFill(c);
+    });
+    connect(aOutline, &QAction::triggered, this, [this] {
+        const QColor c = QColorDialog::getColor(QColor("#2C3140"), nullptr, "Outline Colour");
+        if (c.isValid()) setSelectedOutline(c);
+    });
+    QAction* aShadow = menu.addAction("Toggle Shadow");
+    connect(aShadow, &QAction::triggered, this, [this] { toggleSelectedShadow(); });
+
+    if (auto* simg = dynamic_cast<SlideImageItem*>(it)) {
+        QAction* aImg = menu.addAction("Image Effects…");
+        connect(aImg, &QAction::triggered, this, [this, simg] {
+            const int b0 = simg->brightness(), c0 = simg->contrast();
+            QDialog dlg(QApplication::activeWindow());
+            dlg.setWindowTitle("Image Effects");
+            dlg.resize(320, 140);
+            auto* v = new QVBoxLayout(&dlg);
+            auto mkRow = [&](const QString& name, int val) {
+                auto* row = new QHBoxLayout;
+                auto* lbl = new QLabel(name, &dlg); lbl->setFixedWidth(80);
+                auto* s = new QSlider(Qt::Horizontal, &dlg);
+                s->setRange(-100, 100); s->setValue(val);
+                row->addWidget(lbl); row->addWidget(s);
+                v->addLayout(row);
+                return s;
+            };
+            auto* bs = mkRow("Brightness", b0);
+            auto* cs = mkRow("Contrast", c0);
+            auto apply = [simg, bs, cs] { simg->setAdjust(bs->value(), cs->value()); };
+            connect(bs, &QSlider::valueChanged, &dlg, [apply](int) { apply(); });
+            connect(cs, &QSlider::valueChanged, &dlg, [apply](int) { apply(); });
+            auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+            v->addWidget(bb);
+            connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+            connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+            if (dlg.exec() != QDialog::Accepted) simg->setAdjust(b0, c0);   // revert preview
+            else emit sceneModified();
+        });
+    }
+    menu.addSeparator();
+
     QAction* aLink   = menu.addAction("Add / Edit Hyperlink…");
     QAction* aUnlink = menu.addAction("Remove Hyperlink");
     aUnlink->setEnabled(!it->data(HyperlinkKey).toString().isEmpty());
@@ -752,6 +951,17 @@ void SlideScene::setSelectedOutline(const QColor& color) {
     if (changed) emit sceneModified();
 }
 
+void SlideScene::setSelectedOpacity(qreal opacity) {
+    bool changed = false;
+    for (auto* it : selectedItems()) {
+        if (it == backgroundItem()) continue;
+        if (dynamic_cast<SlideHandleItem*>(it)) continue;
+        it->setOpacity(std::clamp(opacity, 0.0, 1.0));
+        changed = true;
+    }
+    if (changed) emit sceneModified();
+}
+
 void SlideScene::toggleSelectedShadow() {
     bool changed = false;
     for (auto* it : selectedItems()) {
@@ -845,6 +1055,27 @@ void SlideScene::rebuildHandles() {
     place(HandleRole::Rotate, QPointF(r.center().x(), r.top() - 26));
 }
 
+void SlideScene::positionHandles() {
+    if (!m_handleTarget || m_handles.empty()) return;
+    const QRectF r = m_handleTarget->boundingRect();
+
+    for (auto* h : m_handles) {
+        QPointF local;
+        switch (h->role()) {
+        case HandleRole::TopLeft:     local = r.topLeft();                          break;
+        case HandleRole::Top:         local = QPointF(r.center().x(), r.top());      break;
+        case HandleRole::TopRight:    local = r.topRight();                         break;
+        case HandleRole::Right:       local = QPointF(r.right(), r.center().y());    break;
+        case HandleRole::BottomRight: local = r.bottomRight();                      break;
+        case HandleRole::Bottom:      local = QPointF(r.center().x(), r.bottom());   break;
+        case HandleRole::BottomLeft:  local = r.bottomLeft();                       break;
+        case HandleRole::Left:        local = QPointF(r.left(), r.center().y());     break;
+        case HandleRole::Rotate:      local = QPointF(r.center().x(), r.top() - 26); break;
+        }
+        h->setPos(m_handleTarget->mapToScene(local));
+    }
+}
+
 void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QPointF& scenePos) {
     if (!target) return;
     const QPointF local = target->mapFromScene(scenePos);
@@ -858,6 +1089,8 @@ void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QP
     QRectF r;
     if (auto* tb = dynamic_cast<SlideTableItem*>(target)) {
         r = tb->rect();
+    } else if (auto* ch = dynamic_cast<SlideChartItem*>(target)) {
+        r = ch->rect();
     } else if (auto* sh = dynamic_cast<SlideShapeItem*>(target)) {
         r = sh->rect();
     } else if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(target)) {
@@ -887,6 +1120,8 @@ void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QP
 
     if (auto* tb = dynamic_cast<SlideTableItem*>(target)) {
         tb->setRectAndLayout(r);
+    } else if (auto* ch = dynamic_cast<SlideChartItem*>(target)) {
+        ch->setRectKeep(r);
     } else if (auto* sh = dynamic_cast<SlideShapeItem*>(target)) {
         sh->setRect(r);
     } else if (auto* ri = qgraphicsitem_cast<QGraphicsRectItem*>(target)) {
@@ -897,7 +1132,7 @@ void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QP
         pi->setOffset(r.topLeft());
         QPixmap src;
         if (auto* simg = dynamic_cast<SlideImageItem*>(pi))
-            src = simg->original();
+            src = simg->adjustedSource();
         else
             src = pi->pixmap();
         pi->setPixmap(src.scaled(r.size().toSize(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
@@ -1089,6 +1324,129 @@ QGraphicsItem* SlideScene::addTable(const QRectF& rect, int rows, int cols,
     return item;
 }
 
+// ── Chart rendering (shared by the on-slide item and PPTX rasterisation) ─────
+void SlideScene::paintChart(QPainter& p, const QRectF& r, ChartKind kind,
+                            const std::vector<QString>& labels,
+                            const std::vector<double>& values, const QString& title) {
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+
+    p.setPen(QPen(QColor("#D7DAE0"), 1));
+    p.setBrush(Qt::white);
+    p.drawRect(r);
+
+    static const QColor pal[] = {
+        QColor("#2563EB"), QColor("#16A34A"), QColor("#E8372A"), QColor("#F59E0B"),
+        QColor("#7C3AED"), QColor("#0EA5E9"), QColor("#DB2777"), QColor("#65A30D")
+    };
+    const int n = static_cast<int>(std::min(labels.size(), values.size()));
+
+    QRectF area = r.adjusted(14, 12, -14, -14);
+    if (!title.isEmpty()) {
+        p.setFont(QFont("Segoe UI", 12, QFont::Bold));
+        p.setPen(QColor("#1C1E26"));
+        p.drawText(QRectF(r.left(), r.top() + 8, r.width(), 24),
+                   Qt::AlignHCenter | Qt::AlignTop, title);
+        area.setTop(area.top() + 26);
+    }
+    if (n == 0) { p.restore(); return; }
+
+    if (kind == ChartKind::Pie) {
+        double sum = 0; for (int i = 0; i < n; ++i) sum += std::max(0.0, values[i]);
+        if (sum <= 0) sum = 1;
+        const qreal d = std::min(area.width() * 0.55, area.height());
+        QRectF pie(area.left(), area.center().y() - d / 2, d, d);
+        double start = 90.0;
+        for (int i = 0; i < n; ++i) {
+            const double span = std::max(0.0, values[i]) / sum * 360.0;
+            p.setBrush(pal[i % 8]); p.setPen(QPen(Qt::white, 2));
+            p.drawPie(pie, static_cast<int>(start * 16), static_cast<int>(-span * 16));
+            start -= span;
+        }
+        qreal ly = area.top() + 4; const qreal lx = pie.right() + 18;
+        p.setFont(QFont("Segoe UI", 9));
+        for (int i = 0; i < n; ++i) {
+            p.setBrush(pal[i % 8]); p.setPen(Qt::NoPen);
+            p.drawRect(QRectF(lx, ly + 2, 12, 12));
+            p.setPen(QColor("#1C1E26"));
+            p.drawText(QRectF(lx + 18, ly, area.right() - (lx + 18), 16),
+                       Qt::AlignVCenter | Qt::AlignLeft,
+                       QString("%1 (%2)").arg(labels[i]).arg(values[i]));
+            ly += 18;
+        }
+        p.restore(); return;
+    }
+
+    const qreal axisB = 18.0;
+    QRectF plot = area.adjusted(4, 0, 0, -axisB);
+    double maxV = 0; for (int i = 0; i < n; ++i) maxV = std::max(maxV, values[i]);
+    if (maxV <= 0) maxV = 1;
+
+    p.setPen(QPen(QColor("#C6CAD3"), 1));
+    p.drawLine(plot.bottomLeft(), plot.bottomRight());
+    p.setFont(QFont("Segoe UI", 8));
+
+    if (kind == ChartKind::Bar) {
+        const qreal slot = plot.width() / n;
+        const qreal bw = std::max(4.0, slot * 0.6);
+        for (int i = 0; i < n; ++i) {
+            const qreal h = plot.height() * (std::max(0.0, values[i]) / maxV);
+            const QRectF bar(plot.left() + i * slot + (slot - bw) / 2, plot.bottom() - h, bw, h);
+            p.setBrush(pal[i % 8]); p.setPen(Qt::NoPen);
+            p.drawRect(bar);
+            p.setPen(QColor("#5A6071"));
+            p.drawText(QRectF(plot.left() + i * slot, plot.bottom() + 2, slot, axisB - 2),
+                       Qt::AlignHCenter | Qt::AlignTop, labels[i]);
+        }
+    } else {   // Line or Area
+        QPolygonF pts;
+        const qreal step = (n > 1) ? plot.width() / (n - 1) : 0;
+        for (int i = 0; i < n; ++i) {
+            const qreal x = (n > 1) ? plot.left() + i * step : plot.center().x();
+            const qreal y = plot.bottom() - plot.height() * (std::max(0.0, values[i]) / maxV);
+            pts << QPointF(x, y);
+        }
+        if (kind == ChartKind::Area) {
+            QPolygonF poly = pts;
+            poly << QPointF(pts.last().x(), plot.bottom())
+                 << QPointF(pts.first().x(), plot.bottom());
+            p.setBrush(QColor(37, 99, 235, 80)); p.setPen(Qt::NoPen);
+            p.drawPolygon(poly);
+        }
+        p.setPen(QPen(QColor("#2563EB"), 2.5)); p.setBrush(Qt::NoBrush);
+        p.drawPolyline(pts);
+        p.setBrush(QColor("#2563EB")); p.setPen(Qt::NoPen);
+        for (const QPointF& pt : pts) p.drawEllipse(pt, 3, 3);
+        p.setPen(QColor("#5A6071"));
+        for (int i = 0; i < n; ++i) {
+            const qreal x = (n > 1) ? plot.left() + i * step : plot.center().x();
+            p.drawText(QRectF(x - 30, plot.bottom() + 2, 60, axisB - 2),
+                       Qt::AlignHCenter | Qt::AlignTop, labels[i]);
+        }
+    }
+    p.restore();
+}
+
+QGraphicsItem* SlideScene::addChart(const QRectF& rect, ChartKind kind, const QString& title,
+                                    const std::vector<QString>& labels,
+                                    const std::vector<double>& values) {
+    auto* item = new SlideChartItem(kind, rect);
+    item->setTitle(title);
+    item->setData(labels, values);
+    item->setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsMovable);
+    addItem(item);
+    return item;
+}
+
+void SlideScene::insertChart(ChartKind kind) {
+    const QRectF rect((SLIDE_W - 560) / 2.0, (SLIDE_H - 340) / 2.0, 560, 340);
+    addChart(rect, kind, "Chart",
+             { "Q1", "Q2", "Q3", "Q4" }, { 30.0, 55.0, 40.0, 70.0 });
+    clearSelection();
+    emit sceneModified();
+}
+
 QGraphicsItem* SlideScene::addImageItem(const QRectF& rect, const QByteArray& pngData) {
     QPixmap original;
     if (!original.loadFromData(pngData, "PNG")) return nullptr;
@@ -1157,6 +1515,10 @@ void SlideScene::loadFromData(const SlideData& data) {
             break;
         case SlideItemType::Image:
             if (auto* pi = addImageItem(si.rect, si.imageData)) {
+                if (auto* simg = dynamic_cast<SlideImageItem*>(pi)) {
+                    if (si.brightness != 0 || si.contrast != 0)
+                        simg->setAdjust(si.brightness, si.contrast);
+                }
                 pi->setTransformOriginPoint(pi->boundingRect().center());
                 pi->setRotation(si.rotation);
                 created = pi;
@@ -1167,6 +1529,14 @@ void SlideScene::loadFromData(const SlideData& data) {
                 tb->setTransformOriginPoint(tb->boundingRect().center());
                 tb->setRotation(si.rotation);
                 created = tb;
+            }
+            break;
+        case SlideItemType::Chart:
+            if (auto* ch = addChart(si.rect, si.chartKind, si.chartTitle,
+                                    si.chartLabels, si.chartValues)) {
+                ch->setTransformOriginPoint(ch->boundingRect().center());
+                ch->setRotation(si.rotation);
+                created = ch;
             }
             break;
         case SlideItemType::Shape:
@@ -1186,6 +1556,7 @@ void SlideScene::loadFromData(const SlideData& data) {
             created->setData(AnimationKey, static_cast<int>(si.animation));
             if (!si.hyperlink.isEmpty()) created->setData(HyperlinkKey, si.hyperlink);
             if (si.shadow) created->setGraphicsEffect(makeSoftShadow());
+            if (si.opacity < 1.0) created->setOpacity(si.opacity);
         }
     }
 }
@@ -1206,6 +1577,7 @@ void SlideScene::saveToData(SlideData& data) const {
         si.rotation  = it->rotation();
         si.animation = static_cast<ItemAnimation>(it->data(AnimationKey).toInt());
         si.shadow    = (it->graphicsEffect() != nullptr);
+        si.opacity   = it->opacity();
         si.hyperlink = it->data(HyperlinkKey).toString();
 
         if (auto* tb = dynamic_cast<SlideTableItem*>(it)) {
@@ -1214,6 +1586,13 @@ void SlideScene::saveToData(SlideData& data) const {
             si.rows  = tb->rows();
             si.cols  = tb->cols();
             si.cells = tb->texts();
+        } else if (auto* ch = dynamic_cast<SlideChartItem*>(it)) {
+            si.type        = SlideItemType::Chart;
+            si.rect        = ch->rect().translated(ch->pos());
+            si.chartKind   = ch->kind();
+            si.chartTitle  = ch->title();
+            si.chartLabels = ch->labels();
+            si.chartValues = ch->values();
         } else if (auto* sh = dynamic_cast<SlideShapeItem*>(it)) {
             si.type      = SlideItemType::Shape;
             si.shapeKind = sh->kind();
@@ -1246,7 +1625,11 @@ void SlideScene::saveToData(SlideData& data) const {
             si.rect = QRectF(pi->pos() + pi->offset(), pi->pixmap().size());
 
             QPixmap src = pi->pixmap();
-            if (auto* simg = dynamic_cast<SlideImageItem*>(pi)) src = simg->original();
+            if (auto* simg = dynamic_cast<SlideImageItem*>(pi)) {
+                src = simg->original();
+                si.brightness = simg->brightness();
+                si.contrast   = simg->contrast();
+            }
             QByteArray bytes;
             QBuffer buf(&bytes);
             buf.open(QIODevice::WriteOnly);

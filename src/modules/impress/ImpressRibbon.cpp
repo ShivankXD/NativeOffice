@@ -161,6 +161,36 @@ QIcon tableIcon() {
     });
 }
 
+QIcon chartKindIcon(ChartKind k) {
+    return paintIcon([k](QPainter& p) {
+        p.drawLine(QPointF(9, 8),  QPointF(9, 32));    // axes
+        p.drawLine(QPointF(9, 32), QPointF(34, 32));
+        p.setBrush(QColor(58, 63, 75, 60));
+        switch (k) {
+        case ChartKind::Bar:
+            p.drawRect(QRectF(13, 22, 5, 10));
+            p.drawRect(QRectF(21, 16, 5, 16));
+            p.drawRect(QRectF(29, 12, 5, 20));
+            break;
+        case ChartKind::Line:
+            p.drawPolyline(QPolygonF({ QPointF(12, 28), QPointF(19, 18),
+                                       QPointF(26, 23), QPointF(33, 12) }));
+            break;
+        case ChartKind::Area: {
+            QPolygonF a({ QPointF(12, 28), QPointF(19, 18), QPointF(26, 23),
+                          QPointF(33, 13), QPointF(33, 32), QPointF(12, 32) });
+            p.drawPolygon(a);
+            break;
+        }
+        case ChartKind::Pie:
+            p.drawEllipse(QRectF(13, 11, 20, 20));
+            p.drawLine(QPointF(23, 21), QPointF(23, 11));
+            p.drawLine(QPointF(23, 21), QPointF(33, 21));
+            break;
+        }
+    });
+}
+
 // Paint a gallery shape into an icon, reusing the scene's own path geometry so
 // the ribbon preview matches exactly what gets placed on the slide.
 QIcon shapeKindIcon(ShapeKind k) {
@@ -178,6 +208,212 @@ QIcon shapeKindIcon(ShapeKind k) {
     p.end();
     return QIcon(pm);
 }
+
+// ── Office-grade vector icons (painted line art, no font glyphs) ─────────────
+QIcon pictureIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(6, 9, 28, 22), 2, 2);
+    p.drawEllipse(QPointF(13, 16), 2.6, 2.6);
+    QPolygonF m; m << QPointF(8, 29) << QPointF(16, 20) << QPointF(22, 25)
+                   << QPointF(27, 20) << QPointF(33, 29);
+    p.drawPolyline(m);
+}); }
+
+QIcon textBoxIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(6, 10, 28, 20), 2, 2);
+    p.drawLine(QPointF(14, 16), QPointF(26, 16));
+    p.drawLine(QPointF(20, 16), QPointF(20, 25));
+}); }
+
+QIcon rectShapeIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(8, 11, 24, 18), 2.5, 2.5);
+}); }
+
+QIcon ellipseShapeIcon() { return paintIcon([](QPainter& p) {
+    p.drawEllipse(QRectF(8, 10, 24, 20));
+}); }
+
+QIcon fillIcon() { return paintIcon([](QPainter& p) {
+    p.setBrush(QColor(58, 63, 75, 45));
+    p.drawRoundedRect(QRectF(9, 12, 22, 18), 3, 3);
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    QPainterPath d; d.moveTo(31, 7); d.cubicTo(35, 12, 35, 16, 31, 16);
+    d.cubicTo(27, 16, 27, 12, 31, 7);
+    p.drawPath(d);
+}); }
+
+QIcon outlineIcon() { return paintIcon([](QPainter& p) {
+    QPen pen = p.pen(); pen.setWidthF(3.4); p.setPen(pen);
+    p.drawRoundedRect(QRectF(9, 11, 22, 18), 3, 3);
+}); }
+
+QIcon shadowIcon() { return paintIcon([](QPainter& p) {
+    p.setBrush(QColor(58, 63, 75, 55)); p.setPen(Qt::NoPen);
+    p.drawRoundedRect(QRectF(14, 15, 18, 15), 3, 3);
+    QPen pen(kIconColor); pen.setWidthF(2.4); p.setPen(pen); p.setBrush(Qt::white);
+    p.drawRoundedRect(QRectF(8, 9, 18, 15), 3, 3);
+}); }
+
+QIcon smartArtIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(14, 7, 12, 8), 1.5, 1.5);
+    p.drawRoundedRect(QRectF(5, 26, 11, 7), 1.5, 1.5);
+    p.drawRoundedRect(QRectF(24, 26, 11, 7), 1.5, 1.5);
+    p.drawLine(QPointF(20, 15), QPointF(20, 20));
+    p.drawLine(QPointF(10, 20), QPointF(30, 20));
+    p.drawLine(QPointF(10, 20), QPointF(10, 26));
+    p.drawLine(QPointF(30, 20), QPointF(30, 26));
+}); }
+
+QIcon wordArtIcon() { return paintIcon([](QPainter& p) {
+    QPen pen = p.pen(); pen.setWidthF(3.0); p.setPen(pen);
+    p.drawLine(QPointF(9, 32), QPointF(20, 7));
+    p.drawLine(QPointF(20, 7), QPointF(31, 32));
+    p.drawLine(QPointF(13, 23), QPointF(27, 23));
+}); }
+
+QIcon symbolIcon() { return paintIcon([](QPainter& p) {
+    p.drawArc(QRectF(11, 8, 18, 18), -20 * 16, 220 * 16);
+    p.drawLine(QPointF(10, 30), QPointF(17, 28));
+    p.drawLine(QPointF(30, 30), QPointF(23, 28));
+}); }
+
+QIcon slideNumberIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(10, 7, 20, 26), 2, 2);
+    p.drawLine(QPointF(17, 13), QPointF(15, 27));
+    p.drawLine(QPointF(24, 13), QPointF(22, 27));
+    p.drawLine(QPointF(13, 19), QPointF(27, 19));
+    p.drawLine(QPointF(12, 23), QPointF(26, 23));
+}); }
+
+QIcon dateTimeIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(7, 9, 26, 24), 2, 2);
+    p.drawLine(QPointF(7, 16), QPointF(33, 16));
+    p.drawLine(QPointF(13, 6), QPointF(13, 11));
+    p.drawLine(QPointF(27, 6), QPointF(27, 11));
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    for (int yy : { 22, 28 }) for (int xx : { 13, 20, 27 }) p.drawEllipse(QPointF(xx, yy), 1.5, 1.5);
+}); }
+
+QIcon commentsIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(7, 8, 26, 17), 4, 4);
+    p.drawLine(QPointF(13, 25), QPointF(12, 31));
+    p.drawLine(QPointF(12, 31), QPointF(20, 25));
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    for (int xx : { 14, 20, 26 }) p.drawEllipse(QPointF(xx, 16.5), 1.4, 1.4);
+}); }
+
+QIcon undoIcon() { return paintIcon([](QPainter& p) {
+    QPainterPath path; path.moveTo(12, 18); path.cubicTo(17, 9, 28, 10, 30, 21);
+    p.drawPath(path);
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    QPolygonF h; h << QPointF(7, 15) << QPointF(16, 14) << QPointF(11, 23);
+    p.drawPolygon(h);
+}); }
+
+QIcon redoIcon() { return paintIcon([](QPainter& p) {
+    QPainterPath path; path.moveTo(28, 18); path.cubicTo(23, 9, 12, 10, 10, 21);
+    p.drawPath(path);
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    QPolygonF h; h << QPointF(33, 15) << QPointF(24, 14) << QPointF(29, 23);
+    p.drawPolygon(h);
+}); }
+
+QIcon transitionIcon(SlideTransition t) { return paintIcon([t](QPainter& p) {
+    switch (t) {
+    case SlideTransition::None:
+        p.drawLine(QPointF(12, 20), QPointF(28, 20)); break;
+    case SlideTransition::Fade: {
+        p.drawRoundedRect(QRectF(9, 10, 22, 20), 2, 2);
+        p.setBrush(QColor(58, 63, 75, 55)); p.setPen(Qt::NoPen);
+        QPainterPath tri; tri.moveTo(9, 30); tri.lineTo(31, 30); tri.lineTo(9, 10); tri.closeSubpath();
+        p.drawPath(tri); break;
+    }
+    case SlideTransition::Push: {
+        p.drawRect(QRectF(8, 12, 11, 16));
+        p.drawLine(QPointF(22, 20), QPointF(31, 20));
+        p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+        QPolygonF a; a << QPointF(28, 16) << QPointF(33, 20) << QPointF(28, 24); p.drawPolygon(a); break;
+    }
+    case SlideTransition::Wipe: {
+        p.drawRect(QRectF(9, 11, 22, 18));
+        p.setBrush(QColor(58, 63, 75, 55)); p.setPen(Qt::NoPen);
+        p.drawRect(QRectF(9, 11, 11, 18)); break;
+    }
+    case SlideTransition::Zoom: {
+        p.drawEllipse(QRectF(9, 9, 15, 15));
+        p.drawLine(QPointF(21, 21), QPointF(31, 31)); break;
+    }
+    case SlideTransition::Cut: {
+        p.drawLine(QPointF(12, 12), QPointF(28, 26));
+        p.drawLine(QPointF(28, 14), QPointF(12, 28));
+        p.drawEllipse(QRectF(9, 25, 6, 6));
+        p.drawEllipse(QRectF(25, 25, 6, 6)); break;
+    }
+    case SlideTransition::Cover: {
+        p.drawRect(QRectF(8, 13, 15, 15));
+        p.setBrush(Qt::white);
+        p.drawRect(QRectF(18, 9, 15, 15)); break;
+    }
+    case SlideTransition::Uncover: {
+        p.drawRect(QRectF(17, 13, 15, 15));
+        p.setBrush(Qt::white);
+        p.drawRect(QRectF(7, 9, 15, 15)); break;
+    }
+    case SlideTransition::Dissolve: {
+        p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+        for (int yy = 12; yy <= 28; yy += 4)
+            for (int xx = 12; xx <= 28; xx += 4) p.drawEllipse(QPointF(xx, yy), 1.3, 1.3);
+        break;
+    }
+    case SlideTransition::Blinds:
+        for (int xx = 11; xx <= 29; xx += 6) p.drawLine(QPointF(xx, 10), QPointF(xx, 30));
+        break;
+    }
+}); }
+
+QIcon animIcon(ItemAnimation a) { return paintIcon([a](QPainter& p) {
+    auto head = [&](const QPolygonF& h) { p.setBrush(kIconColor); p.setPen(Qt::NoPen); p.drawPolygon(h); };
+    switch (a) {
+    case ItemAnimation::None:
+        p.drawLine(QPointF(12, 20), QPointF(28, 20)); break;
+    case ItemAnimation::FadeIn:
+        p.setBrush(QColor(58, 63, 75, 50));
+        p.drawRoundedRect(QRectF(11, 11, 18, 18), 2, 2); break;
+    case ItemAnimation::FlyInLeft:
+        p.drawRoundedRect(QRectF(21, 14, 12, 12), 2, 2);
+        p.drawLine(QPointF(6, 20), QPointF(16, 20));
+        head(QPolygonF() << QPointF(13, 16) << QPointF(18, 20) << QPointF(13, 24)); break;
+    case ItemAnimation::FlyInRight:
+        p.drawRoundedRect(QRectF(7, 14, 12, 12), 2, 2);
+        p.drawLine(QPointF(34, 20), QPointF(24, 20));
+        head(QPolygonF() << QPointF(27, 16) << QPointF(22, 20) << QPointF(27, 24)); break;
+    case ItemAnimation::FlyInTop:
+        p.drawRoundedRect(QRectF(14, 21, 12, 12), 2, 2);
+        p.drawLine(QPointF(20, 6), QPointF(20, 16));
+        head(QPolygonF() << QPointF(16, 13) << QPointF(20, 18) << QPointF(24, 13)); break;
+    case ItemAnimation::FlyInBottom:
+        p.drawRoundedRect(QRectF(14, 7, 12, 12), 2, 2);
+        p.drawLine(QPointF(20, 34), QPointF(20, 24));
+        head(QPolygonF() << QPointF(16, 27) << QPointF(20, 22) << QPointF(24, 27)); break;
+    case ItemAnimation::ZoomIn:
+        p.drawRoundedRect(QRectF(8, 8, 24, 24), 2, 2);
+        p.drawRoundedRect(QRectF(15, 15, 10, 10), 1.5, 1.5); break;
+    case ItemAnimation::SpinIn:
+    case ItemAnimation::EmphasisSpin: {
+        QPainterPath path; path.arcMoveTo(QRectF(11, 11, 18, 18), 60);
+        path.arcTo(QRectF(11, 11, 18, 18), 60, 250);
+        p.drawPath(path);
+        head(QPolygonF() << QPointF(23, 7) << QPointF(31, 10) << QPointF(25, 15)); break;
+    }
+    case ItemAnimation::EmphasisPulse:
+        p.drawEllipse(QRectF(16, 16, 8, 8));
+        p.drawEllipse(QRectF(9, 9, 22, 22)); break;
+    case ItemAnimation::EmphasisBlink:
+        p.drawLine(QPointF(20, 8), QPointF(20, 32));
+        p.drawLine(QPointF(8, 20), QPointF(32, 20));
+        p.drawLine(QPointF(12, 12), QPointF(28, 28));
+        p.drawLine(QPointF(28, 12), QPointF(12, 28)); break;
+    }
+}); }
 
 // A small thumbnail for Design "theme" tiles: a vertical top→bottom gradient
 // so the tile previews exactly what the two-colour theme applies to the slide.
@@ -281,8 +517,8 @@ QWidget* ImpressRibbon::buildHomeTab() {
     layout->setSpacing(0);
 
     // ── Quick access: undo / redo ───────────────────────────────────────
-    m_btnUndo = makeToolBtn("↶", "Undo  (Ctrl+Z)");
-    m_btnRedo = makeToolBtn("↷", "Redo  (Ctrl+Y)");
+    m_btnUndo = makeIconBtn(undoIcon(), "Undo  (Ctrl+Z)");
+    m_btnRedo = makeIconBtn(redoIcon(), "Redo  (Ctrl+Y)");
     m_btnUndo->setEnabled(false);
     m_btnRedo->setEnabled(false);
     connect(m_btnUndo, &QToolButton::clicked, this, &ImpressRibbon::undoRequested);
@@ -421,7 +657,7 @@ QWidget* ImpressRibbon::buildInsertTab() {
     layout->addWidget(makeSeparator());
 
     // ── Images ──────────────────────────────────────────────────────────
-    auto* btnImage = makeBigBtn(glyphIcon(QStringLiteral("\U0001F5BC")), "Pictures",
+    auto* btnImage = makeBigBtn(pictureIcon(), "Pictures",
                                 "Insert an image from a file");
     connect(btnImage, &QToolButton::clicked, this, &ImpressRibbon::insertImageRequested);
     layout->addWidget(makeGroup("Images", { btnImage }));
@@ -430,9 +666,9 @@ QWidget* ImpressRibbon::buildInsertTab() {
     // ── Shapes (interactive insert modes) ───────────────────────────────
     m_shapeGroup = new QButtonGroup(this);
     m_shapeGroup->setExclusive(true);
-    auto* btnText    = makeBigBtn(glyphIcon("T", 22),       "Text\nBox",  "Insert a text box", true);
-    auto* btnRect    = makeBigBtn(glyphIcon(QString::fromUtf8("▭"), 24), "Rectangle", "Insert a rectangle", true);
-    auto* btnEllipse = makeBigBtn(glyphIcon(QString::fromUtf8("◯"), 22), "Ellipse",   "Insert an ellipse",   true);
+    auto* btnText    = makeBigBtn(textBoxIcon(),     "Text\nBox",  "Insert a text box", true);
+    auto* btnRect    = makeBigBtn(rectShapeIcon(),    "Rectangle", "Insert a rectangle", true);
+    auto* btnEllipse = makeBigBtn(ellipseShapeIcon(), "Ellipse",   "Insert an ellipse",   true);
     m_shapeGroup->addButton(btnText,    static_cast<int>(InsertMode::TextBox));
     m_shapeGroup->addButton(btnRect,    static_cast<int>(InsertMode::Rectangle));
     m_shapeGroup->addButton(btnEllipse, static_cast<int>(InsertMode::Ellipse));
@@ -492,11 +728,11 @@ QWidget* ImpressRibbon::buildInsertTab() {
     layout->addWidget(makeSeparator());
 
     // ── Shape Style (applies to the selected shape) ─────────────────────
-    auto* btnFill = makeBigBtn(glyphIcon(QString::fromUtf8("\xF0\x9F\x96\x8C"), 22), "Fill",
+    auto* btnFill = makeBigBtn(fillIcon(), "Fill",
                                "Fill colour of the selected shape");
-    auto* btnOutline = makeBigBtn(glyphIcon(QString::fromUtf8("\xE2\x97\xAF"), 22), "Outline",
+    auto* btnOutline = makeBigBtn(outlineIcon(), "Outline",
                                   "Outline colour of the selected shape");
-    auto* btnShadow = makeBigBtn(glyphIcon(QString::fromUtf8("\xE2\x97\x90"), 22), "Shadow",
+    auto* btnShadow = makeBigBtn(shadowIcon(), "Shadow",
                                  "Toggle a drop shadow on the selected object");
     connect(btnFill, &QToolButton::clicked, this, [this] {
         const QColor c = QColorDialog::getColor(QColor("#E8372A"), this, "Shape Fill",
@@ -512,8 +748,7 @@ QWidget* ImpressRibbon::buildInsertTab() {
     layout->addWidget(makeSeparator());
 
     // ── SmartArt (diagram templates) ────────────────────────────────────
-    auto* btnSmart = makeBigBtn(glyphIcon(QString::fromUtf8("\xE2\x9A\x9E"), 22), "Smart\nArt",
-                                "Insert a diagram");
+    auto* btnSmart = makeBigBtn(smartArtIcon(), "Smart\nArt", "Insert a diagram");
     btnSmart->setPopupMode(QToolButton::InstantPopup);
     auto* smartMenu = new QMenu(btnSmart);
     struct SA { const char* label; SmartArtKind kind; };
@@ -555,11 +790,29 @@ QWidget* ImpressRibbon::buildInsertTab() {
     layout->addWidget(makeGroup("Tables", { btnTable }));
     layout->addWidget(makeSeparator());
 
+    // ── Charts ──────────────────────────────────────────────────────────
+    struct Ch { const char* label; ChartKind kind; };
+    const Ch charts[] = {
+        { "Bar",  ChartKind::Bar },
+        { "Line", ChartKind::Line },
+        { "Pie",  ChartKind::Pie },
+        { "Area", ChartKind::Area },
+    };
+    QList<QWidget*> chBtns;
+    for (const auto& c : charts) {
+        auto* b = makeBigBtn(chartKindIcon(c.kind), c.label, QString("Insert a %1 chart").arg(c.label));
+        const ChartKind kind = c.kind;
+        connect(b, &QToolButton::clicked, this, [this, kind] { emit chartRequested(kind); });
+        chBtns.append(b);
+    }
+    layout->addWidget(makeGroup("Charts", chBtns));
+    layout->addWidget(makeSeparator());
+
     // ── Text ────────────────────────────────────────────────────────────
-    auto* btnWordArt = makeBigBtn(glyphIcon("A", 24),       "WordArt",   "Insert decorative WordArt text");
-    auto* btnSymbol  = makeBigBtn(glyphIcon(QString::fromUtf8("Ω"), 22), "Symbol",  "Insert a symbol");
-    auto* btnNumber  = makeBigBtn(glyphIcon("#", 22),       "Slide\nNumber", "Insert the slide number");
-    auto* btnDate    = makeBigBtn(glyphIcon(QStringLiteral("\U0001F4C5")), "Date &\nTime", "Insert today's date");
+    auto* btnWordArt = makeBigBtn(wordArtIcon(),     "WordArt",   "Insert decorative WordArt text");
+    auto* btnSymbol  = makeBigBtn(symbolIcon(),      "Symbol",    "Insert a symbol");
+    auto* btnNumber  = makeBigBtn(slideNumberIcon(), "Slide\nNumber", "Insert the slide number");
+    auto* btnDate    = makeBigBtn(dateTimeIcon(),    "Date &\nTime", "Insert today's date");
     connect(btnWordArt, &QToolButton::clicked, this, &ImpressRibbon::wordArtRequested);
     connect(btnSymbol,  &QToolButton::clicked, this, [this]{ emit symbolRequested(QString::fromUtf8("★")); });
     connect(btnNumber,  &QToolButton::clicked, this, &ImpressRibbon::slideNumberRequested);
@@ -568,7 +821,7 @@ QWidget* ImpressRibbon::buildInsertTab() {
     layout->addWidget(makeSeparator());
 
     // ── Comments ────────────────────────────────────────────────────────
-    auto* btnComment = makeBigBtn(glyphIcon(QStringLiteral("\U0001F4AC")), "Notes",
+    auto* btnComment = makeBigBtn(commentsIcon(), "Notes",
                                   "Show or hide the speaker notes panel");
     connect(btnComment, &QToolButton::clicked, this, &ImpressRibbon::notesToggleRequested);
     layout->addWidget(makeGroup("Comments", { btnComment }));
@@ -610,7 +863,8 @@ QWidget* ImpressRibbon::buildDesignTab() {
         btn->setToolTip(QString("%1 theme").arg(th.name));
         const QColor top = th.top, bottom = th.bottom;
         connect(btn, &QToolButton::clicked, this, [this, top, bottom]{
-            emit designThemeSelected(top, bottom);
+            if (m_designAllBtn && m_designAllBtn->isChecked()) emit designThemeAllRequested(top, bottom);
+            else emit designThemeSelected(top, bottom);
         });
         trl->addWidget(btn);
     }
@@ -633,17 +887,24 @@ QWidget* ImpressRibbon::buildDesignTab() {
         btn->setToolTip(c.name());
         btn->setStyleSheet(QString("QToolButton { background-color: %1; border: 1px solid #C6CAD3; border-radius: 4px; } QToolButton:hover { border: 2px solid #E8372A; }")
                             .arg(c.name()));
-        connect(btn, &QToolButton::clicked, this, [this, c]{ emit designColorSelected(c); });
+        connect(btn, &QToolButton::clicked, this, [this, c]{
+            if (m_designAllBtn && m_designAllBtn->isChecked()) emit designColorAllRequested(c);
+            else emit designColorSelected(c);
+        });
         swl->addWidget(btn);
     }
 
     auto* btnCustom = makeCmdBtn(QString::fromUtf8("⊕  Custom…"), "Pick a custom background colour", 90);
     connect(btnCustom, &QToolButton::clicked, this, [this]() {
         const QColor c = QColorDialog::getColor(Qt::white, this, "Slide Background");
-        if (c.isValid()) emit designColorSelected(c);
+        if (!c.isValid()) return;
+        if (m_designAllBtn && m_designAllBtn->isChecked()) emit designColorAllRequested(c);
+        else emit designColorSelected(c);
     });
 
-    layout->addWidget(makeGroup("Background", { swatchRow, btnCustom }));
+    m_designAllBtn = makeCmdBtn("Apply to All", "Apply the chosen background or theme to every slide", 104, true);
+
+    layout->addWidget(makeGroup("Background", { swatchRow, btnCustom, m_designAllBtn }));
     layout->addWidget(makeSeparator());
 
     // ── Layout ──────────────────────────────────────────────────────────
@@ -689,7 +950,7 @@ QWidget* ImpressRibbon::buildTransitionsTab() {
     };
     QList<QWidget*> tBtns;
     for (const auto& it : items) {
-        auto* b = makeBigBtn(glyphIcon(QString::fromUtf8(it.glyph), 22), it.label,
+        auto* b = makeBigBtn(transitionIcon(it.t), it.label,
                              QString("%1 transition").arg(it.label), true);
         b->setMinimumWidth(56);
         m_transitionGroup->addButton(b, static_cast<int>(it.t));
@@ -734,7 +995,7 @@ QWidget* ImpressRibbon::buildAnimationsTab() {
     };
     QList<QWidget*> aBtns;
     for (const auto& it : items) {
-        auto* b = makeBigBtn(glyphIcon(QString::fromUtf8(it.glyph), 22), it.label, it.tip);
+        auto* b = makeBigBtn(animIcon(it.a), it.label, it.tip);
         b->setMinimumWidth(56);
         const ItemAnimation a = it.a;
         connect(b, &QToolButton::clicked, this, [this, a]{ emit animationSelected(a); });
@@ -751,7 +1012,7 @@ QWidget* ImpressRibbon::buildAnimationsTab() {
     };
     QList<QWidget*> eBtns;
     for (const auto& it : emph) {
-        auto* b = makeBigBtn(glyphIcon(QString::fromUtf8(it.glyph), 22), it.label, it.tip);
+        auto* b = makeBigBtn(animIcon(it.a), it.label, it.tip);
         b->setMinimumWidth(56);
         const ItemAnimation a = it.a;
         connect(b, &QToolButton::clicked, this, [this, a]{ emit animationSelected(a); });
@@ -778,6 +1039,12 @@ QWidget* ImpressRibbon::buildSlideShowTab() {
     connect(btnFromCurrent, &QToolButton::clicked, this, &ImpressRibbon::slideShowFromCurrentRequested);
 
     layout->addWidget(makeGroup("Start Slide Show", { btnFromStart, btnFromCurrent }));
+    layout->addWidget(makeSeparator());
+
+    auto* btnPresenter = makeCmdBtn(QString::fromUtf8("🖥  Presenter View"),
+                                    "Start the show with a presenter console (notes, timer, next slide)", 168);
+    connect(btnPresenter, &QToolButton::clicked, this, &ImpressRibbon::presenterViewRequested);
+    layout->addWidget(makeGroup("Presenter", { btnPresenter }));
     layout->addStretch();
     return tab;
 }

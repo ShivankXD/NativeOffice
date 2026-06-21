@@ -20,6 +20,8 @@
 class QLabel;
 class QGraphicsItem;
 class QVariantAnimation;
+class QTextEdit;
+class QTimer;
 
 namespace NativeOffice {
 
@@ -31,6 +33,7 @@ class PresentModeWindow : public QWidget {
 public:
     explicit PresentModeWindow(const std::vector<SlideData>& deck,
                                int startIndex,
+                               bool presenter = false,
                                QWidget* parent = nullptr);
     ~PresentModeWindow() override;
 
@@ -47,6 +50,9 @@ private:
     void toggleBlack();
     void updateCounter();
 
+    void buildConsole();    // presenter console (notes + next + timer)
+    void updateConsole();
+
     QPixmap renderScene(SlideScene* scene) const;
     QPixmap compositeFrame(const QPixmap& oldPm, const QPixmap& newPm,
                            SlideTransition type, double t) const;
@@ -61,9 +67,21 @@ private:
 
     std::vector<SlideScene*>     m_scenes;        // owned (parented to this)
     std::vector<SlideTransition> m_transitions;
+    std::vector<QString>         m_notes;
     int                          m_index { 0 };
     bool                         m_black { false };
     bool                         m_firstShown { false };
+
+    // ── Presenter console (optional second-screen view) ──────────────────
+    bool       m_presenter      { false };
+    QWidget*   m_console        { nullptr };
+    QLabel*    m_consoleCur      { nullptr };
+    QLabel*    m_consoleNext     { nullptr };
+    QTextEdit* m_consoleNotes    { nullptr };
+    QLabel*    m_consoleTimer    { nullptr };
+    QLabel*    m_consoleCounter  { nullptr };
+    QTimer*    m_elapsedTimer    { nullptr };
+    qint64     m_elapsedSecs     { 0 };
 
     QLabel* m_slideLabel { nullptr };
     QLabel* m_counter    { nullptr };

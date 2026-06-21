@@ -88,6 +88,7 @@ public slots:
     void setZoomPercent(int percent);
     void setViewMode(ImpressViewMode mode);
     void startSlideShow();
+    void startPresenterView();
 
     void undo();
     void redo();
@@ -98,6 +99,7 @@ signals:
 
 private:
     void buildUi();
+    void launchShow(bool presenter);
     QWidget* buildBrandBar();
     void insertPresetText(const QString& text, double fontSize, bool bold, const QColor& color);
     void applyStyles();

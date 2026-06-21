@@ -68,6 +68,7 @@ signals:
     void shapeOutlineRequested(const QColor& color);
     void shadowToggleRequested();
     void insertTableRequested(int rows, int cols);
+    void chartRequested(NativeOffice::ChartKind kind);
     void insertImageRequested();
     void wordArtRequested();
     void symbolRequested(const QString& symbol);
@@ -76,6 +77,8 @@ signals:
 
     void designColorSelected(const QColor& color);
     void designThemeSelected(const QColor& top, const QColor& bottom);
+    void designColorAllRequested(const QColor& color);
+    void designThemeAllRequested(const QColor& top, const QColor& bottom);
 
     void transitionSelected(NativeOffice::SlideTransition transition);
     void transitionApplyAllRequested(NativeOffice::SlideTransition transition);
@@ -83,6 +86,7 @@ signals:
 
     void slideShowFromBeginningRequested();
     void slideShowFromCurrentRequested();
+    void presenterViewRequested();
 
     void notesToggleRequested();
 
@@ -133,6 +137,7 @@ private:
 
     QButtonGroup* m_shapeGroup { nullptr };
     QButtonGroup* m_transitionGroup { nullptr };
+    QToolButton*  m_designAllBtn { nullptr };   // "Apply to all slides" toggle
     bool          m_syncing { false };
     QColor        m_textColor { "#1C1E26" };
 };

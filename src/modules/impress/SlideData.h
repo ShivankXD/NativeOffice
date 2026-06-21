@@ -24,6 +24,15 @@ enum class SlideItemType {
     Image,
     Shape,       // generic vector shape — see ShapeKind
     Table,       // grid of editable text cells
+    Chart,       // data chart — see ChartKind
+};
+
+// ── Chart kinds ──────────────────────────────────────────────────────────────
+enum class ChartKind {
+    Bar,
+    Line,
+    Pie,
+    Area,
 };
 
 // ── Shape gallery kinds (Shape items) ────────────────────────────────────────
@@ -108,15 +117,24 @@ struct SlideItem {
     qreal         fontSize { 14.0 };   // pt, for TextBox items
     bool          isPlaceholder { false };
     QByteArray    imageData;            // PNG bytes, for Image items
+    int           brightness { 0 };     // image adjustment (-100..100)
+    int           contrast   { 0 };     // image adjustment (-100..100)
     ItemAnimation animation { ItemAnimation::None };  // entrance effect in slide show
     ShapeKind     shapeKind { ShapeKind::Rectangle }; // for Shape items
     bool          shadow    { false };  // soft drop shadow on this item
+    qreal         opacity   { 1.0 };    // 0..1 object opacity
     QString       hyperlink;            // URL opened on click in slide show
 
     // ── Table items ───────────────────────────────────────────────────────
     int                  rows  { 0 };
     int                  cols  { 0 };
     std::vector<QString> cells;          // row-major, size rows*cols
+
+    // ── Chart items ─────────────────────────────────────────────────────────
+    ChartKind            chartKind { ChartKind::Bar };
+    QString              chartTitle;
+    std::vector<QString> chartLabels;
+    std::vector<double>  chartValues;
 };
 
 struct SlideData {

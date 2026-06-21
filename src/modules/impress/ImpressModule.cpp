@@ -259,6 +259,11 @@ void ImpressModule::buildUi() {
         m_scenes[m_currentIdx]->insertSmartArt(kind);
         commitUndoStep();
     });
+    connect(m_ribbon, &ImpressRibbon::chartRequested, this, [this](ChartKind kind) {
+        if (m_currentIdx < 0) return;
+        m_scenes[m_currentIdx]->insertChart(kind);
+        commitUndoStep();
+    });
     connect(m_ribbon, &ImpressRibbon::wordArtRequested, this, [this] {
         insertPresetText("WordArt", 44.0, true, QColor("#E8372A"));
     });
@@ -277,6 +282,7 @@ void ImpressModule::buildUi() {
         startSlideShow();
     });
     connect(m_ribbon, &ImpressRibbon::slideShowFromCurrentRequested, this, &ImpressModule::startSlideShow);
+    connect(m_ribbon, &ImpressRibbon::presenterViewRequested, this, &ImpressModule::startPresenterView);
 
     connect(m_ribbon, &ImpressRibbon::notesToggleRequested, this, [this] {
         m_notesVisible = !m_notesVisible;
@@ -303,6 +309,24 @@ void ImpressModule::buildUi() {
         scene->loadFromData(snap);
         commitUndoStep();
     });
+
+    // Apply a background colour / theme gradient to EVERY slide in the deck.
+    auto applyBgToAll = [this](const QColor& top, const QColor& bottom) {
+        for (size_t i = 0; i < m_scenes.size(); ++i) {
+            SlideData snap; m_scenes[i]->saveToData(snap);
+            snap.background  = top;
+            snap.background2 = bottom;
+            m_scenes[i]->loadFromData(snap);
+            m_slideData[i] = snap;
+            m_slidePanel->refreshSlide(static_cast<int>(i));
+        }
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        commitUndoStep();
+    };
+    connect(m_ribbon, &ImpressRibbon::designColorAllRequested, this,
+            [applyBgToAll](const QColor& c) { applyBgToAll(c, QColor()); });
+    connect(m_ribbon, &ImpressRibbon::designThemeAllRequested, this,
+            [applyBgToAll](const QColor& top, const QColor& bottom) { applyBgToAll(top, bottom); });
 
     // ── Text formatting (applies to the last-edited text item) ───────────
     auto withCursor = [this](const std::function<void(QTextCursor&)>& fn) {
@@ -735,6 +759,14 @@ void ImpressModule::setViewMode(ImpressViewMode mode) {
 }
 
 void ImpressModule::startSlideShow() {
+    launchShow(false);
+}
+
+void ImpressModule::startPresenterView() {
+    launchShow(true);
+}
+
+void ImpressModule::launchShow(bool presenter) {
     if (m_scenes.empty()) return;
     if (m_currentIdx >= 0)
         m_scenes[m_currentIdx]->saveToData(m_slideData[m_currentIdx]);
@@ -744,7 +776,7 @@ void ImpressModule::startSlideShow() {
     for (int i = 0; i < static_cast<int>(m_scenes.size()); ++i)
         m_scenes[i]->saveToData(m_slideData[i]);
 
-    auto* win = new PresentModeWindow(m_slideData, std::max(0, m_currentIdx), this);
+    auto* win = new PresentModeWindow(m_slideData, std::max(0, m_currentIdx), presenter, this);
     win->show();
 }
 
@@ -1462,6 +1494,39 @@ bool ImpressModule::exportPptxTo(const QString& path) {
                 ++shapeId;
                 break;
             }
+            case SlideItemType::Chart: {
+                // Rasterise the chart to a PNG and embed it as a picture — robust
+                // and renders identically in every viewer.
+                const int pxW = std::max(64, static_cast<int>(item.rect.width()  * 2));
+                const int pxH = std::max(64, static_cast<int>(item.rect.height() * 2));
+                QImage img(pxW, pxH, QImage::Format_ARGB32);
+                img.fill(Qt::transparent);
+                {
+                    QPainter cp(&img);
+                    SlideScene::paintChart(cp, QRectF(0, 0, pxW, pxH), item.chartKind,
+                                           item.chartLabels, item.chartValues, item.chartTitle);
+                }
+                QByteArray chartPng;
+                QBuffer cbuf(&chartPng);
+                cbuf.open(QIODevice::WriteOnly);
+                img.save(&cbuf, "PNG");
+
+                ++mediaCounter;
+                const QString mediaName = QString("image%1.png").arg(mediaCounter);
+                zip.add("ppt/media/" + mediaName, chartPng);
+                ++imgRel;
+                const QString rid = QString("rId%1").arg(imgRel);
+                slideRels += QString("<Relationship Id=\"%1\" Type=\"%2/image\" Target=\"../media/%3\"/>")
+                                 .arg(rid, kRelBase, mediaName);
+                shapes += QString(
+                    "<p:pic><p:nvPicPr><p:cNvPr id=\"%1\" name=\"Chart %1\"/>"
+                    "<p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
+                    "<p:blipFill><a:blip r:embed=\"%2\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>"
+                    "<p:spPr>%3<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>")
+                    .arg(shapeId).arg(rid, xfrmXml(item.rect, item.rotation));
+                ++shapeId;
+                break;
+            }
             case SlideItemType::Image: {
                 if (item.imageData.isEmpty()) break;
                 ++mediaCounter;
@@ -1547,6 +1612,7 @@ QString itemTypeToString(SlideItemType t) {
     case SlideItemType::Image:     return "image";
     case SlideItemType::Shape:     return "shape";
     case SlideItemType::Table:     return "table";
+    case SlideItemType::Chart:     return "chart";
     case SlideItemType::TextBox:
     default:                       return "textbox";
     }
@@ -1558,7 +1624,25 @@ SlideItemType itemTypeFromString(const QString& s) {
     if (s == "image")     return SlideItemType::Image;
     if (s == "shape")     return SlideItemType::Shape;
     if (s == "table")     return SlideItemType::Table;
+    if (s == "chart")     return SlideItemType::Chart;
     return SlideItemType::TextBox;
+}
+
+QString chartKindToString(ChartKind k) {
+    switch (k) {
+    case ChartKind::Line: return "line";
+    case ChartKind::Pie:  return "pie";
+    case ChartKind::Area: return "area";
+    case ChartKind::Bar:
+    default:              return "bar";
+    }
+}
+
+ChartKind chartKindFromString(const QString& s) {
+    if (s == "line") return ChartKind::Line;
+    if (s == "pie")  return ChartKind::Pie;
+    if (s == "area") return ChartKind::Area;
+    return ChartKind::Bar;
 }
 
 QString shapeKindToString(ShapeKind k) {
@@ -1705,6 +1789,8 @@ QJsonObject ImpressModule::deckToJson() const {
             }
             if (item.type == SlideItemType::Image) {
                 itemObj["imageData"] = QString::fromLatin1(item.imageData.toBase64());
+                if (item.brightness != 0) itemObj["brightness"] = item.brightness;
+                if (item.contrast   != 0) itemObj["contrast"]   = item.contrast;
             }
             if (item.type == SlideItemType::Shape) {
                 itemObj["shapeKind"] = shapeKindToString(item.shapeKind);
@@ -1716,12 +1802,22 @@ QJsonObject ImpressModule::deckToJson() const {
                 for (const QString& cell : item.cells) cellsArr.append(cell);
                 itemObj["cells"] = cellsArr;
             }
+            if (item.type == SlideItemType::Chart) {
+                itemObj["chartKind"]  = chartKindToString(item.chartKind);
+                itemObj["chartTitle"] = item.chartTitle;
+                QJsonArray labelsArr, valuesArr;
+                for (const QString& l : item.chartLabels) labelsArr.append(l);
+                for (double v : item.chartValues) valuesArr.append(v);
+                itemObj["chartLabels"] = labelsArr;
+                itemObj["chartValues"] = valuesArr;
+            }
 
             itemObj["fillColor"] = item.fillColor.name(QColor::HexArgb);
             itemObj["penColor"]  = item.penColor.name(QColor::HexArgb);
             itemObj["penWidth"]  = item.penWidth;
             itemObj["animation"] = animationToString(item.animation);
             if (item.shadow) itemObj["shadow"] = true;
+            if (item.opacity < 1.0) itemObj["opacity"] = item.opacity;
             if (!item.hyperlink.isEmpty()) itemObj["hyperlink"] = item.hyperlink;
 
             itemsArray.append(itemObj);
@@ -1776,6 +1872,8 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
             }
             if (si.type == SlideItemType::Image) {
                 si.imageData = QByteArray::fromBase64(itemObj["imageData"].toString().toLatin1());
+                si.brightness = itemObj["brightness"].toInt(0);
+                si.contrast   = itemObj["contrast"].toInt(0);
             }
             if (si.type == SlideItemType::Shape) {
                 si.shapeKind = shapeKindFromString(itemObj["shapeKind"].toString("rectangle"));
@@ -1786,12 +1884,21 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
                 const QJsonArray cellsArr = itemObj["cells"].toArray();
                 for (const auto& cv : cellsArr) si.cells.push_back(cv.toString());
             }
+            if (si.type == SlideItemType::Chart) {
+                si.chartKind  = chartKindFromString(itemObj["chartKind"].toString("bar"));
+                si.chartTitle = itemObj["chartTitle"].toString();
+                for (const auto& lv : itemObj["chartLabels"].toArray())
+                    si.chartLabels.push_back(lv.toString());
+                for (const auto& vv : itemObj["chartValues"].toArray())
+                    si.chartValues.push_back(vv.toDouble());
+            }
 
             si.fillColor = QColor(itemObj["fillColor"].toString("#ffffff"));
             si.penColor  = QColor(itemObj["penColor"].toString("#1C1E26"));
             si.penWidth  = itemObj["penWidth"].toDouble(1.5);
             si.animation = animationFromString(itemObj["animation"].toString("none"));
             si.shadow    = itemObj["shadow"].toBool(false);
+            si.opacity   = itemObj["opacity"].toDouble(1.0);
             si.hyperlink = itemObj["hyperlink"].toString();
 
             data.items.push_back(si);

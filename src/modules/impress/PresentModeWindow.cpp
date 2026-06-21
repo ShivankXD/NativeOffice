@@ -11,6 +11,10 @@
 #include <QPainter>
 #include <QVariantAnimation>
 #include <QTimer>
+#include <QTextEdit>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QGraphicsItem>
@@ -28,9 +32,11 @@ constexpr int kObjectMs     = 600;
 
 PresentModeWindow::PresentModeWindow(const std::vector<SlideData>& deck,
                                      int startIndex,
+                                     bool presenter,
                                      QWidget* parent)
     : QWidget(parent, Qt::Window)
     , m_index(qBound(0, startIndex, static_cast<int>(deck.size()) - 1))
+    , m_presenter(presenter)
 {
     setAttribute(Qt::WA_DeleteOnClose);
     setStyleSheet("background-color: black;");
@@ -43,6 +49,7 @@ PresentModeWindow::PresentModeWindow(const std::vector<SlideData>& deck,
         scene->loadFromData(data);
         m_scenes.push_back(scene);
         m_transitions.push_back(data.transition);
+        m_notes.push_back(data.notes);
     }
 
     m_slideLabel = new QLabel(this);
@@ -55,15 +62,123 @@ PresentModeWindow::PresentModeWindow(const std::vector<SlideData>& deck,
         "border-radius: 10px; padding: 3px 10px; font-family: 'Segoe UI'; font-size: 13px;");
     m_counter->setAttribute(Qt::WA_TransparentForMouseEvents);
 
-    if (auto* scr = QGuiApplication::primaryScreen())
-        setGeometry(scr->geometry());
+    // Audience window goes on the primary screen; the presenter console (if any)
+    // goes on the secondary screen.
+    const QList<QScreen*> screens = QGuiApplication::screens();
+    if (!screens.isEmpty())
+        setGeometry(screens.first()->geometry());
+
+    if (m_presenter) buildConsole();
 
     showFullScreen();
     raise();
     activateWindow();
 }
 
-PresentModeWindow::~PresentModeWindow() = default;
+PresentModeWindow::~PresentModeWindow() {
+    delete m_console;   // top-level, not auto-parented
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Presenter console — notes, next-slide preview, elapsed timer, controls
+// ─────────────────────────────────────────────────────────────────────────────
+void PresentModeWindow::buildConsole() {
+    m_console = new QWidget(nullptr, Qt::Window);
+    m_console->setWindowTitle("Presenter View — NativeOffice Impress");
+    m_console->setStyleSheet("background:#1A1F2E; color:#E8E9ED; font-family:'Segoe UI';");
+
+    auto* root = new QVBoxLayout(m_console);
+    root->setContentsMargins(16, 16, 16, 16);
+    root->setSpacing(10);
+
+    auto* top = new QHBoxLayout;
+    m_consoleCur = new QLabel(m_console);
+    m_consoleCur->setMinimumSize(520, 300);
+    m_consoleCur->setAlignment(Qt::AlignCenter);
+    m_consoleCur->setStyleSheet("background:black; border:1px solid #3B4252;");
+
+    auto* side = new QVBoxLayout;
+    m_consoleTimer = new QLabel("00:00", m_console);
+    m_consoleTimer->setStyleSheet("font-size:30px; font-weight:600;");
+    m_consoleCounter = new QLabel("1 / 1", m_console);
+    m_consoleCounter->setStyleSheet("font-size:14px; color:#9CA3AF;");
+    auto* nextLbl = new QLabel("Next slide", m_console);
+    nextLbl->setStyleSheet("color:#9CA3AF; font-size:12px;");
+    m_consoleNext = new QLabel(m_console);
+    m_consoleNext->setMinimumSize(260, 150);
+    m_consoleNext->setAlignment(Qt::AlignCenter);
+    m_consoleNext->setStyleSheet("background:black; border:1px solid #3B4252;");
+    side->addWidget(m_consoleTimer);
+    side->addWidget(m_consoleCounter);
+    side->addSpacing(10);
+    side->addWidget(nextLbl);
+    side->addWidget(m_consoleNext);
+    side->addStretch();
+    top->addWidget(m_consoleCur, 3);
+    top->addLayout(side, 1);
+    root->addLayout(top, 3);
+
+    auto* notesLbl = new QLabel("Speaker notes", m_console);
+    notesLbl->setStyleSheet("color:#9CA3AF; font-size:12px;");
+    m_consoleNotes = new QTextEdit(m_console);
+    m_consoleNotes->setReadOnly(true);
+    m_consoleNotes->setStyleSheet("background:#2C3140; color:#E8E9ED; border:none; font-size:16px; padding:6px;");
+    root->addWidget(notesLbl);
+    root->addWidget(m_consoleNotes, 2);
+
+    auto* btns = new QHBoxLayout;
+    auto* prevB = new QPushButton(QString::fromUtf8("◀  Prev"), m_console);
+    auto* nextB = new QPushButton(QString::fromUtf8("Next  ▶"), m_console);
+    auto* endB  = new QPushButton("End Show", m_console);
+    const QString bs = "QPushButton{background:#3B4252;color:#fff;border:none;padding:9px 18px;"
+                       "border-radius:6px;font-size:14px;}QPushButton:hover{background:#4C566A;}";
+    prevB->setStyleSheet(bs); nextB->setStyleSheet(bs); endB->setStyleSheet(bs);
+    btns->addWidget(prevB); btns->addWidget(nextB); btns->addStretch(); btns->addWidget(endB);
+    root->addLayout(btns);
+    connect(prevB, &QPushButton::clicked, this, [this] { prev(); });
+    connect(nextB, &QPushButton::clicked, this, [this] { next(); });
+    connect(endB,  &QPushButton::clicked, this, [this] { close(); });
+
+    m_elapsedTimer = new QTimer(this);
+    m_elapsedTimer->setInterval(1000);
+    connect(m_elapsedTimer, &QTimer::timeout, this, [this] {
+        ++m_elapsedSecs;
+        m_consoleTimer->setText(QString("%1:%2")
+            .arg(m_elapsedSecs / 60, 2, 10, QChar('0'))
+            .arg(m_elapsedSecs % 60, 2, 10, QChar('0')));
+    });
+    m_elapsedTimer->start();
+
+    const QList<QScreen*> screens = QGuiApplication::screens();
+    if (screens.size() > 1) {
+        m_console->setGeometry(screens[1]->geometry());
+        m_console->showFullScreen();
+    } else {
+        m_console->resize(1000, 660);
+        m_console->show();   // single monitor: console is a normal window
+    }
+    m_console->raise();
+}
+
+void PresentModeWindow::updateConsole() {
+    if (!m_presenter || !m_console || m_index < 0) return;
+
+    m_consoleCur->setPixmap(renderScene(m_scenes[m_index])
+        .scaled(m_consoleCur->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+
+    if (m_index + 1 < static_cast<int>(m_scenes.size())) {
+        m_consoleNext->setPixmap(renderScene(m_scenes[m_index + 1])
+            .scaled(m_consoleNext->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    } else {
+        m_consoleNext->setPixmap(QPixmap());
+        m_consoleNext->setText("End of show");
+    }
+
+    m_consoleNotes->setPlainText(m_index < static_cast<int>(m_notes.size())
+                                     ? m_notes[m_index] : QString());
+    m_consoleCounter->setText(QString("%1 / %2")
+        .arg(m_index + 1).arg(static_cast<int>(m_scenes.size())));
+}
 
 void PresentModeWindow::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
@@ -392,6 +507,8 @@ void PresentModeWindow::goTo(int index, bool animate) {
         m_slideLabel->setPixmap(newPm);
         if (doObjectAnim) playObjectAnimations(scene);
     }
+
+    updateConsole();
 }
 
 void PresentModeWindow::next() {
