@@ -2,6 +2,7 @@
 // SlideScene.cpp  (Sprint 5 → Sprint 12)
 // ─────────────────────────────────────────────────────────────────────────────
 #include "SlideScene.h"
+#include "core/theme/ThemeManager.h"
 
 #include <QGraphicsRectItem>
 #include <QGraphicsEllipseItem>
@@ -74,7 +75,8 @@ static QImage adjustImage(const QImage& src, int brightness, int contrast) {
 // ─────────────────────────────────────────────────────────────────────────────
 class SlideImageItem : public QGraphicsPixmapItem {
 public:
-    explicit SlideImageItem(const QPixmap& original) : m_original(original) {}
+    explicit SlideImageItem(const QPixmap& original)
+        : m_original(original), m_display(original) {}
     QPixmap original() const { return m_original; }
 
     int brightness() const { return m_brightness; }
@@ -88,12 +90,27 @@ public:
     void setAdjust(int brightness, int contrast) {
         m_brightness = brightness;
         m_contrast   = contrast;
+        m_display = adjustedSource();
         const QSize sz = pixmap().size().isEmpty() ? m_original.size() : pixmap().size();
-        setPixmap(adjustedSource().scaled(sz, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        // The base pixmap only defines the item's on-slide geometry; the full-
+        // resolution source is what actually gets painted (see paint()).
+        setPixmap(m_display.scaled(sz, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    }
+
+    // Paint the full-resolution source into the item's rectangle with smooth
+    // scaling, so the image stays crisp at any zoom / in full-screen slide show
+    // (the inherited QGraphicsPixmapItem would paint only the downscaled base
+    // pixmap, which looks blurry when the view scales it back up).
+    void paint(QPainter* p, const QStyleOptionGraphicsItem* opt, QWidget* w) override {
+        const QPixmap& src = m_display.isNull() ? m_original : m_display;
+        if (src.isNull()) { QGraphicsPixmapItem::paint(p, opt, w); return; }
+        p->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p->drawPixmap(QGraphicsPixmapItem::boundingRect(), src, QRectF(src.rect()));
     }
 
 private:
     QPixmap m_original;
+    QPixmap m_display;            // full-res, brightness/contrast-adjusted source
     int     m_brightness { 0 };
     int     m_contrast   { 0 };
 };
@@ -428,6 +445,17 @@ SlideScene::SlideScene(QObject* parent)
         if (auto* ti = qgraphicsitem_cast<QGraphicsTextItem*>(newItem))
             m_lastTextItem = ti;
     });
+}
+
+SlideScene::~SlideScene() {
+    // The base QGraphicsScene destructor deletes the remaining items, which can
+    // emit selectionChanged() — that would invoke SlideScene::onSelectionChanged
+    // on an object whose derived part is already gone (an "object is not of the
+    // correct type" assert/crash). Silence all our signals before that happens.
+    blockSignals(true);
+    m_handles.clear();          // handle items are owned by the scene; don't double-free
+    m_handleTarget = nullptr;
+    m_lastTextItem = nullptr;
 }
 
 // ── Background accessor ───────────────────────────────────────────────────────
@@ -885,10 +913,16 @@ void SlideScene::contextMenuEvent(QGraphicsSceneContextMenuEvent* event) {
 
     QAction* chosen = menu.exec(event->screenPos());
     if (chosen == aLink) {
-        bool ok = false;
         const QString cur = it->data(HyperlinkKey).toString();
-        const QString url = QInputDialog::getText(nullptr, "Hyperlink",
-            "Address (e.g. https://example.com):", QLineEdit::Normal, cur, &ok);
+        QInputDialog dlg(views().isEmpty() ? nullptr : views().first());
+        dlg.setWindowTitle("Hyperlink");
+        dlg.setLabelText("Address (e.g. https://example.com):");
+        dlg.setInputMode(QInputDialog::TextInput);
+        dlg.setTextValue(cur);
+        dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+        dlg.resize(440, 130);
+        const bool ok = (dlg.exec() == QDialog::Accepted);
+        const QString url = dlg.textValue();
         if (ok && !url.isEmpty()) {
             it->setData(HyperlinkKey, url);
             if (auto* ti = qgraphicsitem_cast<QGraphicsTextItem*>(it)) styleTextLink(ti, true);
@@ -1589,6 +1623,15 @@ void SlideScene::loadFromData(const SlideData& data) {
             if (!si.hyperlink.isEmpty()) created->setData(HyperlinkKey, si.hyperlink);
             if (si.shadow) created->setGraphicsEffect(makeSoftShadow());
             if (si.opacity < 1.0) created->setOpacity(si.opacity);
+            if (si.locked) {
+                // A fixed backdrop element (e.g. a full-slide background picture
+                // imported from PowerPoint): it sits just above the white slide
+                // surface and cannot be selected or dragged like a free object.
+                created->setData(LockedKey, true);
+                created->setFlag(QGraphicsItem::ItemIsMovable, false);
+                created->setFlag(QGraphicsItem::ItemIsSelectable, false);
+                created->setZValue(-0.5);
+            }
         }
     }
 }
@@ -1610,6 +1653,7 @@ void SlideScene::saveToData(SlideData& data) const {
         si.animation = static_cast<ItemAnimation>(it->data(AnimationKey).toInt());
         si.shadow    = (it->graphicsEffect() != nullptr);
         si.opacity   = it->opacity();
+        si.locked    = it->data(LockedKey).toBool();
         si.hyperlink = it->data(HyperlinkKey).toString();
 
         if (auto* tb = dynamic_cast<SlideTableItem*>(it)) {

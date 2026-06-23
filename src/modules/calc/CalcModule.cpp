@@ -6,7 +6,11 @@
 #include "CalcModule.h"
 #include "SpreadsheetModel.h"
 #include "CalcHeaderView.h"
+#include "CalcIcons.h"
+#include "ChartObject.h"
 #include "FormulaEngine.h"
+#include "Cell.h"
+#include "XlsxIo.h"
 #include "core/theme/ThemeManager.h"
 
 #include <QVBoxLayout>
@@ -16,11 +20,72 @@
 #include <QLabel>
 #include <QHeaderView>
 #include <QItemSelectionModel>
+#include <QItemSelection>
 #include <QAbstractItemView>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QFont>
 #include <QSizePolicy>
 #include <QFrame>
+// Sprint 10: undo/redo + clipboard
+#include <QAction>
+#include <QUndoStack>
+#include <QUndoGroup>
+#include <QInputDialog>
+#include <QCursor>
+#include <QClipboard>
+#include <QGuiApplication>
+#include <QMimeData>
+#include <QPainter>
+#include <QTimer>
+#include <QScrollBar>
+#include <QEvent>
+#include <QKeySequence>
+#include <QSet>
+// Sprint 11: formatting toolbar
+#include <QToolButton>
+#include <QToolTip>
+#include <QPalette>
+#include <QPolygon>
+#include <QPixmap>
+#include <QImage>
+#include <QProcess>
+#include <QComboBox>
+#include <QFontComboBox>
+#include <QStackedWidget>
+#include <QScrollArea>
+#include <QColorDialog>
+#include <QFileDialog>
+#include <QPdfWriter>
+#include <QPageSize>
+#include <QPageLayout>
+#include <QMarginsF>
+#include <QPrinter>
+#include <QPrintPreviewDialog>
+#include <QShortcut>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
+#include <QFontMetrics>
+#include <QTextOption>
+#include <QMenu>
+#include <QLocale>
+// Sprint 13: find/replace
+#include <QDialog>
+#include <QCheckBox>
+#include <QPushButton>
+#include <QListWidget>
+#include <QMessageBox>
+#include <QApplication>
+#include <QStringList>
+#include <QPoint>
+#include <QSize>
+#include <vector>
+#include <utility>
+#include <climits>
+#include <algorithm>
+#include <memory>
+#include <QGridLayout>
+#include <QStringList>
 // Sprint 8: file persistence
 #include <QFile>
 #include <QFileInfo>
@@ -33,14 +98,395 @@
 namespace NativeOffice {
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MarchingAntsOverlay — transparent child of the table viewport that draws an
+// animated dashed rectangle around the copied/cut range. Repaints on a timer
+// (animating the dash phase) and recomputes its rect from visualRect() every
+// paint, so it tracks scrolling for free.
+// ─────────────────────────────────────────────────────────────────────────────
+class MarchingAntsOverlay : public QWidget {
+public:
+    explicit MarchingAntsOverlay(QTableView* view)
+        : QWidget(view->viewport()), m_view(view)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        hide();
+        m_timer = new QTimer(this);
+        m_timer->setInterval(120);
+        connect(m_timer, &QTimer::timeout, this, [this]{ m_phase = (m_phase + 1) % 16; update(); });
+    }
+
+    void setRange(const QRect& cells, bool cut) {
+        m_cells = cells;
+        m_cut   = cut;
+        if (cells.isNull()) {
+            hide();
+            m_timer->stop();
+        } else {
+            resize(parentWidget()->size());
+            show();
+            raise();
+            m_timer->start();
+            update();
+        }
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (m_cells.isNull()) return;
+        const QModelIndex tl = m_view->model()->index(m_cells.top(),    m_cells.left());
+        const QModelIndex br = m_view->model()->index(m_cells.bottom(), m_cells.right());
+        QRect r = m_view->visualRect(tl).united(m_view->visualRect(br));
+        if (!r.isValid()) return;
+        r.adjust(0, 0, -1, -1);
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, false);
+        QPen pen(m_cut ? QColor("#E8372A") : QColor("#1C7C3F"));
+        pen.setWidth(2);
+        pen.setStyle(Qt::CustomDashLine);
+        pen.setDashPattern({4, 4});
+        pen.setDashOffset(m_phase);
+        p.setPen(pen);
+        p.drawRect(r);
+    }
+
+private:
+    QTableView* m_view;
+    QTimer*     m_timer { nullptr };
+    QRect       m_cells;
+    bool        m_cut   { false };
+    int         m_phase { 0 };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SelectionOverlay — transparent child of the viewport that draws Excel's
+// signature crisp green outline around the active selection range, plus the
+// little fill-handle square at the bottom-right corner. Recomputed from the
+// selection model every paint, so it tracks scrolling and resizing for free.
+// ─────────────────────────────────────────────────────────────────────────────
+class SelectionOverlay : public QWidget {
+public:
+    explicit SelectionOverlay(QTableView* view)
+        : QWidget(view->viewport()), m_view(view)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        resize(view->viewport()->size());
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        auto* sm = m_view->selectionModel();
+        if (!sm) return;
+
+        // Bounding rectangle of the selection (fall back to the current cell).
+        int c1 = INT_MAX, r1 = INT_MAX, c2 = -1, r2 = -1;
+        const QModelIndexList sel = sm->selectedIndexes();
+        if (sel.isEmpty()) {
+            const QModelIndex cur = m_view->currentIndex();
+            if (!cur.isValid()) return;
+            c1 = c2 = cur.column();
+            r1 = r2 = cur.row();
+        } else {
+            for (const QModelIndex& i : sel) {
+                c1 = std::min(c1, i.column()); c2 = std::max(c2, i.column());
+                r1 = std::min(r1, i.row());    r2 = std::max(r2, i.row());
+            }
+        }
+
+        const QModelIndex tl = m_view->model()->index(r1, c1);
+        const QModelIndex br = m_view->model()->index(r2, c2);
+        QRect rect = m_view->visualRect(tl).united(m_view->visualRect(br));
+        if (!rect.isValid()) return;
+        rect.adjust(0, 0, -1, -1);
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, false);
+
+        const QColor kAccent("#107C41");      // Excel green
+        QPen pen(kAccent);
+        pen.setWidth(2);
+        p.setPen(pen);
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(rect);
+
+        // Fill handle (small filled square at the bottom-right corner).
+        const int hs = 6;
+        QRect handle(rect.right() - hs/2, rect.bottom() - hs/2, hs, hs);
+        p.fillRect(handle, kAccent);
+        p.setPen(QPen(Qt::white, 1));
+        p.drawRect(handle);
+    }
+
+private:
+    QTableView* m_view;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FloatingItem — a draggable/closable frame over the grid that holds arbitrary
+// content (an image label or a text box). Used by Insert ▸ Pictures / Text Box.
+// ─────────────────────────────────────────────────────────────────────────────
+class FloatingItem : public QFrame {
+public:
+    FloatingItem(QWidget* content, const QRect& geom, QWidget* parent)
+        : QFrame(parent)
+    {
+        setObjectName("floatItem");
+        setStyleSheet("QFrame#floatItem{background:transparent;border:1px solid #B6BBC2;}");
+        auto* v = new QVBoxLayout(this);
+        v->setContentsMargins(1, 16, 1, 1);
+        v->setSpacing(0);
+        auto* bar = new QWidget(this);
+        bar->setObjectName("floatBar");
+        bar->setStyleSheet("QWidget#floatBar{background:#F3F4F6;}");
+        bar->setGeometry(0, 0, geom.width(), 15);
+        auto* close = new QToolButton(this);
+        close->setText("✕");
+        close->setStyleSheet("QToolButton{border:none;background:transparent;color:#888;font-size:10px;}");
+        close->setGeometry(geom.width() - 16, 0, 15, 15);
+        connect(close, &QToolButton::clicked, this, [this]{ deleteLater(); });
+        m_close = close;
+        if (content) { content->setParent(this); v->addWidget(content); }
+        setGeometry(geom);
+    }
+protected:
+    void resizeEvent(QResizeEvent*) override {
+        if (m_close) m_close->move(width() - 16, 0);
+    }
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton && e->position().y() < 16) {
+            m_drag = true; m_press = e->globalPosition().toPoint(); m_start = pos(); raise();
+        }
+    }
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (m_drag) move(m_start + (e->globalPosition().toPoint() - m_press));
+    }
+    void mouseReleaseEvent(QMouseEvent*) override { m_drag = false; }
+private:
+    QToolButton* m_close { nullptr };
+    bool   m_drag { false };
+    QPoint m_press, m_start0;
+    QPoint m_start;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CalcItemDelegate — paints each cell from the model's format roles. A custom
+// delegate is required because a QTableView::item stylesheet rule makes Qt's
+// stylesheet style ignore the model's BackgroundRole; here we paint fill, text
+// colour, font and alignment ourselves for full Excel fidelity. Gridlines are
+// still drawn by the view (setShowGrid).
+// ─────────────────────────────────────────────────────────────────────────────
+class CalcItemDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* p, const QStyleOptionViewItem& opt,
+               const QModelIndex& idx) const override {
+        p->save();
+
+        const auto* model = qobject_cast<const SpreadsheetModel*>(idx.model());
+        const CellFormat fmt = model ? model->cellAt(idx.column(), idx.row()).format
+                                     : CellFormat{};
+
+        // ── Background ───────────────────────────────────────────────────────
+        const QVariant bgv = idx.data(Qt::BackgroundRole);
+        if (bgv.canConvert<QColor>()) {
+            const QColor bg = bgv.value<QColor>();
+            if (bg.isValid()) p->fillRect(opt.rect, bg);
+        }
+        if (opt.state & QStyle::State_Selected)
+            p->fillRect(opt.rect, QColor(16, 124, 65, 28));   // green selection tint
+
+        // ── Borders ──────────────────────────────────────────────────────────
+        if (fmt.borderEdges) {
+            QPen bp(fmt.borderColor.isValid() ? fmt.borderColor : QColor("#000000"));
+            bp.setWidth(1);
+            p->setPen(bp);
+            const QRect rr = opt.rect.adjusted(0, 0, -1, -1);
+            if (fmt.borderEdges & CellFormat::BTop)    p->drawLine(rr.topLeft(),    rr.topRight());
+            if (fmt.borderEdges & CellFormat::BBottom) p->drawLine(rr.bottomLeft(), rr.bottomRight());
+            if (fmt.borderEdges & CellFormat::BLeft)   p->drawLine(rr.topLeft(),    rr.bottomLeft());
+            if (fmt.borderEdges & CellFormat::BRight)  p->drawLine(rr.topRight(),   rr.bottomRight());
+        }
+
+        // ── Text ─────────────────────────────────────────────────────────────
+        const QString text = idx.data(Qt::DisplayRole).toString();
+        if (!text.isEmpty()) {
+            QFont f = opt.font;
+            const QVariant fv = idx.data(Qt::FontRole);
+            if (fv.isValid()) f = fv.value<QFont>();
+            p->setFont(f);
+
+            const QVariant fgv = idx.data(Qt::ForegroundRole);
+            const QColor fg = fgv.canConvert<QColor>() ? fgv.value<QColor>() : QColor();
+            p->setPen(fg.isValid() ? fg : QColor("#1C1E26"));
+
+            int align = idx.data(Qt::TextAlignmentRole).toInt();
+            if (align == 0) align = int(Qt::AlignLeft | Qt::AlignVCenter);
+
+            const int indentPx = std::max(0, fmt.indent) * 12;
+            const QRect r = opt.rect.adjusted(3 + indentPx, 0, -3, 0);
+            if (fmt.wrap) {
+                QTextOption to;
+                to.setAlignment(Qt::Alignment(align));
+                to.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+                p->drawText(QRectF(r), text, to);
+            } else {
+                const QString shown = QFontMetrics(f).elidedText(text, Qt::ElideRight, r.width());
+                p->drawText(r, align, shown);
+            }
+        }
+
+        // ── Comment marker (small red triangle, top-right) ─────────────────────
+        if (model && model->showCommentMarkers()
+            && model->hasComment(idx.column(), idx.row())) {
+            const QRect rr = opt.rect;
+            QPolygon tri;
+            tri << QPoint(rr.right() - 6, rr.top() + 1)
+                << QPoint(rr.right() - 1, rr.top() + 1)
+                << QPoint(rr.right() - 1, rr.top() + 6);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor("#E8372A"));
+            p->drawPolygon(tri);
+        }
+
+        p->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& opt, const QModelIndex& idx) const override {
+        const QSize base = QStyledItemDelegate::sizeHint(opt, idx);
+        const auto* model = qobject_cast<const SpreadsheetModel*>(idx.model());
+        if (!model) return base;
+        const Cell c = model->cellAt(idx.column(), idx.row());
+        const QString text = idx.data(Qt::DisplayRole).toString();
+        if (!c.format.wrap || text.isEmpty()) return base;
+
+        int w = base.width();
+        if (const auto* view = qobject_cast<const QTableView*>(parent()))
+            w = view->columnWidth(idx.column());
+        QFont f = opt.font;
+        const QVariant fv = idx.data(Qt::FontRole);
+        if (fv.isValid()) f = fv.value<QFont>();
+        const QRect br = QFontMetrics(f).boundingRect(
+            QRect(0, 0, std::max(8, w - 8), 100000), Qt::TextWordWrap, text);
+        return QSize(w, std::max(base.height(), br.height() + 4));
+    }
+
+    // Excel-style in-cell editor: clean white field with a green outline and a
+    // dark text caret (the default editor showed a stray blue cursor line).
+    QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem& opt,
+                          const QModelIndex& idx) const override {
+        // Drop-down validation: if the column has an allowed-value list, edit
+        // with a combo box instead of a free text field.
+        if (const auto* model = qobject_cast<const SpreadsheetModel*>(idx.model())) {
+            const QStringList items = model->validationList(idx.column());
+            if (!items.isEmpty()) {
+                auto* cb = new QComboBox(parent);
+                cb->addItems(items);
+                cb->setEditable(false);
+                return cb;
+            }
+        }
+        QWidget* ed = QStyledItemDelegate::createEditor(parent, opt, idx);
+        if (auto* le = qobject_cast<QLineEdit*>(ed)) {
+            le->setFrame(false);
+            // Caret colour follows QPalette::Text — force it dark, not blue.
+            QPalette pal = le->palette();
+            pal.setColor(QPalette::Text,            QColor("#1C1E26"));
+            pal.setColor(QPalette::Base,            QColor("#FFFFFF"));
+            pal.setColor(QPalette::Highlight,       QColor("#107C41"));
+            pal.setColor(QPalette::HighlightedText, QColor("#FFFFFF"));
+            le->setPalette(pal);
+            le->setStyleSheet(
+                "QLineEdit{border:1px solid #107C41;background:#FFFFFF;"
+                "color:#1C1E26;padding:0 2px;margin:0;}");
+        }
+        return ed;
+    }
+};
+
+// Internal MIME type carrying serialized cells (content + format).
+static const char* kCellsMime = "application/x-nativeoffice-cells";
+
+// ── CellFormat ⇄ JSON ─────────────────────────────────────────────────────────
+static QJsonObject formatToJson(const CellFormat& f) {
+    QJsonObject o;
+    if (!f.fontFamily.isEmpty())   o["ff"] = f.fontFamily;
+    if (f.fontSize > 0)            o["fs"] = f.fontSize;
+    if (f.bold)                    o["b"]  = true;
+    if (f.italic)                  o["i"]  = true;
+    if (f.underline)               o["u"]  = true;
+    if (f.strike)                  o["st"] = true;
+    if (f.textColor.isValid())     o["fg"] = f.textColor.name(QColor::HexArgb);
+    if (f.bgColor.isValid())       o["bg"] = f.bgColor.name(QColor::HexArgb);
+    if (f.hAlign)                  o["ha"] = f.hAlign;
+    if (f.vAlign)                  o["va"] = f.vAlign;
+    if (f.wrap)                    o["w"]  = true;
+    if (f.indent)                  o["in"] = f.indent;
+    if (!f.numberFormat.isEmpty()) o["nf"] = f.numberFormat;
+    if (f.borderEdges)             o["bd"] = f.borderEdges;
+    if (f.borderColor.isValid())   o["bc"] = f.borderColor.name(QColor::HexArgb);
+    return o;
+}
+
+static CellFormat jsonToFormat(const QJsonObject& o) {
+    CellFormat f;
+    f.fontFamily   = o.value("ff").toString();
+    f.fontSize     = o.value("fs").toInt(0);
+    f.bold         = o.value("b").toBool(false);
+    f.italic       = o.value("i").toBool(false);
+    f.underline    = o.value("u").toBool(false);
+    f.strike       = o.value("st").toBool(false);
+    if (o.contains("fg")) f.textColor = QColor(o.value("fg").toString());
+    if (o.contains("bg")) f.bgColor   = QColor(o.value("bg").toString());
+    f.hAlign       = o.value("ha").toInt(0);
+    f.vAlign       = o.value("va").toInt(0);
+    f.wrap         = o.value("w").toBool(false);
+    f.indent       = o.value("in").toInt(0);
+    f.numberFormat = o.value("nf").toString();
+    f.borderEdges  = o.value("bd").toInt(0);
+    if (o.contains("bc")) f.borderColor = QColor(o.value("bc").toString());
+    return f;
+}
+
+// ── Merge range ⇄ "A1:B2" ─────────────────────────────────────────────────────
+static QString mergeToRef(const QRect& r) {
+    return FormulaEngine::cellAddress(r.left(),  r.top()) + ":"
+         + FormulaEngine::cellAddress(r.right(), r.bottom());
+}
+static QRect refToMerge(const QString& ref) {
+    const int colon = ref.indexOf(':');
+    if (colon < 0) return {};
+    int c1 = 0, r1 = 0, c2 = 0, r2 = 0;
+    if (!FormulaEngine::parseCellRef(ref.left(colon).trimmed(), c1, r1)) return {};
+    if (!FormulaEngine::parseCellRef(ref.mid(colon + 1).trimmed(), c2, r2)) return {};
+    return QRect(QPoint(qMin(c1, c2), qMin(r1, r2)),
+                 QPoint(qMax(c1, c2), qMax(r1, r2)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────
 CalcModule::CalcModule(QWidget* parent)
     : QWidget(parent)
 {
     buildUi();
+    buildActions();
     applyStyles();
     setObjectName("calcModule");
+
+    // Selection + marching-ants overlays, both tracking scroll & resize.
+    m_selOverlay = new SelectionOverlay(m_tableView);
+    m_selOverlay->show();
+    m_ants = new MarchingAntsOverlay(m_tableView);
+    m_ants->raise();                       // copy border sits above selection box
+    m_tableView->viewport()->installEventFilter(this);
+
+    auto repaintOverlays = [this]{ m_selOverlay->update(); m_ants->update(); updateFrozenViews(); };
+    connect(m_tableView->horizontalScrollBar(), &QScrollBar::valueChanged, this, repaintOverlays);
+    connect(m_tableView->verticalScrollBar(),   &QScrollBar::valueChanged, this, repaintOverlays);
+
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,12 +542,15 @@ void CalcModule::buildUi() {
     fbarLayout->addWidget(sep2);
     fbarLayout->addWidget(m_formulaBar, 1);
 
-    // ── Grid ──────────────────────────────────────────────────────────────
-    m_model = new SpreadsheetModel(this);
+    // ── Grid + first sheet ──────────────────────────────────────────────────
+    m_undoGroup = new QUndoGroup(this);
+    m_model = createSheet("Sheet1");
+    m_activeSheet = 0;
 
     m_tableView = new QTableView(this);
     m_tableView->setObjectName("calcGrid");
     m_tableView->setModel(m_model);
+    m_undoGroup->setActiveStack(m_model->undoStack());
 
     // Custom themed header views
     m_colHeader = new CalcHeaderView(Qt::Horizontal, m_tableView);
@@ -110,10 +559,13 @@ void CalcModule::buildUi() {
     m_tableView->setHorizontalHeader(m_colHeader);
     m_tableView->setVerticalHeader(m_rowHeader);
 
-    // Column widths: default 80px, row heights: default 22px
-    m_colHeader->setDefaultSectionSize(80);
-    m_rowHeader->setDefaultSectionSize(22);
-    m_rowHeader->setFixedWidth(48);
+    // Custom delegate paints cell fills / fonts / colours from the model.
+    m_tableView->setItemDelegate(new CalcItemDelegate(m_tableView));
+
+    // Column widths: default 64px, row heights: default 20px (compact WPS look)
+    m_colHeader->setDefaultSectionSize(64);
+    m_rowHeader->setDefaultSectionSize(20);
+    m_rowHeader->setFixedWidth(40);
 
     // Grid interaction
     m_tableView->setSelectionMode(QAbstractItemView::ContiguousSelection);
@@ -124,14 +576,62 @@ void CalcModule::buildUi() {
                                  | QAbstractItemView::EditKeyPressed);
     m_tableView->setShowGrid(true);
 
+    // ── Header + grid context menus (row/column operations) ──────────────────
+    m_rowHeader->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_colHeader->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_tableView->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_rowHeader, &QWidget::customContextMenuRequested,
+            this, &CalcModule::onRowHeaderMenu);
+    connect(m_colHeader, &QWidget::customContextMenuRequested,
+            this, &CalcModule::onColHeaderMenu);
+    connect(m_tableView, &QWidget::customContextMenuRequested,
+            this, &CalcModule::onGridContextMenu);
+
+    // Double-click a header boundary to auto-fit that column/row.
+    connect(m_colHeader, &QHeaderView::sectionHandleDoubleClicked,
+            this, [this](int i){ m_tableView->resizeColumnToContents(i); });
+    connect(m_rowHeader, &QHeaderView::sectionHandleDoubleClicked,
+            this, [this](int i){ m_tableView->resizeRowToContents(i); });
+
+    // Capture manual (and auto-fit) resizes into the active sheet model.
+    connect(m_colHeader, &QHeaderView::sectionResized, this,
+            [this](int idx, int, int newSize){
+                updateFrozenViews();
+                if (m_applyingSizes) return;
+                m_model->setColWidth(idx, newSize);
+                markDirty();
+            });
+    connect(m_rowHeader, &QHeaderView::sectionResized, this,
+            [this](int idx, int, int newSize){
+                updateFrozenViews();
+                if (m_applyingSizes) return;
+                m_model->setRowHeight(idx, newSize);
+                markDirty();
+            });
+
+    // ── Ribbon (tabbed toolbar, above the formula bar) ──────────────────────
+    buildRibbon();
+
+    // ── Sheet tab bar (bottom) ──────────────────────────────────────────────
+    m_tabBar = new QWidget(this);
+    m_tabBar->setObjectName("calcTabBar");
+    m_tabBar->setFixedHeight(30);
+    m_tabBarLayout = new QHBoxLayout(m_tabBar);
+    m_tabBarLayout->setContentsMargins(6, 0, 6, 0);
+    m_tabBarLayout->setSpacing(2);
+
     // ── Assemble ──────────────────────────────────────────────────────────
+    // The table's large vertical sizeHint would otherwise inflate the layout and
+    // push the bottom tab bar off the window — make it yield to the fixed bars.
+    m_tableView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
+
+    rootLayout->addWidget(m_ribbon);
     rootLayout->addWidget(fbarRow);
     rootLayout->addWidget(m_tableView, 1);
+    rootLayout->addWidget(m_tabBar);
 
     // ── Connect signals ───────────────────────────────────────────────────
-    connect(m_tableView->selectionModel(),
-            &QItemSelectionModel::selectionChanged,
-            this, &CalcModule::onSelectionChanged);
+    connectActiveView();
 
     connect(m_formulaBar, &QLineEdit::returnPressed,
             this, &CalcModule::onFormulaBarReturnPressed);
@@ -139,9 +639,7 @@ void CalcModule::buildUi() {
     connect(m_formulaBar, &QLineEdit::textEdited,
             this, &CalcModule::onFormulaBarTextEdited);
 
-    // ── Dirty-state tracking (Sprint 8) ─────────────────────────────────
-    connect(m_model, &SpreadsheetModel::dataChanged,
-            this, &CalcModule::onModelDataChanged);
+    rebuildTabBar();
 
     // Select A1 by default
     const QModelIndex first = m_model->index(0, 0);
@@ -158,6 +656,15 @@ void CalcModule::onSelectionChanged() {
     const QModelIndex cur = m_tableView->currentIndex();
     if (!cur.isValid()) return;
 
+    // Format painter: if armed, paint the captured format onto this new
+    // selection, then disarm (one-shot, like clicking it once in Excel).
+    if (m_painterArmed) {
+        m_painterArmed = false;
+        if (m_formatPainterBtn) m_formatPainterBtn->setChecked(false);
+        const CellFormat pf = m_painterFmt;
+        applyFormatToSelection([pf](CellFormat& f){ f = pf; }, "Format Painter");
+    }
+
     // Update name box
     const QString addr = FormulaEngine::cellAddress(cur.column(), cur.row());
     m_nameBox->setText(addr);
@@ -172,6 +679,12 @@ void CalcModule::onSelectionChanged() {
     // Highlight the selected column and row in the headers
     m_colHeader->setHighlightedSections({cur.column()});
     m_rowHeader->setHighlightedSections({cur.row()});
+
+    // Redraw the Excel selection box.
+    if (m_selOverlay) m_selOverlay->update();
+
+    // Reflect the active cell's formatting in the toolbar.
+    updateToolbarFromCell();
 }
 
 void CalcModule::onFormulaBarReturnPressed() {
@@ -194,7 +707,157 @@ void CalcModule::onFormulaBarTextEdited(const QString& /*text*/) {
 }
 
 void CalcModule::onModelDataChanged() {
+    refreshChartsData();                 // keep live charts in sync with the data
     if (m_ignoreChange) return;
+    if (!m_dirty) {
+        m_dirty = true;
+        emit documentModified();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-sheet management
+// ─────────────────────────────────────────────────────────────────────────────
+SpreadsheetModel* CalcModule::createSheet(const QString& name) {
+    auto* m = new SpreadsheetModel(this);
+    m->setSheetName(name);
+    m->setCrossSheetLookup([this](const QString& sn, int c, int r) -> QString {
+        SpreadsheetModel* s = sheetByName(sn);
+        return s ? s->displayValue(c, r) : QString("#REF!");
+    });
+    connect(m, &SpreadsheetModel::dataChanged, this, &CalcModule::onModelDataChanged);
+    if (m_undoGroup) m_undoGroup->addStack(m->undoStack());
+    m_sheets.append(m);
+    return m;
+}
+
+SpreadsheetModel* CalcModule::sheetByName(const QString& name) const {
+    for (auto* s : m_sheets)
+        if (QString::compare(s->sheetName(), name, Qt::CaseInsensitive) == 0)
+            return s;
+    return nullptr;
+}
+
+void CalcModule::connectActiveView() {
+    // setModel() recreates the selection model, so reconnect each switch.
+    connect(m_tableView->selectionModel(),
+            &QItemSelectionModel::selectionChanged,
+            this, &CalcModule::onSelectionChanged);
+}
+
+void CalcModule::switchToSheet(int index) {
+    if (index < 0 || index >= m_sheets.size()) return;
+    m_activeSheet = index;
+    m_model = m_sheets[index];
+    m_tableView->setModel(m_model);
+    m_undoGroup->setActiveStack(m_model->undoStack());
+    connectActiveView();
+    clearMarchingAnts();
+    clearFilters();              // filters don't carry across sheets
+    setFreeze(0, 0);             // freeze views hold the old selection model
+    for (QWidget* w : m_floatingItems) w->deleteLater();
+    m_floatingItems.clear();
+
+    applyMerges();
+    applySizes();
+
+    // Grow rows with wrapped cells that have no explicit stored height.
+    QSet<int> wrapRows;
+    const auto& data = m_model->cells();
+    for (auto it = data.begin(); it != data.end(); ++it)
+        if (it->second.format.wrap) wrapRows.insert(SpreadsheetModel::keyRow(it->first));
+    m_applyingSizes = true;
+    for (int row : wrapRows)
+        if (!m_model->rowHeights().contains(row)) m_tableView->resizeRowToContents(row);
+    m_applyingSizes = false;
+
+    const QModelIndex first = m_model->index(0, 0);
+    m_tableView->setCurrentIndex(first);
+    m_tableView->scrollTo(first);
+
+    rebuildTabBar();
+    rebuildChartObjects();               // recreate this sheet's chart widgets
+    onSelectionChanged();
+}
+
+void CalcModule::addSheet(const QString& name) {
+    createSheet(name);
+    switchToSheet(m_sheets.size() - 1);
+    markDirty();
+}
+
+void CalcModule::deleteSheet(int index) {
+    if (m_sheets.size() <= 1 || index < 0 || index >= m_sheets.size()) return;
+    SpreadsheetModel* s = m_sheets[index];
+    if (m_tableView->model() == s) m_tableView->setModel(nullptr);
+    m_undoGroup->removeStack(s->undoStack());
+    m_sheets.removeAt(index);
+    s->deleteLater();
+
+    if (m_activeSheet >= m_sheets.size()) m_activeSheet = m_sheets.size() - 1;
+    switchToSheet(m_activeSheet);
+    markDirty();
+}
+
+void CalcModule::renameSheet(int index, const QString& name) {
+    if (index < 0 || index >= m_sheets.size() || name.isEmpty()) return;
+    if (sheetByName(name)) return;                 // names must be unique
+    m_sheets[index]->setSheetName(name);
+    rebuildTabBar();
+    markDirty();
+}
+
+void CalcModule::onSheetTabMenu(int index, const QPoint& pos) {
+    QMenu menu(this);
+    QAction* ren = menu.addAction("Rename…");
+    QAction* del = menu.addAction("Delete");
+    del->setEnabled(m_sheets.size() > 1);
+    const QWidget* w = qobject_cast<QWidget*>(sender());
+    const QAction* a = menu.exec(w ? w->mapToGlobal(pos) : QCursor::pos());
+    if (a == ren) {
+        bool ok = false;
+        const QString n = QInputDialog::getText(this, "Rename Sheet", "Name:",
+                                                QLineEdit::Normal,
+                                                m_sheets[index]->sheetName(), &ok);
+        if (ok && !n.isEmpty()) renameSheet(index, n);
+    } else if (a == del) {
+        deleteSheet(index);
+    }
+}
+
+void CalcModule::rebuildTabBar() {
+    if (!m_tabBarLayout) return;
+    // Clear existing tab buttons.
+    QLayoutItem* it;
+    while ((it = m_tabBarLayout->takeAt(0)) != nullptr) {
+        if (it->widget()) it->widget()->deleteLater();
+        delete it;
+    }
+
+    for (int i = 0; i < m_sheets.size(); ++i) {
+        auto* b = new QToolButton(m_tabBar);
+        b->setText(m_sheets[i]->sheetName());
+        b->setObjectName(i == m_activeSheet ? "sheetTabActive" : "sheetTab");
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(b, &QToolButton::clicked, this, [this, i]{ switchToSheet(i); });
+        connect(b, &QToolButton::customContextMenuRequested,
+                this, [this, i](const QPoint& p){ onSheetTabMenu(i, p); });
+        m_tabBarLayout->addWidget(b);
+    }
+
+    auto* add = new QToolButton(m_tabBar);
+    add->setText("+");
+    add->setObjectName("sheetAddBtn");
+    add->setToolTip("Add Sheet");
+    add->setFocusPolicy(Qt::NoFocus);
+    connect(add, &QToolButton::clicked, this,
+            [this]{ addSheet(QString("Sheet%1").arg(m_sheets.size() + 1)); });
+    m_tabBarLayout->addWidget(add);
+    m_tabBarLayout->addStretch(1);
+}
+
+void CalcModule::markDirty() {
     if (!m_dirty) {
         m_dirty = true;
         emit documentModified();
@@ -210,6 +873,2730 @@ QString CalcModule::currentAddress() const {
     return FormulaEngine::cellAddress(cur.column(), cur.row());
 }
 
+QRect CalcModule::selectedRect() const {
+    const QModelIndexList sel = m_tableView->selectionModel()->selectedIndexes();
+    if (sel.isEmpty()) {
+        const QModelIndex cur = m_tableView->currentIndex();
+        if (!cur.isValid()) return QRect(0, 0, 0, 0);
+        return QRect(cur.column(), cur.row(), 1, 1);
+    }
+    int c1 = INT_MAX, r1 = INT_MAX, c2 = 0, r2 = 0;
+    for (const QModelIndex& i : sel) {
+        c1 = std::min(c1, i.column()); c2 = std::max(c2, i.column());
+        r1 = std::min(r1, i.row());    r2 = std::max(r2, i.row());
+    }
+    return QRect(QPoint(c1, r1), QPoint(c2, r2));   // left,top .. right,bottom
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit actions
+// ─────────────────────────────────────────────────────────────────────────────
+void CalcModule::buildActions() {
+    // Undo/redo follow the active sheet via the QUndoGroup.
+    m_undoAct = m_undoGroup->createUndoAction(this, "&Undo");
+    m_undoAct->setShortcut(QKeySequence::Undo);              // Ctrl+Z
+    m_redoAct = m_undoGroup->createRedoAction(this, "&Redo");
+    m_redoAct->setShortcuts({QKeySequence::Redo,
+                             QKeySequence("Ctrl+Y")});        // Ctrl+Y / Ctrl+Shift+Z
+
+    m_cutAct = new QAction("Cu&t", this);
+    m_cutAct->setShortcut(QKeySequence::Cut);                // Ctrl+X
+    connect(m_cutAct, &QAction::triggered, this, &CalcModule::cutSelection);
+
+    m_copyAct = new QAction("&Copy", this);
+    m_copyAct->setShortcut(QKeySequence::Copy);              // Ctrl+C
+    connect(m_copyAct, &QAction::triggered, this, &CalcModule::copySelection);
+
+    m_pasteAct = new QAction("&Paste", this);
+    m_pasteAct->setShortcut(QKeySequence::Paste);            // Ctrl+V
+    connect(m_pasteAct, &QAction::triggered, this, &CalcModule::pasteClipboard);
+
+    m_deleteAct = new QAction("&Delete", this);
+    m_deleteAct->setShortcut(QKeySequence::Delete);          // Del
+    connect(m_deleteAct, &QAction::triggered, this, &CalcModule::deleteSelection);
+
+    // Make the shortcuts fire whenever focus is anywhere inside the module.
+    for (QAction* a : {m_undoAct, m_redoAct, m_cutAct, m_copyAct, m_pasteAct, m_deleteAct}) {
+        a->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        addAction(a);
+    }
+
+    // Find / Replace shortcuts (Ctrl+F / Ctrl+H).
+    auto* findSc = new QShortcut(QKeySequence::Find, this);
+    findSc->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(findSc, &QShortcut::activated, this, &CalcModule::showFindDialog);
+    auto* replSc = new QShortcut(QKeySequence::Replace, this);
+    replSc->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(replSc, &QShortcut::activated, this, &CalcModule::showReplaceDialog);
+
+    // Fill Down / Fill Right (Excel: Ctrl+D / Ctrl+R).
+    auto* fillD = new QShortcut(QKeySequence("Ctrl+D"), this);
+    fillD->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(fillD, &QShortcut::activated, this, &CalcModule::fillDown);
+    auto* fillR = new QShortcut(QKeySequence("Ctrl+R"), this);
+    fillR->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(fillR, &QShortcut::activated, this, &CalcModule::fillRight);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatting toolbar
+// ─────────────────────────────────────────────────────────────────────────────
+static void styleColorButton(QToolButton* b, const QColor& c) {
+    // ID selector keeps the colour swatch from being overridden by the
+    // ribbon's generic "QWidget#calcRibbon QToolButton" rule.
+    const QString id = b->objectName();
+    b->setStyleSheet(QString(
+        "QToolButton#%1{border:1px solid #C8C8C8;border-bottom:3px solid %2;"
+        "border-radius:3px;background:#FFFFFF;font-weight:700;color:#1C1E26;}"
+        "QToolButton#%1:hover{background:#ECECEC;}").arg(id, c.name()));
+}
+
+// Decimal places encoded in a number-format code ("0.00" → 2).
+static int decimalsOfCode(const QString& code) {
+    const int dot = code.indexOf('.');
+    if (dot < 0) return 0;
+    int d = 0;
+    for (int i = dot + 1; i < code.size(); ++i) {
+        const QChar c = code[i];
+        if (c == '0' || c == '#') ++d; else break;
+    }
+    return d;
+}
+
+// Rebuild a number-format code from its flags + decimal count.
+static QString buildNumberCode(bool currency, bool percent, bool thousands, int decimals) {
+    QString out;
+    if (currency) out += '$';
+    out += thousands ? "#,##0" : "0";
+    if (decimals > 0) out += '.' + QString(decimals, '0');
+    if (percent) out += '%';
+    return out;
+}
+
+void CalcModule::buildRibbon() {
+    m_ribbon = new QWidget(this);
+    m_ribbon->setObjectName("calcRibbon");
+    m_ribbon->setFixedHeight(112);
+
+    auto* rootV = new QVBoxLayout(m_ribbon);
+    rootV->setContentsMargins(0, 0, 0, 0);
+    rootV->setSpacing(0);
+
+    // ── Tab strip ─────────────────────────────────────────────────────────────
+    auto* tabs = new QWidget(m_ribbon);
+    tabs->setObjectName("ribbonTabs");
+    tabs->setFixedHeight(32);
+    auto* tabsLay = new QHBoxLayout(tabs);
+    tabsLay->setContentsMargins(10, 0, 10, 0);
+    tabsLay->setSpacing(2);
+
+    m_ribbonStack = new QStackedWidget(m_ribbon);
+    m_ribbonTabBtns.clear();
+
+    auto makeTab = [&](const QString& text, int page) {
+        auto* t = new QToolButton(tabs);
+        t->setText(text);
+        t->setObjectName("ribbonTab");
+        t->setCheckable(true);
+        t->setFocusPolicy(Qt::NoFocus);
+        connect(t, &QToolButton::clicked, this, [this, page]{
+            m_ribbonStack->setCurrentIndex(page);
+            for (int i = 0; i < m_ribbonTabBtns.size(); ++i)
+                m_ribbonTabBtns[i]->setChecked(i == page);
+        });
+        tabsLay->addWidget(t);
+        m_ribbonTabBtns.push_back(t);
+        return t;
+    };
+    makeTab("Home", 0);  makeTab("Insert", 1);  makeTab("Page Layout", 2);
+    makeTab("Formulas", 3);  makeTab("Data", 4);  makeTab("Review", 5);
+    makeTab("View", 6);  makeTab("Tools", 7);  makeTab("Smart Toolbox", 8);
+    m_ribbonTabBtns[0]->setChecked(true);
+    tabsLay->addStretch(1);
+
+    rootV->addWidget(tabs);
+    rootV->addWidget(m_ribbonStack, 1);
+
+    // ── Layout helpers ─────────────────────────────────────────────────────────
+    // A labelled group: returns the inner content row (HBox). Big buttons go
+    // straight in; dense clusters add a 2-row sub-grid via cluster2().
+    auto group = [&](QHBoxLayout* pageLay, const QString& title) -> QHBoxLayout* {
+        auto* g  = new QWidget(m_ribbon);
+        auto* gv = new QVBoxLayout(g);
+        gv->setContentsMargins(4, 3, 4, 2);
+        gv->setSpacing(1);
+        auto* rowW = new QWidget(g);
+        auto* row  = new QHBoxLayout(rowW);
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(1);
+        auto* lbl = new QLabel(title, g);
+        lbl->setObjectName("groupLabel");
+        lbl->setAlignment(Qt::AlignHCenter);
+        gv->addWidget(rowW, 1);
+        gv->addWidget(lbl);
+        pageLay->addWidget(g);
+        auto* sep = new QFrame(m_ribbon);
+        sep->setFrameShape(QFrame::VLine);
+        sep->setObjectName("ribbonSep");
+        pageLay->addWidget(sep);
+        return row;
+    };
+    // Balance a multi-word label onto (at most) two lines so it fits a narrow
+    // icon-over-text button without eliding — the WPS look.
+    auto wrap2 = [](const QString& label) -> QString {
+        if (label.length() <= 7 || !label.contains(' ')) return label;
+        const int mid = label.length() / 2;
+        int best = -1, bestDist = 999;
+        for (int i = 0; i < label.length(); ++i)
+            if (label[i] == ' ' && qAbs(i - mid) < bestDist) { bestDist = qAbs(i - mid); best = i; }
+        if (best < 0) return label;
+        QString out = label;
+        out[best] = '\n';
+        return out;
+    };
+    // Large icon-over-text button (the WPS "primary action" look).
+    auto big = [&](const QString& icon, const QString& label, const QString& tip,
+                   bool checkable = false) {
+        auto* b = new QToolButton(m_ribbon);
+        b->setObjectName("ribbonBig");
+        b->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        b->setIcon(calcIcon(icon));
+        b->setIconSize(QSize(18, 18));
+        b->setText(wrap2(label));
+        b->setToolTip(tip.isEmpty() ? label : tip);
+        b->setCheckable(checkable);
+        b->setFocusPolicy(Qt::NoFocus);
+        return b;
+    };
+    // Small icon-only button (dense clusters).
+    auto small = [&](const QString& icon, const QString& tip, bool checkable = false) {
+        auto* b = new QToolButton(m_ribbon);
+        b->setObjectName("ribbonSmall");
+        b->setIcon(calcIcon(icon));
+        b->setIconSize(QSize(16, 16));
+        b->setToolTip(tip);
+        b->setCheckable(checkable);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setFixedSize(24, 24);
+        return b;
+    };
+    // Small text-letter toggle (B / I / U / S — conventional Office letterforms).
+    auto letter = [&](const QString& t, const QString& tip,
+                      bool b_, bool i_, bool u_, bool s_) {
+        auto* b = new QToolButton(m_ribbon);
+        b->setObjectName("ribbonLetter");
+        b->setText(t);
+        b->setToolTip(tip);
+        b->setCheckable(true);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setFixedSize(24, 24);
+        QFont f = b->font();
+        f.setPointSize(10); f.setBold(b_); f.setItalic(i_);
+        f.setUnderline(u_); f.setStrikeOut(s_);
+        b->setFont(f);
+        return b;
+    };
+    // A 2-row column-major cluster of small controls inside a group row.
+    auto cluster2 = [&](QHBoxLayout* row) {
+        auto* w = new QWidget(m_ribbon);
+        auto* g = new QGridLayout(w);
+        g->setContentsMargins(0, 0, 0, 0);
+        g->setHorizontalSpacing(2);
+        g->setVerticalSpacing(2);
+        row->addWidget(w);
+        auto idx = std::make_shared<int>(0);
+        return [g, idx](QWidget* cell) {
+            g->addWidget(cell, (*idx) % 2, (*idx) / 2);
+            ++(*idx);
+            return cell;
+        };
+    };
+    // Honest-info big button (features needing external services / not built).
+    auto soonBig = [&](QHBoxLayout* into, const QString& icon, const QString& label,
+                       const QString& tip = QString()) {
+        auto* b = big(icon, label, tip);
+        const QString name = tip.isEmpty() ? label : tip;
+        connect(b, &QToolButton::clicked, this, [this, name]{
+            featureInfo(name, name + " needs a feature that isn't part of this build "
+                                     "(typically an online service or a subsystem not yet added).");
+        });
+        into->addWidget(b);
+        return b;
+    };
+    // Big button wired to an action.
+    auto act = [&](QHBoxLayout* into, const QString& icon, const QString& label,
+                   const QString& tip, std::function<void()> fn) {
+        auto* b = big(icon, label, tip);
+        connect(b, &QToolButton::clicked, this, std::move(fn));
+        into->addWidget(b);
+        return b;
+    };
+    // Big button with a drop-down of functions → startFunctionEntry.
+    auto fnBig = [&](QHBoxLayout* into, const QString& icon, const QString& label,
+                     const QString& tip, const QStringList& fns) {
+        auto* b = big(icon, label, tip);
+        b->setPopupMode(QToolButton::InstantPopup);
+        auto* m = new QMenu(b);
+        for (const QString& fn : fns)
+            connect(m->addAction(fn + "(…)"), &QAction::triggered, this,
+                    [this, fn]{ startFunctionEntry(fn); });
+        b->setMenu(m);
+        into->addWidget(b);
+        return b;
+    };
+    // Menu item with an icon (request 3: icons on sub-options of sub-options).
+    auto mi = [&](QMenu* m, const QString& icon, const QString& text) -> QAction* {
+        return m->addAction(calcIcon(icon), text);
+    };
+    // Wired small icon button placed into a cluster-add lambda.
+    auto sIn = [&](const std::function<QWidget*(QWidget*)>& add, const QString& icon,
+                   const QString& tip, std::function<void()> fn) {
+        auto* b = small(icon, tip);
+        connect(b, &QToolButton::clicked, this, std::move(fn));
+        add(b);
+        return b;
+    };
+    (void)mi; (void)sIn;
+    auto newPage = [&]() -> QHBoxLayout* {
+        auto* area = new QScrollArea(m_ribbonStack);
+        area->setObjectName("ribbonScroll");
+        area->setWidgetResizable(true);
+        area->setFrameShape(QFrame::NoFrame);
+        area->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* page = new QWidget(area);
+        auto* pl = new QHBoxLayout(page);
+        pl->setContentsMargins(6, 1, 6, 1);
+        pl->setSpacing(2);
+        area->setWidget(page);
+        m_ribbonStack->addWidget(area);
+        return pl;
+    };
+
+    // ══ HOME PAGE ════════════════════════════════════════════════════════════
+    auto curRow = [this]{ const QModelIndex c = m_tableView->currentIndex(); return c.isValid() ? c.row() : 0; };
+    auto curCol = [this]{ const QModelIndex c = m_tableView->currentIndex(); return c.isValid() ? c.column() : 0; };
+    {
+        QHBoxLayout* pl = newPage();
+
+        // ── Clipboard ──────────────────────────────────────────────────────────
+        QHBoxLayout* clip = group(pl, "Clipboard");
+        auto* pasteBtn = big("paste", "Paste", "Paste (Ctrl+V)");
+        connect(pasteBtn, &QToolButton::clicked, this, &CalcModule::pasteClipboard);
+        clip->addWidget(pasteBtn);
+        auto addClip = cluster2(clip);
+        auto* cutBtn  = small("cut",  "Cut (Ctrl+X)");
+        auto* copyBtn = small("copy", "Copy (Ctrl+C)");
+        m_formatPainterBtn = small("format-painter",
+                                   "Format Painter — copy this cell's formatting, then click a target", true);
+        connect(cutBtn,  &QToolButton::clicked, this, &CalcModule::cutSelection);
+        connect(copyBtn, &QToolButton::clicked, this, &CalcModule::copySelection);
+        connect(m_formatPainterBtn, &QToolButton::clicked, this, &CalcModule::onFormatPainterClicked);
+        addClip(cutBtn); addClip(copyBtn); addClip(m_formatPainterBtn);
+
+        // ── Font ───────────────────────────────────────────────────────────────
+        QHBoxLayout* font = group(pl, "Font");
+        auto* fw = new QWidget(m_ribbon);
+        auto* fg = new QGridLayout(fw);
+        fg->setContentsMargins(0, 0, 0, 0);
+        fg->setHorizontalSpacing(2); fg->setVerticalSpacing(2);
+        m_fontCombo = new QFontComboBox(m_ribbon);
+        m_fontCombo->setObjectName("fontCombo");
+        m_fontCombo->setMaximumWidth(132);
+        m_fontCombo->setCurrentFont(QFont("Calibri"));
+        m_fontCombo->setFocusPolicy(Qt::ClickFocus);
+        connect(m_fontCombo, &QFontComboBox::currentFontChanged, this, [this](const QFont&){ onFontFamilyChanged(); });
+        m_sizeCombo = new QComboBox(m_ribbon);
+        m_sizeCombo->setObjectName("sizeCombo");
+        m_sizeCombo->setEditable(true);
+        m_sizeCombo->setFixedWidth(48);
+        m_sizeCombo->setFocusPolicy(Qt::ClickFocus);
+        for (int s : {8,9,10,11,12,14,16,18,20,24,28,32,36,48,72}) m_sizeCombo->addItem(QString::number(s));
+        m_sizeCombo->setCurrentText("11");
+        connect(m_sizeCombo, &QComboBox::currentTextChanged, this, [this](const QString&){ onFontSizeChanged(); });
+        auto* growBtn   = small("font-grow",   "Increase Font Size");
+        auto* shrinkBtn = small("font-shrink", "Decrease Font Size");
+        connect(growBtn,   &QToolButton::clicked, this, &CalcModule::onIncreaseFont);
+        connect(shrinkBtn, &QToolButton::clicked, this, &CalcModule::onDecreaseFont);
+        fg->addWidget(m_fontCombo, 0, 0, 1, 4);
+        fg->addWidget(m_sizeCombo, 0, 4);
+        fg->addWidget(growBtn,     0, 5);
+        fg->addWidget(shrinkBtn,   0, 6);
+        m_boldBtn      = letter("B", "Bold (Ctrl+B)",      true,  false, false, false);
+        m_italicBtn    = letter("I", "Italic (Ctrl+I)",    false, true,  false, false);
+        m_underlineBtn = letter("U", "Underline (Ctrl+U)", false, false, true,  false);
+        m_strikeBtn    = letter("S", "Strikethrough",      false, false, false, true);
+        connect(m_boldBtn,      &QToolButton::toggled, this, &CalcModule::onBoldToggled);
+        connect(m_italicBtn,    &QToolButton::toggled, this, &CalcModule::onItalicToggled);
+        connect(m_underlineBtn, &QToolButton::toggled, this, &CalcModule::onUnderlineToggled);
+        connect(m_strikeBtn,    &QToolButton::toggled, this, &CalcModule::onStrikeToggled);
+        m_textColorBtn = small("font-color", "Text Colour");
+        m_textColorBtn->setObjectName("textColorBtn");
+        styleColorButton(m_textColorBtn, m_lastTextColor);
+        connect(m_textColorBtn, &QToolButton::clicked, this, &CalcModule::onTextColorClicked);
+        m_fillColorBtn = small("fill-color", "Fill Colour");
+        m_fillColorBtn->setObjectName("fillColorBtn");
+        styleColorButton(m_fillColorBtn, m_lastFillColor);
+        connect(m_fillColorBtn, &QToolButton::clicked, this, &CalcModule::onFillColorClicked);
+        m_borderBtn = small("borders", "Borders");
+        m_borderBtn->setPopupMode(QToolButton::InstantPopup);
+        {
+            auto* menu = new QMenu(m_borderBtn);
+            menu->addAction("All Borders")    ->setData(int(CellFormat::BAll));
+            menu->addAction("Outside Borders")->setData(-1);
+            menu->addAction("Bottom Border")  ->setData(int(CellFormat::BBottom));
+            menu->addAction("Top Border")     ->setData(int(CellFormat::BTop));
+            menu->addSeparator();
+            menu->addAction("No Border")      ->setData(0);
+            connect(menu, &QMenu::triggered, this, &CalcModule::onBorderMenu);
+            m_borderBtn->setMenu(menu);
+        }
+        m_clearFmtBtn = small("clear-format", "Clear Formatting");
+        connect(m_clearFmtBtn, &QToolButton::clicked, this, &CalcModule::onClearFormatting);
+        fg->addWidget(m_boldBtn,      1, 0);
+        fg->addWidget(m_italicBtn,    1, 1);
+        fg->addWidget(m_underlineBtn, 1, 2);
+        fg->addWidget(m_strikeBtn,    1, 3);
+        fg->addWidget(m_textColorBtn, 1, 4);
+        fg->addWidget(m_fillColorBtn, 1, 5);
+        fg->addWidget(m_borderBtn,    1, 6);
+        fg->addWidget(m_clearFmtBtn,  1, 7);
+        font->addWidget(fw);
+
+        // ── Alignment ────────────────────────────────────────────────────────────
+        QHBoxLayout* al = group(pl, "Alignment");
+        auto* aw = new QWidget(m_ribbon);
+        auto* ag = new QGridLayout(aw);
+        ag->setContentsMargins(0, 0, 0, 0);
+        ag->setHorizontalSpacing(2); ag->setVerticalSpacing(2);
+        m_alignTopBtn = small("valign-top",    "Align Top",    true);
+        m_alignMidBtn = small("valign-middle", "Align Middle", true);
+        m_alignBotBtn = small("valign-bottom", "Align Bottom", true);
+        connect(m_alignTopBtn, &QToolButton::clicked, this, &CalcModule::onVAlignClicked);
+        connect(m_alignMidBtn, &QToolButton::clicked, this, &CalcModule::onVAlignClicked);
+        connect(m_alignBotBtn, &QToolButton::clicked, this, &CalcModule::onVAlignClicked);
+        m_wrapBtn = small("wrap", "Wrap Text", true);
+        connect(m_wrapBtn, &QToolButton::toggled, this, &CalcModule::onWrapToggled);
+        auto* orientBtn = small("orientation", "Orientation");
+        orientBtn->setPopupMode(QToolButton::InstantPopup);
+        {
+            auto* om = new QMenu(orientBtn);
+            for (const char* o : {"Angle Counterclockwise", "Angle Clockwise",
+                                  "Vertical Text", "Rotate Text Up", "Rotate Text Down"}) {
+                const QString name = QString::fromUtf8(o);
+                connect(om->addAction(name), &QAction::triggered, this, [this, name]{ notImplemented(name); });
+            }
+            orientBtn->setMenu(om);
+        }
+        m_alignLeftBtn   = small("halign-left",   "Align Left",   true);
+        m_alignCenterBtn = small("halign-center", "Align Center", true);
+        m_alignRightBtn  = small("halign-right",  "Align Right",  true);
+        connect(m_alignLeftBtn,   &QToolButton::clicked, this, &CalcModule::onAlignClicked);
+        connect(m_alignCenterBtn, &QToolButton::clicked, this, &CalcModule::onAlignClicked);
+        connect(m_alignRightBtn,  &QToolButton::clicked, this, &CalcModule::onAlignClicked);
+        auto* indDec = small("indent-dec", "Decrease Indent");
+        auto* indInc = small("indent-inc", "Increase Indent");
+        connect(indDec, &QToolButton::clicked, this, &CalcModule::onDecreaseIndent);
+        connect(indInc, &QToolButton::clicked, this, &CalcModule::onIncreaseIndent);
+        m_mergeBtn = small("merge", "Merge && Center (toggle)");
+        connect(m_mergeBtn, &QToolButton::clicked, this, &CalcModule::onMergeClicked);
+        ag->addWidget(m_alignTopBtn,    0, 0);
+        ag->addWidget(m_alignMidBtn,    0, 1);
+        ag->addWidget(m_alignBotBtn,    0, 2);
+        ag->addWidget(m_wrapBtn,        0, 3);
+        ag->addWidget(orientBtn,        0, 4);
+        ag->addWidget(m_alignLeftBtn,   1, 0);
+        ag->addWidget(m_alignCenterBtn, 1, 1);
+        ag->addWidget(m_alignRightBtn,  1, 2);
+        ag->addWidget(indDec,           1, 3);
+        ag->addWidget(indInc,           1, 4);
+        ag->addWidget(m_mergeBtn,       1, 5);
+        al->addWidget(aw);
+
+        // ── Number ────────────────────────────────────────────────────────────────
+        QHBoxLayout* num = group(pl, "Number");
+        auto* nw = new QWidget(m_ribbon);
+        auto* ng = new QGridLayout(nw);
+        ng->setContentsMargins(0, 0, 0, 0);
+        ng->setHorizontalSpacing(2); ng->setVerticalSpacing(2);
+        m_numFmtCombo = new QComboBox(m_ribbon);
+        m_numFmtCombo->setObjectName("numFmtCombo");
+        m_numFmtCombo->setFixedWidth(118);
+        m_numFmtCombo->setFocusPolicy(Qt::ClickFocus);
+        m_numFmtCombo->addItem("General",    QString(""));
+        m_numFmtCombo->addItem("Number",     QString("0"));
+        m_numFmtCombo->addItem("Number .00", QString("0.00"));
+        m_numFmtCombo->addItem("Currency",   QString("$#,##0.00"));
+        m_numFmtCombo->addItem("Percent",    QString("0%"));
+        m_numFmtCombo->addItem("Comma",      QString("#,##0.00"));
+        m_numFmtCombo->addItem("Date",       QString("yyyy-mm-dd"));
+        m_numFmtCombo->addItem("Date (D/M/Y)", QString("d/m/yyyy"));
+        m_numFmtCombo->addItem("Time",       QString("h:mm"));
+        connect(m_numFmtCombo, &QComboBox::currentIndexChanged, this, [this](int){ onNumberFormatChanged(); });
+        m_currencyBtn = small("currency", "Currency Format");
+        m_percentBtn  = small("percent",  "Percent Format");
+        m_commaBtn    = small("comma",    "Comma Style");
+        m_incDecBtn   = small("dec-inc",  "Increase Decimals");
+        m_decDecBtn   = small("dec-dec",  "Decrease Decimals");
+        connect(m_currencyBtn, &QToolButton::clicked, this, &CalcModule::onCurrencyClicked);
+        connect(m_percentBtn,  &QToolButton::clicked, this, &CalcModule::onPercentClicked);
+        connect(m_commaBtn,    &QToolButton::clicked, this, &CalcModule::onCommaClicked);
+        connect(m_incDecBtn,   &QToolButton::clicked, this, &CalcModule::onIncreaseDecimals);
+        connect(m_decDecBtn,   &QToolButton::clicked, this, &CalcModule::onDecreaseDecimals);
+        ng->addWidget(m_numFmtCombo, 0, 0, 1, 5);
+        ng->addWidget(m_currencyBtn, 1, 0);
+        ng->addWidget(m_percentBtn,  1, 1);
+        ng->addWidget(m_commaBtn,    1, 2);
+        ng->addWidget(m_incDecBtn,   1, 3);
+        ng->addWidget(m_decDecBtn,   1, 4);
+        num->addWidget(nw);
+
+        // ── Styles ────────────────────────────────────────────────────────────────
+        QHBoxLayout* styles = group(pl, "Styles");
+        soonBig(styles, "cond-format",  "Conditional", "Conditional Formatting");
+        soonBig(styles, "format-table", "Format Table", "Format as Table");
+        soonBig(styles, "cell-styles",  "Cell Styles");
+
+        // ── Cells ─────────────────────────────────────────────────────────────────
+        QHBoxLayout* cellsG = group(pl, "Cells");
+        {
+            auto* ins = big("insert-cells", "Insert", "Insert cells, rows, columns or a sheet");
+            ins->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(ins);
+            connect(m->addAction("Insert Row Above"),   &QAction::triggered, this, [this, curRow]{ m_model->insertRowAt(curRow()); });
+            connect(m->addAction("Insert Row Below"),   &QAction::triggered, this, [this, curRow]{ m_model->insertRowAt(curRow() + 1); });
+            connect(m->addAction("Insert Column Left"), &QAction::triggered, this, [this, curCol]{ m_model->insertColumnAt(curCol()); });
+            connect(m->addAction("Insert Column Right"),&QAction::triggered, this, [this, curCol]{ m_model->insertColumnAt(curCol() + 1); });
+            m->addSeparator();
+            connect(m->addAction("Insert Sheet"),       &QAction::triggered, this, [this]{ addSheet(QString("Sheet%1").arg(m_sheets.size() + 1)); });
+            ins->setMenu(m);
+            cellsG->addWidget(ins);
+        }
+        {
+            auto* del = big("delete-cells", "Delete", "Delete rows, columns or a sheet");
+            del->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(del);
+            connect(m->addAction("Delete Row"),    &QAction::triggered, this, [this, curRow]{ m_model->deleteRowAt(curRow()); });
+            connect(m->addAction("Delete Column"), &QAction::triggered, this, [this, curCol]{ m_model->deleteColumnAt(curCol()); });
+            m->addSeparator();
+            connect(m->addAction("Delete Sheet"),  &QAction::triggered, this, [this]{ deleteSheet(m_activeSheet); });
+            del->setMenu(m);
+            cellsG->addWidget(del);
+        }
+        {
+            auto* fmt = big("format-cells", "Format", "Row height / column width / autofit");
+            fmt->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(fmt);
+            connect(m->addAction("Row Height…"), &QAction::triggered, this, [this, curRow]{
+                bool ok=false; const int h = QInputDialog::getInt(this, "Row Height", "Height (px):",
+                    m_tableView->rowHeight(curRow()), 8, 600, 1, &ok);
+                if (ok) { m_tableView->setRowHeight(curRow(), h); m_model->setRowHeight(curRow(), h); markDirty(); }
+            });
+            connect(m->addAction("Column Width…"), &QAction::triggered, this, [this, curCol]{
+                bool ok=false; const int w = QInputDialog::getInt(this, "Column Width", "Width (px):",
+                    m_tableView->columnWidth(curCol()), 8, 1000, 1, &ok);
+                if (ok) { m_tableView->setColumnWidth(curCol(), w); m_model->setColWidth(curCol(), w); markDirty(); }
+            });
+            m->addSeparator();
+            connect(m->addAction("AutoFit Row Height"),  &QAction::triggered, this, [this, curRow]{ m_tableView->resizeRowToContents(curRow()); });
+            connect(m->addAction("AutoFit Column Width"),&QAction::triggered, this, [this, curCol]{ m_tableView->resizeColumnToContents(curCol()); });
+            fmt->setMenu(m);
+            cellsG->addWidget(fmt);
+        }
+
+        // ── Editing ────────────────────────────────────────────────────────────────
+        QHBoxLayout* ed = group(pl, "Editing");
+        {
+            auto* sum = big("autosum", "AutoSum", "AutoSum");
+            sum->setPopupMode(QToolButton::MenuButtonPopup);
+            connect(sum, &QToolButton::clicked, this, [this]{ insertFunction("SUM"); });
+            auto* m = new QMenu(sum);
+            for (const char* fn : {"SUM", "AVERAGE", "COUNT", "MAX", "MIN"}) {
+                const QString name = QString::fromUtf8(fn);
+                connect(m->addAction(name), &QAction::triggered, this, [this, name]{ insertFunction(name); });
+            }
+            sum->setMenu(m);
+            ed->addWidget(sum);
+        }
+        auto addEd = cluster2(ed);
+        {
+            auto* fill = small("fill", "Fill");
+            fill->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(fill);
+            connect(m->addAction("Fill Down (Ctrl+D)"),  &QAction::triggered, this, [this]{ fillDown(); });
+            connect(m->addAction("Fill Right (Ctrl+R)"), &QAction::triggered, this, [this]{ fillRight(); });
+            fill->setMenu(m);
+            addEd(fill);
+        }
+        {
+            auto* clr = small("clear", "Clear");
+            clr->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(clr);
+            connect(m->addAction("Clear All"),      &QAction::triggered, this, [this]{ onClearFormatting(); deleteSelection(); });
+            connect(m->addAction("Clear Formats"),  &QAction::triggered, this, &CalcModule::onClearFormatting);
+            connect(m->addAction("Clear Contents"), &QAction::triggered, this, &CalcModule::deleteSelection);
+            clr->setMenu(m);
+            addEd(clr);
+        }
+        {
+            auto* sf = small("sort-filter", "Sort & Filter");
+            sf->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(sf);
+            connect(m->addAction("Sort A → Z"), &QAction::triggered, this, [this]{ sortByColumn(true); });
+            connect(m->addAction("Sort Z → A"), &QAction::triggered, this, [this]{ sortByColumn(false); });
+            connect(m->addAction("Filter"),     &QAction::triggered, this, [this]{ notImplemented("AutoFilter"); });
+            sf->setMenu(m);
+            addEd(sf);
+        }
+        {
+            auto* fs = small("find", "Find & Select");
+            fs->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(fs);
+            connect(m->addAction("Find… (Ctrl+F)"),    &QAction::triggered, this, &CalcModule::showFindDialog);
+            connect(m->addAction("Replace… (Ctrl+H)"), &QAction::triggered, this, &CalcModule::showReplaceDialog);
+            connect(m->addAction("Go To…"),            &QAction::triggered, this, [this]{ notImplemented("Go To"); });
+            fs->setMenu(m);
+            addEd(fs);
+        }
+
+        pl->addStretch(1);
+    }
+
+    // ══ INSERT PAGE ══════════════════════════════════════════════════════════
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* tables = group(pl, "Tables");
+        soonBig(tables, "pivot-table", "PivotTable");
+        soonBig(tables, "pivot-chart", "PivotChart");
+        soonBig(tables, "table",       "Table");
+
+        QHBoxLayout* illus = group(pl, "Illustrations");
+        soonBig(illus, "picture",   "Pictures");
+        soonBig(illus, "camera",    "Screenshot");
+        soonBig(illus, "shapes",    "Shapes");
+        soonBig(illus, "icons-lib", "Icons");
+
+        QHBoxLayout* textG = group(pl, "Text");
+        soonBig(textG, "wordart",     "WordArt");
+        soonBig(textG, "textbox",     "Text Box");
+        soonBig(textG, "file-object", "Object");
+
+        QHBoxLayout* charts = group(pl, "Charts");
+        {
+            auto* cb = big("chart", "Chart", "Insert a chart from the selected cells");
+            cb->setPopupMode(QToolButton::MenuButtonPopup);
+            connect(cb, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Column); });
+            auto* m = new QMenu(cb);
+            struct { const char* label; ChartType t; } items[] = {
+                {"Column", ChartType::Column}, {"Bar", ChartType::Bar},
+                {"Line", ChartType::Line},     {"Area", ChartType::Area},
+                {"Pie", ChartType::Pie},       {"Scatter", ChartType::Scatter},
+            };
+            for (auto& it : items) {
+                const ChartType t = it.t;
+                connect(m->addAction(QString::fromUtf8(it.label)), &QAction::triggered,
+                        this, [this, t]{ insertChart(t); });
+            }
+            cb->setMenu(m);
+            charts->addWidget(cb);
+        }
+        auto* lineB = big("chart-line", "Line", "Insert a line chart");
+        connect(lineB, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Line); });
+        charts->addWidget(lineB);
+        auto* pieB = big("chart-pie", "Pie", "Insert a pie chart");
+        connect(pieB, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Pie); });
+        charts->addWidget(pieB);
+        auto* scatB = big("chart-scatter", "Scatter", "Insert a scatter chart");
+        connect(scatB, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Scatter); });
+        charts->addWidget(scatB);
+
+        QHBoxLayout* spark = group(pl, "Sparklines");
+        soonBig(spark, "sparkline", "Sparklines");
+
+        QHBoxLayout* linksG = group(pl, "Links");
+        soonBig(linksG, "link", "Link");
+
+        QHBoxLayout* sym = group(pl, "Symbols");
+        soonBig(sym, "equation", "Equation");
+        auto* symBtn = big("symbol", "Symbol", "Insert a symbol");
+        connect(symBtn, &QToolButton::clicked, this, &CalcModule::insertSymbolDialog);
+        sym->addWidget(symBtn);
+        soonBig(sym, "latex", "LaTeX");
+
+        QHBoxLayout* media = group(pl, "Media");
+        soonBig(media, "forms",  "Forms");
+        soonBig(media, "camera", "Camera");
+
+        pl->addStretch(1);
+    }
+
+    // ══ PAGE LAYOUT PAGE ══════════════════════════════════════════════════════
+    auto soonMenuBig = [&](QHBoxLayout* into, const QString& icon, const QString& label,
+                           const QStringList& items) {
+        auto* b = big(icon, label, label);
+        b->setPopupMode(QToolButton::InstantPopup);
+        auto* m = new QMenu(b);
+        for (const QString& it : items)
+            connect(m->addAction(it), &QAction::triggered, this, [this, it]{ notImplemented(it); });
+        b->setMenu(m);
+        into->addWidget(b);
+        return b;
+    };
+    auto checkColumn = [&](QHBoxLayout* into) {
+        auto* w = new QWidget(m_ribbon);
+        auto* v = new QVBoxLayout(w);
+        v->setContentsMargins(2, 2, 2, 2);
+        v->setSpacing(4);
+        into->addWidget(w);
+        return v;
+    };
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* print = group(pl, "Print");
+        {
+            auto* pv = big("print-preview", "Print Preview", "Preview / print the sheet");
+            connect(pv, &QToolButton::clicked, this, &CalcModule::printPreview);
+            print->addWidget(pv);
+        }
+        {
+            auto* pa = big("print-area", "Print Area", "Print Area");
+            pa->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(pa);
+            connect(m->addAction("Set Print Area"),   &QAction::triggered, this, [this]{ notImplemented("Set Print Area"); });
+            connect(m->addAction("Clear Print Area"), &QAction::triggered, this, [this]{ notImplemented("Clear Print Area"); });
+            pa->setMenu(m);
+            print->addWidget(pa);
+        }
+
+        QHBoxLayout* setup = group(pl, "Page Setup");
+        soonMenuBig(setup, "margins",     "Margins",     {"Normal", "Wide", "Narrow", "Custom Margins…"});
+        soonMenuBig(setup, "page-orient", "Orientation", {"Portrait", "Landscape"});
+        soonMenuBig(setup, "page-size",   "Size",        {"A4", "Letter", "Legal", "A3"});
+        soonBig(setup, "print-titles", "Print Titles");
+
+        QHBoxLayout* opts = group(pl, "Sheet Options");
+        soonBig(opts, "header-footer", "Header & Footer", "Print Header and Footer");
+        auto* col = checkColumn(opts);
+        auto* glChk = new QCheckBox("Gridlines", m_ribbon);
+        glChk->setChecked(true);
+        connect(glChk, &QCheckBox::toggled, this, &CalcModule::onToggleGridlines);
+        col->addWidget(glChk);
+        auto* hdChk = new QCheckBox("Headings", m_ribbon);
+        hdChk->setChecked(true);
+        connect(hdChk, &QCheckBox::toggled, this, &CalcModule::onToggleHeadings);
+        col->addWidget(hdChk);
+
+        QHBoxLayout* brk = group(pl, "Page Break");
+        soonBig(brk, "page-break",   "Break Preview", "Page Break Preview");
+        soonBig(brk, "insert-break", "Insert Break",  "Insert Page Break");
+
+        QHBoxLayout* themesG = group(pl, "Themes");
+        soonBig(themesG, "themes",     "Themes");
+        soonBig(themesG, "background", "Background");
+        soonBig(themesG, "settings",   "Settings");
+
+        pl->addStretch(1);
+    }
+
+    // ══ FORMULAS PAGE ════════════════════════════════════════════════════════
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* lib = group(pl, "Function Library");
+        soonBig(lib, "fx", "Insert Function");
+        {
+            auto* sum = big("autosum", "AutoSum", "AutoSum");
+            sum->setPopupMode(QToolButton::MenuButtonPopup);
+            connect(sum, &QToolButton::clicked, this, [this]{ insertFunction("SUM"); });
+            auto* m = new QMenu(sum);
+            for (const char* fn : {"SUM", "AVERAGE", "COUNT", "MAX", "MIN"}) {
+                const QString name = QString::fromUtf8(fn);
+                connect(m->addAction(name), &QAction::triggered, this, [this, name]{ insertFunction(name); });
+            }
+            sum->setMenu(m);
+            lib->addWidget(sum);
+        }
+        fnBig(lib, "recently-used", "Recent",     "Recently Used", {"SUM", "AVERAGE", "IF", "COUNT", "MAX"});
+        fnBig(lib, "fn-financial",  "Financial",  "Financial",     {"PMT", "FV", "PV", "NPV", "RATE", "IRR"});
+        fnBig(lib, "fn-logical",    "Logical",    "Logical",       {"IF", "AND", "OR", "NOT", "IFERROR", "TRUE", "FALSE"});
+        fnBig(lib, "fn-text",       "Text",       "Text",          {"CONCATENATE", "LEFT", "RIGHT", "MID", "LEN", "UPPER",
+                                                                     "LOWER", "TRIM", "FIND", "SEARCH", "SUBSTITUTE", "TEXT"});
+        fnBig(lib, "fn-datetime",   "Date/Time",  "Date & Time",   {"TODAY", "NOW", "DATE", "DAY", "MONTH", "YEAR"});
+        fnBig(lib, "fn-lookup",     "Lookup",     "Lookup & Reference", {"VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "LOOKUP"});
+        fnBig(lib, "fn-math",       "Math",       "Math & Trig",   {"SUM", "ABS", "SQRT", "POWER", "ROUND", "MOD",
+                                                                     "PRODUCT", "SUMIF", "INT"});
+        fnBig(lib, "fn-more",       "More",       "More Functions",{"AVERAGE", "COUNT", "COUNTA", "COUNTIF",
+                                                                     "MIN", "MAX", "SUBTOTAL"});
+
+        QHBoxLayout* names = group(pl, "Defined Names");
+        soonBig(names, "name-manager", "Name Manager");
+        soonBig(names, "define-name",  "Define Name");
+        soonBig(names, "use-in-formula", "Use in Formula");
+
+        QHBoxLayout* audit = group(pl, "Formula Auditing");
+        soonBig(audit, "trace-prec",    "Precedents", "Trace Precedents");
+        soonBig(audit, "trace-dep",     "Dependents", "Trace Dependents");
+        soonBig(audit, "remove-arrows", "Remove Arrows");
+        m_showFormulasBtn = big("show-formulas", "Show Formulas",
+                                "Show Formulas (toggle raw formulas / results)", true);
+        connect(m_showFormulasBtn, &QToolButton::toggled, this, &CalcModule::onShowFormulasToggled);
+        audit->addWidget(m_showFormulasBtn);
+        soonBig(audit, "error-check", "Error Check", "Error Checking");
+        soonBig(audit, "evaluate",    "Evaluate",    "Evaluate Formula");
+
+        QHBoxLayout* calc = group(pl, "Calculation");
+        {
+            auto* co = big("calc-options", "Options", "Calculation Options");
+            co->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(co);
+            connect(m->addAction("Automatic"), &QAction::triggered, this, [this]{ onCalculateNow(); });
+            connect(m->addAction("Manual"),    &QAction::triggered, this, [this]{ notImplemented("Manual Calculation"); });
+            co->setMenu(m);
+            calc->addWidget(co);
+        }
+        auto* calcNow = big("calc-now", "Calculate Now", "Calculate Now (F9)");
+        connect(calcNow, &QToolButton::clicked, this, &CalcModule::onCalculateNow);
+        calc->addWidget(calcNow);
+        auto* calcSheet = big("calc-sheet", "Calc Sheet", "Calculate Sheet");
+        connect(calcSheet, &QToolButton::clicked, this, &CalcModule::onCalculateNow);
+        calc->addWidget(calcSheet);
+
+        pl->addStretch(1);
+    }
+
+    // ══ DATA PAGE ════════════════════════════════════════════════════════════
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* sortG = group(pl, "Sort & Filter");
+        auto* sortAsc = big("sort-az", "Sort ↑", "Sort ascending by the active column");
+        connect(sortAsc, &QToolButton::clicked, this, [this]{ sortByColumn(true); });
+        sortG->addWidget(sortAsc);
+        auto* sortDesc = big("sort-za", "Sort ↓", "Sort descending by the active column");
+        connect(sortDesc, &QToolButton::clicked, this, [this]{ sortByColumn(false); });
+        sortG->addWidget(sortDesc);
+        auto* filterB = big("filter", "Filter", "Filter the active column by value");
+        connect(filterB, &QToolButton::clicked, this, &CalcModule::showColumnFilter);
+        sortG->addWidget(filterB);
+        auto* showAllB = big("show-all", "Show All", "Clear all filters");
+        connect(showAllB, &QToolButton::clicked, this, &CalcModule::clearFilters);
+        sortG->addWidget(showAllB);
+        auto* reapplyB = big("reapply", "Reapply", "Re-apply the current filters");
+        connect(reapplyB, &QToolButton::clicked, this, &CalcModule::applyFilters);
+        sortG->addWidget(reapplyB);
+
+        QHBoxLayout* tools = group(pl, "Data Tools");
+        soonBig(tools, "highlight-dup", "Highlight Dup.", "Highlight Duplicates");
+        soonBig(tools, "manage-dup",    "Manage Dup.",    "Manage Duplicates");
+        soonBig(tools, "text-columns",  "Text to Cols",   "Text to Columns");
+        soonBig(tools, "validation",    "Validation");
+        {
+            auto* fill = big("fill", "Fill", "Fill down or right");
+            fill->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(fill);
+            connect(m->addAction("Fill Down (Ctrl+D)"),  &QAction::triggered, this, [this]{ fillDown(); });
+            connect(m->addAction("Fill Right (Ctrl+R)"), &QAction::triggered, this, [this]{ fillRight(); });
+            fill->setMenu(m);
+            tools->addWidget(fill);
+        }
+        soonBig(tools, "consolidate", "Consolidate");
+        soonBig(tools, "dropdown",    "Drop-Down", "Insert Drop-Down List");
+
+        QHBoxLayout* outline = group(pl, "Outline");
+        soonBig(outline, "subtotal",    "Subtotal");
+        soonBig(outline, "group",       "Group");
+        soonBig(outline, "ungroup",     "Ungroup");
+        soonBig(outline, "show-detail", "Show Detail");
+        soonBig(outline, "hide-detail", "Hide Detail");
+
+        QHBoxLayout* getG = group(pl, "Get & Transform");
+        soonBig(getG, "get-data",   "Get Data");
+        soonBig(getG, "edit-links", "Edit Links");
+        soonBig(getG, "refresh",    "Refresh All");
+        soonBig(getG, "what-if",    "What-If", "What-If Analysis");
+
+        QHBoxLayout* findG = group(pl, "Find");
+        auto* findB = big("find", "Find", "Find (Ctrl+F)");
+        connect(findB, &QToolButton::clicked, this, &CalcModule::showFindDialog);
+        findG->addWidget(findB);
+
+        pl->addStretch(1);
+    }
+
+    // ══ REVIEW PAGE ════════════════════════════════════════════════════════════
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* proof = group(pl, "Proofing");
+        soonBig(proof, "spelling",  "Spelling");
+        soonBig(proof, "thesaurus", "Thesaurus");
+
+        QHBoxLayout* comments = group(pl, "Comments");
+        soonBig(comments, "new-comment",    "New Comment");
+        soonBig(comments, "delete-comment", "Delete");
+        soonBig(comments, "prev",           "Previous");
+        soonBig(comments, "next",           "Next");
+        soonBig(comments, "show-comments",  "Show");
+
+        QHBoxLayout* protect = group(pl, "Protect");
+        soonBig(protect, "lock-cell",     "Lock Cell");
+        soonBig(protect, "allow-edit",    "Allow Edit", "Allow Edit Ranges");
+        soonBig(protect, "protect-sheet", "Protect Sheet");
+        soonBig(protect, "protect-book",  "Protect Workbook");
+        soonBig(protect, "share",         "Share Workbook");
+
+        pl->addStretch(1);
+    }
+
+    // ══ VIEW PAGE ══════════════════════════════════════════════════════════════
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* views = group(pl, "Workbook Views");
+        soonBig(views, "view-normal",     "Normal");
+        soonBig(views, "page-break",      "Page Break Preview");
+        soonBig(views, "view-pagelayout", "Page Layout");
+        soonBig(views, "eye",             "Eye Protection");
+        soonBig(views, "highlight-rc",    "Highlight Row/Col");
+
+        QHBoxLayout* show = group(pl, "Show");
+        auto* sc = checkColumn(show);
+        auto* fbChk = new QCheckBox("Formula Bar", m_ribbon);
+        fbChk->setChecked(true);
+        connect(fbChk, &QCheckBox::toggled, this, [this](bool on){
+            if (m_formulaBar && m_formulaBar->parentWidget())
+                m_formulaBar->parentWidget()->setVisible(on);
+        });
+        sc->addWidget(fbChk);
+        auto* glChk2 = new QCheckBox("Gridlines", m_ribbon);
+        glChk2->setChecked(true);
+        connect(glChk2, &QCheckBox::toggled, this, &CalcModule::onToggleGridlines);
+        sc->addWidget(glChk2);
+        auto* sc2 = checkColumn(show);
+        auto* hdChk2 = new QCheckBox("Headings", m_ribbon);
+        hdChk2->setChecked(true);
+        connect(hdChk2, &QCheckBox::toggled, this, &CalcModule::onToggleHeadings);
+        sc2->addWidget(hdChk2);
+        soonBig(show, "custom-views", "Custom Views");
+
+        QHBoxLayout* zoom = group(pl, "Zoom");
+        soonBig(zoom, "zoom-in",  "Zoom In");
+        soonBig(zoom, "zoom-100", "100%");
+
+        QHBoxLayout* winG = group(pl, "Window");
+        auto* fsBtn = big("full-screen", "Full Screen", "Toggle full screen", true);
+        connect(fsBtn, &QToolButton::toggled, this, [this](bool on){
+            if (auto* w = this->window()) { if (on) w->showFullScreen(); else w->showNormal(); }
+        });
+        winG->addWidget(fsBtn);
+        {
+            auto* fz = big("freeze", "Freeze Panes", "Keep rows/columns visible while scrolling");
+            fz->setPopupMode(QToolButton::InstantPopup);
+            auto* m = new QMenu(fz);
+            connect(m->addAction("Freeze Panes (at selection)"), &QAction::triggered, this, [this]{
+                const QModelIndex c = m_tableView->currentIndex();
+                setFreeze(c.isValid() ? c.row() : 0, c.isValid() ? c.column() : 0);
+            });
+            connect(m->addAction("Freeze Top Row"),      &QAction::triggered, this, [this]{ setFreeze(1, 0); });
+            connect(m->addAction("Freeze First Column"), &QAction::triggered, this, [this]{ setFreeze(0, 1); });
+            m->addSeparator();
+            connect(m->addAction("Unfreeze Panes"),      &QAction::triggered, this, [this]{ setFreeze(0, 0); });
+            fz->setMenu(m);
+            winG->addWidget(fz);
+        }
+        soonBig(winG, "arrange-all",  "Arrange All");
+        soonBig(winG, "new-window",   "New Window");
+        soonBig(winG, "split-window", "Split");
+        soonBig(winG, "side-by-side", "Side by Side");
+        soonBig(winG, "sync-scroll",  "Sync Scrolling");
+
+        pl->addStretch(1);
+    }
+
+    // ══ TOOLS PAGE ══════════════════════════════════════════════════════════════
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* conv = group(pl, "Convert");
+        {
+            auto* ep = big("export-pdf", "Export to PDF", "Export the sheet to a PDF file");
+            connect(ep, &QToolButton::clicked, this, &CalcModule::exportToPdf);
+            conv->addWidget(ep);
+        }
+        soonBig(conv, "export-pic",   "Export to Picture");
+        soonBig(conv, "extract-text", "Extract Text");
+        soonBig(conv, "picture-pdf",  "Picture to PDF");
+        soonBig(conv, "pdf-excel",    "PDF to Excel");
+        soonBig(conv, "split-merge",  "Split or Merge");
+
+        QHBoxLayout* sheetT = group(pl, "Sheet");
+        soonBig(sheetT, "split-sheet", "Split Sheet");
+        soonBig(sheetT, "merge-sheet", "Merge Sheet");
+
+        QHBoxLayout* cloud = group(pl, "Cloud & Files");
+        soonBig(cloud, "auto-backup",  "Auto Backup");
+        soonBig(cloud, "save-cloud",   "Save to Cloud");
+        soonBig(cloud, "file-collect", "File Collect");
+        soonBig(cloud, "scan-mobile",  "Scan to Mobile");
+        soonBig(cloud, "design-lib",   "Design Library");
+        soonBig(cloud, "invoice",      "Invoice Maker");
+        soonBig(cloud, "batch-rename", "Batch Rename");
+
+        pl->addStretch(1);
+    }
+
+    // ══ SMART TOOLBOX PAGE ════════════════════════════════════════════════════════
+    {
+        QHBoxLayout* pl = newPage();
+
+        QHBoxLayout* sb = group(pl, "Smart Toolbox");
+        soonBig(sb, "smart-insert", "Insert");
+        soonBig(sb, "smart-fill",   "Fill");
+        soonBig(sb, "smart-delete", "Delete");
+        soonBig(sb, "smart-format", "Format");
+        soonBig(sb, "smart-calc",   "Calculate");
+        soonBig(sb, "smart-text",   "Text");
+        soonBig(sb, "smart-catalog","Catalog");
+
+        QHBoxLayout* sb2 = group(pl, "Advanced");
+        soonBig(sb2, "manage-dup",   "Manage Duplicates");
+        soonBig(sb2, "text-columns", "Advanced Text to Columns");
+        soonBig(sb2, "merge-sheet",  "Merge Sheet");
+        soonBig(sb2, "split-sheet",  "Split Sheet");
+
+        pl->addStretch(1);
+    }
+
+    // Keyboard shortcuts for the toggles (Ctrl+B/I/U).
+    auto addToggleSc = [this](const QKeySequence& k, QToolButton* b) {
+        auto* sc = new QShortcut(k, this);
+        sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(sc, &QShortcut::activated, b, [b]{ b->toggle(); });
+    };
+    addToggleSc(QKeySequence("Ctrl+B"), m_boldBtn);
+    addToggleSc(QKeySequence("Ctrl+I"), m_italicBtn);
+    addToggleSc(QKeySequence("Ctrl+U"), m_underlineBtn);
+
+    const int _dbgTab = qEnvironmentVariableIntValue("CALC_START_TAB");  // TEMP verify
+    if (_dbgTab > 0 && _dbgTab < m_ribbonTabBtns.size()) {
+        m_ribbonStack->setCurrentIndex(_dbgTab);
+        for (int i = 0; i < m_ribbonTabBtns.size(); ++i)
+            m_ribbonTabBtns[i]->setChecked(i == _dbgTab);
+    }
+}
+
+// Insert =FN(range) into the active cell, auto-detecting a contiguous numeric
+// run directly above (preferred) or to the left of the cell.
+void CalcModule::insertFunction(const QString& fn) {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    const int col = cur.column(), row = cur.row();
+
+    auto numeric = [this](int c, int r) {
+        const QString d = m_model->displayValue(c, r);
+        if (d.isEmpty()) return false;
+        bool ok = false; d.toDouble(&ok); return ok;
+    };
+
+    QString formula;
+    int top = row;
+    while (top - 1 >= 0 && numeric(col, top - 1)) --top;
+    if (top < row) {
+        formula = QString("=%1(%2:%3)").arg(fn,
+            FormulaEngine::cellAddress(col, top), FormulaEngine::cellAddress(col, row - 1));
+    } else {
+        int left = col;
+        while (left - 1 >= 0 && numeric(left - 1, row)) --left;
+        formula = (left < col)
+            ? QString("=%1(%2:%3)").arg(fn, FormulaEngine::cellAddress(left, row),
+                                            FormulaEngine::cellAddress(col - 1, row))
+            : QString("=%1()").arg(fn);
+    }
+    m_model->setCellContent(col, row, formula, "Insert Function");
+    onSelectionChanged();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Charts
+// ─────────────────────────────────────────────────────────────────────────────
+ChartObject* CalcModule::createChartObject(const ChartSpec& spec) {
+    auto* obj = new ChartObject(m_model, spec, m_tableView->viewport());
+    obj->show();
+    obj->raise();
+    connect(obj, &ChartObject::closed, this, [this](ChartObject* c){
+        m_chartObjs.removeAll(c);
+        c->deleteLater();
+        syncChartSpecs();
+        markDirty();
+    });
+    connect(obj, &ChartObject::geometryEdited, this, [this]{
+        syncChartSpecs();
+        markDirty();
+    });
+    m_chartObjs.push_back(obj);
+    return obj;
+}
+
+void CalcModule::insertChart(ChartType type) {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+
+    ChartSpec spec;
+    spec.type  = type;
+    spec.range = r;
+    // Place the new chart near the top-left of the visible viewport.
+    const int vw = m_tableView->viewport()->width();
+    const int w = std::min(440, std::max(260, vw - 80));
+    spec.geom = QRect(36 + 18 * m_chartObjs.size() % 120,
+                      28 + 18 * m_chartObjs.size() % 120, w, 290);
+
+    createChartObject(spec);
+    syncChartSpecs();
+    markDirty();
+}
+
+void CalcModule::rebuildChartObjects() {
+    // Tear down the live widgets for the previous sheet.
+    for (ChartObject* c : m_chartObjs) c->deleteLater();
+    m_chartObjs.clear();
+    if (!m_model) return;
+    for (const ChartSpec& s : m_model->charts())
+        createChartObject(s);
+}
+
+void CalcModule::refreshChartsData() {
+    for (ChartObject* c : m_chartObjs) c->rebuild();
+}
+
+void CalcModule::syncChartSpecs() {
+    if (!m_model) return;
+    QVector<ChartSpec> specs;
+    specs.reserve(m_chartObjs.size());
+    for (ChartObject* c : m_chartObjs) specs.push_back(c->spec());
+    m_model->setCharts(specs);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AutoFilter
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+// Used data bounds of the active model (returns false when empty).
+bool usedRange(const SpreadsheetModel* m, int& c1, int& r1, int& c2, int& r2) {
+    c1 = INT_MAX; r1 = INT_MAX; c2 = -1; r2 = -1;
+    const auto& data = m->cells();
+    for (auto it = data.begin(); it != data.end(); ++it) {
+        const int col = SpreadsheetModel::keyCol(it->first);
+        const int row = SpreadsheetModel::keyRow(it->first);
+        c1 = std::min(c1, col); c2 = std::max(c2, col);
+        r1 = std::min(r1, row); r2 = std::max(r2, row);
+    }
+    return c2 >= 0;
+}
+} // namespace
+
+void CalcModule::applyFilters() {
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2)) return;
+    const int headerRow = r1;                       // top used row = header
+    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row) {
+        bool hidden = false;
+        if (row > headerRow && row <= r2) {
+            for (auto it = m_columnFilters.begin(); it != m_columnFilters.end() && !hidden; ++it)
+                if (!it.value().contains(m_model->displayValue(it.key(), row)))
+                    hidden = true;
+        }
+        m_tableView->setRowHidden(row, hidden);
+    }
+}
+
+void CalcModule::clearFilters() {
+    m_columnFilters.clear();
+    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row)
+        m_tableView->setRowHidden(row, false);
+}
+
+void CalcModule::showColumnFilter() {
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2)) return;
+    const QModelIndex cur = m_tableView->currentIndex();
+    const int col = (cur.isValid() && cur.column() >= c1 && cur.column() <= c2)
+                        ? cur.column() : c1;
+    const int headerRow = r1;
+
+    // Distinct display values below the header.
+    QStringList values;
+    QSet<QString> seen;
+    for (int row = headerRow + 1; row <= r2; ++row) {
+        const QString v = m_model->displayValue(col, row);
+        if (!seen.contains(v)) { seen.insert(v); values << v; }
+    }
+    if (values.isEmpty()) return;
+    values.sort(Qt::CaseInsensitive);
+
+    const QString colName = m_model->displayValue(col, headerRow);
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("Filter — %1").arg(colName.isEmpty()
+                       ? FormulaEngine::colLabel(col) : colName));
+    auto* v = new QVBoxLayout(&dlg);
+    auto* list = new QListWidget(&dlg);
+    const QSet<QString> allowed = m_columnFilters.value(col);
+    const bool hasFilter = m_columnFilters.contains(col);
+    for (const QString& val : values) {
+        auto* item = new QListWidgetItem(val.isEmpty() ? "(blank)" : val, list);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState((!hasFilter || allowed.contains(val)) ? Qt::Checked : Qt::Unchecked);
+        item->setData(Qt::UserRole, val);
+    }
+    v->addWidget(new QLabel("Show rows where the value is:", &dlg));
+    v->addWidget(list, 1);
+    auto* btnRow = new QHBoxLayout();
+    auto* allBtn  = new QPushButton("Select All", &dlg);
+    auto* noneBtn = new QPushButton("Clear", &dlg);
+    auto* ok      = new QPushButton("OK", &dlg);
+    auto* cancel  = new QPushButton("Cancel", &dlg);
+    btnRow->addWidget(allBtn); btnRow->addWidget(noneBtn); btnRow->addStretch(1);
+    btnRow->addWidget(ok); btnRow->addWidget(cancel);
+    v->addLayout(btnRow);
+    connect(allBtn,  &QPushButton::clicked, &dlg, [list]{ for (int i=0;i<list->count();++i) list->item(i)->setCheckState(Qt::Checked); });
+    connect(noneBtn, &QPushButton::clicked, &dlg, [list]{ for (int i=0;i<list->count();++i) list->item(i)->setCheckState(Qt::Unchecked); });
+    connect(ok,     &QPushButton::clicked, &dlg, &QDialog::accept);
+    connect(cancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    dlg.resize(280, 360);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QSet<QString> chosen;
+    int checked = 0;
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->checkState() == Qt::Checked) {
+            chosen.insert(list->item(i)->data(Qt::UserRole).toString());
+            ++checked;
+        }
+    if (checked == list->count())
+        m_columnFilters.remove(col);        // all selected → no filter on this column
+    else
+        m_columnFilters.insert(col, chosen);
+    applyFilters();
+    markDirty();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Freeze panes — overlay table views pinned at the top band / left band.
+// ─────────────────────────────────────────────────────────────────────────────
+QTableView* CalcModule::makeFrozenView() {
+    auto* v = new QTableView(m_tableView);
+    v->setObjectName("frozenView");
+    v->setModel(m_model);
+    v->setSelectionModel(m_tableView->selectionModel());
+    v->setItemDelegate(new CalcItemDelegate(v));
+    v->setFocusPolicy(Qt::NoFocus);
+    v->horizontalHeader()->setVisible(false);
+    v->verticalHeader()->setVisible(false);
+    v->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    v->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    v->setFrameShape(QFrame::NoFrame);
+    v->setShowGrid(true);
+    v->setStyleSheet(
+        "QTableView#frozenView{border:none;gridline-color:#E2E2E2;background:#FFFFFF;"
+        "border-right:2px solid #B6BBC2;border-bottom:2px solid #B6BBC2;}");
+    return v;
+}
+
+void CalcModule::setFreeze(int rows, int cols) {
+    m_freezeRows = std::max(0, rows);
+    m_freezeCols = std::max(0, cols);
+
+    auto drop = [](QTableView*& v){ if (v) { v->deleteLater(); v = nullptr; } };
+    if (m_freezeRows == 0 && m_freezeCols == 0) { drop(m_frozenTop); drop(m_frozenLeft); drop(m_frozenCorner); return; }
+
+    if (m_freezeRows > 0 && !m_frozenTop) m_frozenTop = makeFrozenView();
+    if (m_freezeRows == 0) drop(m_frozenTop);
+    if (m_freezeCols > 0 && !m_frozenLeft) m_frozenLeft = makeFrozenView();
+    if (m_freezeCols == 0) drop(m_frozenLeft);
+    if (m_freezeRows > 0 && m_freezeCols > 0 && !m_frozenCorner) m_frozenCorner = makeFrozenView();
+    if ((m_freezeRows == 0 || m_freezeCols == 0)) drop(m_frozenCorner);
+
+    updateFrozenViews();
+}
+
+void CalcModule::updateFrozenViews() {
+    if (!m_frozenTop && !m_frozenLeft && !m_frozenCorner) return;
+
+    auto syncSizes = [&](QTableView* v){
+        for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c) v->setColumnWidth(c, m_tableView->columnWidth(c));
+        for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r) v->setRowHeight(r, m_tableView->rowHeight(r));
+    };
+    const int Lx = m_tableView->verticalHeader()->width() + m_tableView->frameWidth();
+    const int Ty = m_tableView->horizontalHeader()->height() + m_tableView->frameWidth();
+    int fcW = 0; for (int c = 0; c < m_freezeCols; ++c) fcW += m_tableView->columnWidth(c);
+    int frH = 0; for (int r = 0; r < m_freezeRows; ++r) frH += m_tableView->rowHeight(r);
+    const int vpW = m_tableView->viewport()->width();
+    const int vpH = m_tableView->viewport()->height();
+
+    if (m_frozenTop) {
+        syncSizes(m_frozenTop);
+        m_frozenTop->setGeometry(Lx, Ty, vpW, frH);
+        m_frozenTop->horizontalScrollBar()->setValue(m_tableView->horizontalScrollBar()->value());
+        m_frozenTop->verticalScrollBar()->setValue(0);
+        m_frozenTop->raise(); m_frozenTop->show();
+    }
+    if (m_frozenLeft) {
+        syncSizes(m_frozenLeft);
+        m_frozenLeft->setGeometry(Lx, Ty, fcW, vpH);
+        m_frozenLeft->verticalScrollBar()->setValue(m_tableView->verticalScrollBar()->value());
+        m_frozenLeft->horizontalScrollBar()->setValue(0);
+        m_frozenLeft->raise(); m_frozenLeft->show();
+    }
+    if (m_frozenCorner) {
+        syncSizes(m_frozenCorner);
+        m_frozenCorner->setGeometry(Lx, Ty, fcW, frH);
+        m_frozenCorner->horizontalScrollBar()->setValue(0);
+        m_frozenCorner->verticalScrollBar()->setValue(0);
+        m_frozenCorner->raise(); m_frozenCorner->show();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export / print  (renders the active sheet's used range, fit to one page)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 28 — real functionality for the former "coming soon" buttons
+// ─────────────────────────────────────────────────────────────────────────────
+void CalcModule::featureInfo(const QString& name, const QString& detail) {
+    QMessageBox::information(this, name, detail);
+}
+
+// ── Insert ───────────────────────────────────────────────────────────────────
+void CalcModule::insertImageObject() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Insert Picture", QString(), "Images (*.png *.jpg *.jpeg *.bmp *.gif)");
+    if (path.isEmpty()) return;
+    QPixmap pm(path);
+    if (pm.isNull()) { featureInfo("Insert Picture", "Could not load that image."); return; }
+    pm = pm.scaled(QSize(300, 220), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    auto* lbl = new QLabel;
+    lbl->setPixmap(pm);
+    lbl->setScaledContents(true);
+    lbl->setStyleSheet("background:#FFFFFF;");
+    const QRect g(40, 30, pm.width() + 2, pm.height() + 17);
+    auto* item = new FloatingItem(lbl, g, m_tableView->viewport());
+    item->show(); item->raise();
+    m_floatingItems.push_back(item);
+    markDirty();
+}
+
+void CalcModule::insertTextBoxObject() {
+    auto* edit = new QLineEdit;
+    edit->setPlaceholderText("Type here…");
+    edit->setStyleSheet("background:#FFFFFF;border:none;padding:2px;");
+    auto* item = new FloatingItem(edit, QRect(60, 40, 170, 44), m_tableView->viewport());
+    item->show(); item->raise();
+    m_floatingItems.push_back(item);
+    edit->setFocus();
+    markDirty();
+}
+
+void CalcModule::formatAsTable() {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = r.top(); row <= r.bottom(); ++row)
+        for (int col = r.left(); col <= r.right(); ++col) {
+            Cell c = m_model->cellAt(col, row);
+            c.format.borderEdges = CellFormat::BAll;
+            c.format.borderColor = QColor("#9CB7A6");
+            if (row == r.top()) {
+                c.format.bold = true;
+                c.format.textColor = QColor("#FFFFFF");
+                c.format.bgColor = QColor("#107C41");
+                c.format.hAlign = Qt::AlignHCenter;
+            } else {
+                c.format.bgColor = ((row - r.top()) % 2) ? QColor("#E9F2EC") : QColor("#FFFFFF");
+            }
+            edits.push_back({QPoint(col, row), c});
+        }
+    m_model->applyCellEdits(edits, "Format as Table");
+}
+
+void CalcModule::insertHyperlink() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    bool ok = false;
+    const QString url = QInputDialog::getText(this, "Insert Link", "URL or text:",
+                                              QLineEdit::Normal, "https://", &ok);
+    if (!ok || url.isEmpty()) return;
+    Cell c = m_model->cellAt(cur.column(), cur.row());
+    c.content = url;
+    c.format.textColor = QColor("#2563EB");
+    c.format.underline = true;
+    m_model->applyCellEdits({{QPoint(cur.column(), cur.row()), c}}, "Insert Link");
+}
+
+void CalcModule::applyWordArt() {
+    applyFormatToSelection([](CellFormat& f){
+        f.bold = true; f.fontSize = 22; f.textColor = QColor("#2563EB");
+    }, "WordArt");
+}
+
+void CalcModule::insertTextValue(const QString& title, const QString& prompt) {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    bool ok = false;
+    const QString v = QInputDialog::getText(this, title, prompt, QLineEdit::Normal, QString(), &ok);
+    if (!ok || v.isEmpty()) return;
+    m_model->setCellContent(cur.column(), cur.row(), v, title);
+    onSelectionChanged();
+}
+
+void CalcModule::pivotSummary() {
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2) || c2 <= c1) {
+        featureInfo("PivotTable", "Select a table with at least a label column and a value column.");
+        return;
+    }
+    QStringList order;
+    QHash<QString, double> sums;
+    for (int row = r1 + 1; row <= r2; ++row) {
+        const QString key = m_model->displayValue(c1, row);
+        if (key.isEmpty()) continue;
+        bool num = false; const double v = m_model->displayValue(c1 + 1, row).toDouble(&num);
+        if (!order.contains(key)) order << key;
+        sums[key] += num ? v : 0.0;
+    }
+    if (order.isEmpty()) { featureInfo("PivotTable", "No data to summarise."); return; }
+    addSheet(QString("Pivot%1").arg(m_sheets.size() + 1));   // switches to the new sheet
+    m_model->setCellContent(0, 0, m_model->displayValue(c1, r1).isEmpty()
+                                      ? "Group" : "Group", "Pivot");
+    m_model->setCellContent(1, 0, "Total", "Pivot");
+    int rr = 1;
+    for (const QString& k : order) {
+        m_model->setCellContent(0, rr, k, "Pivot");
+        m_model->setCellContent(1, rr, QString::number(sums[k]), "Pivot");
+        ++rr;
+    }
+    onSelectionChanged();
+}
+
+// ── Page layout ──────────────────────────────────────────────────────────────
+void CalcModule::setPrintArea() {
+    m_printRange = selectedRect();
+    featureInfo("Print Area", "Print area set to the current selection. It will be used for PDF / print.");
+}
+void CalcModule::clearPrintArea() {
+    m_printRange = QRect();
+    featureInfo("Print Area", "Print area cleared — the whole used range will print.");
+}
+void CalcModule::setSheetBackground() {
+    const QColor c = QColorDialog::getColor(QColor("#FFFFFF"), this, "Sheet Background");
+    if (!c.isValid()) return;
+    m_tableView->viewport()->setStyleSheet(QString("background:%1;").arg(c.name()));
+    markDirty();
+}
+
+// ── Formulas: named ranges & auditing ────────────────────────────────────────
+void CalcModule::defineName() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, "Define Name", "Name:",
+                                               QLineEdit::Normal, QString(), &ok);
+    if (!ok || name.trimmed().isEmpty()) return;
+    const QRect r = selectedRect();
+    const QString ref = FormulaEngine::cellAddress(r.left(), r.top())
+        + (r.width() > 1 || r.height() > 1
+               ? ":" + FormulaEngine::cellAddress(r.right(), r.bottom()) : QString());
+    m_model->setDefinedName(name.trimmed(), ref);
+    featureInfo("Define Name", QString("'%1' now refers to %2.").arg(name.trimmed(), ref));
+}
+void CalcModule::nameManager() {
+    const auto& names = m_model->definedNames();
+    QStringList lines;
+    for (auto it = names.begin(); it != names.end(); ++it)
+        lines << QString("%1  →  %2").arg(it.key(), it.value());
+    QDialog dlg(this);
+    dlg.setWindowTitle("Name Manager");
+    auto* v = new QVBoxLayout(&dlg);
+    auto* list = new QListWidget(&dlg);
+    list->addItems(lines.isEmpty() ? QStringList{"(no names defined)"} : lines);
+    v->addWidget(list, 1);
+    auto* row = new QHBoxLayout();
+    auto* add = new QPushButton("New…", &dlg);
+    auto* del = new QPushButton("Delete", &dlg);
+    auto* close = new QPushButton("Close", &dlg);
+    row->addWidget(add); row->addWidget(del); row->addStretch(1); row->addWidget(close);
+    v->addLayout(row);
+    connect(add, &QPushButton::clicked, &dlg, [this, &dlg]{ dlg.accept(); defineName(); });
+    connect(del, &QPushButton::clicked, &dlg, [this, list]{
+        const auto* it = list->currentItem();
+        if (!it) return;
+        const QString nm = it->text().section("  →", 0, 0).trimmed();
+        m_model->removeDefinedName(nm);
+        delete list->takeItem(list->currentRow());
+    });
+    connect(close, &QPushButton::clicked, &dlg, &QDialog::reject);
+    dlg.resize(320, 280);
+    dlg.exec();
+}
+void CalcModule::useNameInFormula() {
+    const auto& names = m_model->definedNames();
+    if (names.isEmpty()) { featureInfo("Use in Formula", "No names defined yet — use Define Name first."); return; }
+    QStringList keys; for (auto it = names.begin(); it != names.end(); ++it) keys << it.key();
+    bool ok = false;
+    const QString name = QInputDialog::getItem(this, "Use in Formula", "Name:", keys, 0, false, &ok);
+    if (!ok || name.isEmpty()) return;
+    m_formulaBar->setText(m_formulaBar->text() + name);
+    m_formulaBar->setFocus();
+}
+void CalcModule::traceReferences(bool dependents) {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    auto* sm = m_tableView->selectionModel();
+    QItemSelection sel;
+    const QRegularExpression refRe("([A-Za-z]{1,2})([0-9]{1,3})");
+    if (!dependents) {
+        const QString f = m_model->rawContent(cur.column(), cur.row());
+        if (!f.startsWith('=')) { featureInfo("Trace Precedents", "The active cell has no formula."); return; }
+        auto it = refRe.globalMatch(f);
+        while (it.hasNext()) {
+            const auto m = it.next();
+            int c = 0, r = 0;
+            if (FormulaEngine::parseCellRef(m.captured(0), c, r))
+                sel.select(m_model->index(r, c), m_model->index(r, c));
+        }
+    } else {
+        const QString addr = FormulaEngine::cellAddress(cur.column(), cur.row());
+        const auto& data = m_model->cells();
+        for (auto i = data.begin(); i != data.end(); ++i) {
+            const QString f = i->second.content;
+            if (f.startsWith('=') && f.contains(QRegularExpression("\\b" + addr + "\\b", QRegularExpression::CaseInsensitiveOption))) {
+                const int c = SpreadsheetModel::keyCol(i->first), r = SpreadsheetModel::keyRow(i->first);
+                sel.select(m_model->index(r, c), m_model->index(r, c));
+            }
+        }
+    }
+    if (sel.isEmpty()) { featureInfo(dependents ? "Trace Dependents" : "Trace Precedents", "None found."); return; }
+    sm->select(sel, QItemSelectionModel::ClearAndSelect);
+}
+void CalcModule::removeTraceArrows() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (cur.isValid()) m_tableView->selectionModel()->select(cur, QItemSelectionModel::ClearAndSelect);
+}
+void CalcModule::errorCheck() {
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2)) return;
+    for (int row = r1; row <= r2; ++row)
+        for (int col = c1; col <= c2; ++col)
+            if (m_model->displayValue(col, row).startsWith('#')) {
+                const QModelIndex mi = m_model->index(row, col);
+                m_tableView->setCurrentIndex(mi);
+                featureInfo("Error Checking", QString("Error in %1: %2")
+                    .arg(FormulaEngine::cellAddress(col, row), m_model->displayValue(col, row)));
+                return;
+            }
+    featureInfo("Error Checking", "No errors found on this sheet.");
+}
+void CalcModule::evaluateFormula() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    const QString f = m_model->rawContent(cur.column(), cur.row());
+    featureInfo("Evaluate Formula", QString("%1\n\n=  %2")
+        .arg(f.isEmpty() ? "(empty)" : f, m_model->displayValue(cur.column(), cur.row())));
+}
+
+// ── Data ─────────────────────────────────────────────────────────────────────
+void CalcModule::highlightDuplicates() {
+    const QRect r = selectedRect();
+    QHash<QString, int> seen;
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = r.top(); row <= r.bottom(); ++row)
+        for (int col = r.left(); col <= r.right(); ++col) {
+            const QString v = m_model->displayValue(col, row);
+            if (v.isEmpty()) continue;
+            if (++seen[v] >= 2) {
+                Cell c = m_model->cellAt(col, row);
+                c.format.bgColor = QColor("#FFE08A");
+                edits.push_back({QPoint(col, row), c});
+            }
+        }
+    if (edits.empty()) { featureInfo("Highlight Duplicates", "No duplicates in the selection."); return; }
+    m_model->applyCellEdits(edits, "Highlight Duplicates");
+}
+void CalcModule::removeDuplicates() {
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2)) return;
+    const int headerRow = r1;
+    QSet<QString> seen;
+    std::vector<std::vector<Cell>> keep;
+    for (int row = headerRow + 1; row <= r2; ++row) {
+        QString key;
+        std::vector<Cell> cells;
+        for (int col = c1; col <= c2; ++col) {
+            const Cell cell = m_model->cellAt(col, row);
+            cells.push_back(cell);
+            key += cell.content + '';
+        }
+        if (seen.contains(key)) continue;
+        seen.insert(key);
+        keep.push_back(cells);
+    }
+    std::vector<std::pair<QPoint, Cell>> edits;
+    int outRow = headerRow + 1;
+    for (const auto& cells : keep) {
+        for (int j = 0; j < (int)cells.size(); ++j)
+            edits.push_back({QPoint(c1 + j, outRow), cells[j]});
+        ++outRow;
+    }
+    for (int row = outRow; row <= r2; ++row)               // clear the freed rows
+        for (int col = c1; col <= c2; ++col)
+            edits.push_back({QPoint(col, row), Cell{}});
+    const int removed = (r2 - headerRow) - (int)keep.size();
+    m_model->applyCellEdits(edits, "Remove Duplicates");
+    featureInfo("Remove Duplicates", QString("Removed %1 duplicate row(s).").arg(removed));
+}
+void CalcModule::textToColumns() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    bool ok = false;
+    const QString delim = QInputDialog::getText(this, "Text to Columns",
+        "Delimiter:", QLineEdit::Normal, ",", &ok);
+    if (!ok || delim.isEmpty()) return;
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2)) return;
+    const int col = cur.column();
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = r1; row <= r2; ++row) {
+        const QString v = m_model->rawContent(col, row);
+        if (v.isEmpty()) continue;
+        const QStringList parts = v.split(delim);
+        for (int j = 0; j < parts.size(); ++j) {
+            Cell c = (j == 0) ? m_model->cellAt(col, row) : Cell{};
+            c.content = parts[j].trimmed();
+            edits.push_back({QPoint(col + j, row), c});
+        }
+    }
+    m_model->applyCellEdits(edits, "Text to Columns");
+}
+void CalcModule::setDropdownValidation() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    bool ok = false;
+    const QString csv = QInputDialog::getText(this, "Data Validation",
+        "Allowed values (comma-separated):", QLineEdit::Normal, QString(), &ok);
+    if (!ok) return;
+    QStringList items;
+    for (const QString& s : csv.split(',')) if (!s.trimmed().isEmpty()) items << s.trimmed();
+    m_model->setValidationList(cur.column(), items);
+    featureInfo("Data Validation", items.isEmpty()
+        ? "Validation cleared for this column."
+        : QString("Column %1 now uses a drop-down list.").arg(FormulaEngine::colLabel(cur.column())));
+}
+void CalcModule::importData() {
+    const QString path = QFileDialog::getOpenFileName(this, "Get Data", QString(),
+                                                      "CSV / Text (*.csv *.txt *.tsv)");
+    if (path.isEmpty()) return;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+    const QString text = QString::fromUtf8(f.readAll());
+    f.close();
+    const QChar delim = path.endsWith(".tsv", Qt::CaseInsensitive) ? '\t' : ',';
+    const QStringList rows = text.split('\n', Qt::SkipEmptyParts);
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int r = 0; r < rows.size() && r < SpreadsheetModel::NUM_ROWS; ++r) {
+        const QStringList cols = rows[r].split(delim);
+        for (int c = 0; c < cols.size() && c < SpreadsheetModel::NUM_COLS; ++c) {
+            Cell cell; cell.content = cols[c].trimmed();
+            if (!cell.content.isEmpty()) edits.push_back({QPoint(c, r), cell});
+        }
+    }
+    if (!edits.empty()) m_model->applyCellEdits(edits, "Get Data");
+}
+void CalcModule::hideSelectedRows() {
+    const QRect r = selectedRect();
+    for (int row = r.top(); row <= r.bottom(); ++row) m_tableView->setRowHidden(row, true);
+}
+void CalcModule::unhideAllRows() {
+    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row) m_tableView->setRowHidden(row, false);
+}
+
+// ── Review: comments & protection ────────────────────────────────────────────
+void CalcModule::addEditComment() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    bool ok = false;
+    const QString text = QInputDialog::getMultiLineText(this, "Comment", "Comment:",
+        m_model->comment(cur.column(), cur.row()), &ok);
+    if (!ok) return;
+    m_model->setComment(cur.column(), cur.row(), text);
+    markDirty();
+}
+void CalcModule::deleteComment() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (cur.isValid()) { m_model->setComment(cur.column(), cur.row(), QString()); markDirty(); }
+}
+void CalcModule::toggleShowComments() {
+    m_model->setShowCommentMarkers(!m_model->showCommentMarkers());
+}
+void CalcModule::gotoComment(bool forward) {
+    const auto& cm = m_model->comments();
+    if (cm.isEmpty()) { featureInfo("Comments", "There are no comments on this sheet."); return; }
+    QList<int> keys = cm.keys();
+    std::sort(keys.begin(), keys.end());
+    const QModelIndex cur = m_tableView->currentIndex();
+    const int curKey = cur.isValid() ? SpreadsheetModel::cellKey(cur.column(), cur.row()) : -1;
+    int target = -1;
+    if (forward) { for (int k : keys) if (k > curKey) { target = k; break; } if (target < 0) target = keys.first(); }
+    else { for (int i = keys.size() - 1; i >= 0; --i) if (keys[i] < curKey) { target = keys[i]; break; } if (target < 0) target = keys.last(); }
+    m_tableView->setCurrentIndex(m_model->index(SpreadsheetModel::keyRow(target),
+                                                SpreadsheetModel::keyCol(target)));
+}
+void CalcModule::toggleProtectSheet() {
+    m_sheetProtected = !m_sheetProtected;
+    m_tableView->setEditTriggers(m_sheetProtected
+        ? QAbstractItemView::NoEditTriggers
+        : (QAbstractItemView::DoubleClicked | QAbstractItemView::AnyKeyPressed
+           | QAbstractItemView::EditKeyPressed));
+    featureInfo("Protect Sheet", m_sheetProtected
+        ? "Sheet is now protected (read-only)." : "Sheet protection removed.");
+}
+
+// ── View ─────────────────────────────────────────────────────────────────────
+void CalcModule::zoomBy(int deltaPercent) {
+    m_zoom = std::clamp(m_zoom + deltaPercent / 100.0, 0.5, 2.0);
+    resetZoom();   // re-apply
+}
+void CalcModule::resetZoom() {
+    if (m_zoom <= 0) m_zoom = 1.0;
+    QFont vf("Calibri"); vf.setPointSizeF(11.0 * m_zoom);
+    m_tableView->setFont(vf);
+    m_applyingSizes = true;
+    for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c)
+        m_tableView->setColumnWidth(c, int((m_model->colWidths().value(c, 64)) * m_zoom));
+    for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r)
+        m_tableView->setRowHeight(r, int((m_model->rowHeights().value(r, 20)) * m_zoom));
+    m_applyingSizes = false;
+    updateFrozenViews();
+}
+void CalcModule::toggleHighlightActive() {
+    m_highlightActive = !m_highlightActive;
+    if (m_selOverlay) m_selOverlay->setProperty("crosshair", m_highlightActive);
+    featureInfo("Highlight Row/Column", m_highlightActive
+        ? "The active row and column header are highlighted as you move."
+        : "Highlight turned off.");
+}
+void CalcModule::toggleEyeProtection() {
+    m_eyeProtection = !m_eyeProtection;
+    m_tableView->viewport()->setStyleSheet(
+        m_eyeProtection ? "background:#E6EFE0;" : "background:#FFFFFF;");
+}
+void CalcModule::openNewWindow() {
+    QProcess::startDetached(QApplication::applicationFilePath(), {});
+}
+
+// ── Tools ────────────────────────────────────────────────────────────────────
+void CalcModule::exportToImage() {
+    QString path = QFileDialog::getSaveFileName(this, "Export to Picture", "Sheet.png",
+                                                "PNG Image (*.png)");
+    if (path.isEmpty()) return;
+    if (!path.endsWith(".png", Qt::CaseInsensitive)) path += ".png";
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2)) { featureInfo("Export to Picture", "Sheet is empty."); return; }
+    int w = 42, h = 22;
+    for (int c = c1; c <= c2; ++c) w += m_tableView->columnWidth(c);
+    for (int r = r1; r <= r2; ++r) h += m_tableView->rowHeight(r);
+    QImage img(w, h, QImage::Format_ARGB32);
+    img.fill(Qt::white);
+    { QPainter p(&img); renderSheet(p, QRectF(0, 0, w, h)); }
+    img.save(path);
+    featureInfo("Export to Picture", QString("Saved to:\n%1").arg(path));
+}
+void CalcModule::exportToText() {
+    QString path = QFileDialog::getSaveFileName(this, "Extract Text", "Sheet.txt",
+                                                "Text (*.txt)");
+    if (path.isEmpty()) return;
+    if (!path.endsWith(".txt", Qt::CaseInsensitive)) path += ".txt";
+    int c1, r1, c2, r2;
+    if (!usedRange(m_model, c1, r1, c2, r2)) return;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+    QTextStream ts(&f);
+    for (int row = r1; row <= r2; ++row) {
+        QStringList parts;
+        for (int col = c1; col <= c2; ++col) parts << m_model->displayValue(col, row);
+        ts << parts.join('\t') << '\n';
+    }
+    f.close();
+    featureInfo("Extract Text", QString("Saved to:\n%1").arg(path));
+}
+void CalcModule::mergeAllSheets() {
+    if (m_sheets.size() < 2) { featureInfo("Merge Sheets", "There is only one sheet."); return; }
+    struct Row { QString sheet; QVector<Cell> cells; int c1; };
+    std::vector<std::pair<QPoint, Cell>> out;
+    int destRow = 1;
+    out.push_back({QPoint(0, 0), [&]{ Cell c; c.content = "Sheet"; c.format.bold = true; return c; }()});
+    for (auto* s : m_sheets) {
+        int c1, r1, c2, r2;
+        if (!usedRange(s, c1, r1, c2, r2)) continue;
+        for (int row = r1; row <= r2; ++row) {
+            Cell tag; tag.content = s->sheetName();
+            out.push_back({QPoint(0, destRow), tag});
+            for (int col = c1; col <= c2; ++col)
+                out.push_back({QPoint(col - c1 + 1, destRow), s->cellAt(col, row)});
+            ++destRow;
+        }
+    }
+    addSheet(QString("Merged%1").arg(m_sheets.size() + 1));   // switches
+    m_model->applyCellEdits(out, "Merge Sheets");
+    onSelectionChanged();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Export / print  (renders the active sheet's used range, fit to one page)
+// ─────────────────────────────────────────────────────────────────────────────
+void CalcModule::renderSheet(QPainter& p, const QRectF& target) {
+    // Print range (explicit print area, else the used range).
+    int c1, r1, c2, r2;
+    if (m_printRange.isValid() && m_printRange.width() > 0) {
+        c1 = m_printRange.left(); r1 = m_printRange.top();
+        c2 = m_printRange.right(); r2 = m_printRange.bottom();
+    } else if (!usedRange(m_model, c1, r1, c2, r2)) {
+        p.drawText(target, Qt::AlignCenter, "(empty sheet)");
+        return;
+    }
+
+    const int hdrW = 42, hdrH = 22;
+    QVector<int> colW; int gridW = hdrW;
+    for (int c = c1; c <= c2; ++c) { const int w = m_tableView->columnWidth(c); colW << w; gridW += w; }
+    QVector<int> rowH; int gridH = hdrH;
+    for (int r = r1; r <= r2; ++r) { const int h = m_tableView->rowHeight(r); rowH << h; gridH += h; }
+
+    // Fit the whole grid onto the page. Layout is in screen-pixel units and all
+    // fonts use PIXEL sizes so they scale 1:1 with this transform (point sizes
+    // would otherwise render at the device's DPI and overflow the cells).
+    const double scale = std::min(target.width() / gridW, target.height() / gridH);
+
+    p.save();
+    p.translate(target.left(), target.top());
+    p.scale(scale, scale);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    const QColor gridLine("#C9CCD1"), hdrBg("#F2F3F5"), hdrFg("#5A5F66");
+
+    // Column header band.
+    {
+        int x = hdrW;
+        p.setPen(Qt::NoPen);
+        p.setBrush(hdrBg);
+        p.drawRect(0, 0, gridW, hdrH);
+        p.setPen(hdrFg);
+        QFont hf("Segoe UI"); hf.setPixelSize(11); p.setFont(hf);
+        for (int i = 0; i < colW.size(); ++i) {
+            p.drawText(QRect(x, 0, colW[i], hdrH), Qt::AlignCenter,
+                       FormulaEngine::colLabel(c1 + i));
+            x += colW[i];
+        }
+    }
+
+    // Rows (with row-number header gutter).
+    int y = hdrH;
+    for (int i = 0; i < rowH.size(); ++i) {
+        const int row = r1 + i;
+        // Row-number gutter.
+        p.setPen(Qt::NoPen); p.setBrush(hdrBg);
+        p.drawRect(0, y, hdrW, rowH[i]);
+        p.setPen(hdrFg);
+        { QFont hf("Segoe UI"); hf.setPixelSize(11); p.setFont(hf);
+          p.drawText(QRect(0, y, hdrW, rowH[i]), Qt::AlignCenter, QString::number(row + 1)); }
+
+        int x = hdrW;
+        for (int j = 0; j < colW.size(); ++j) {
+            const int col = c1 + j;
+            const QRect cellRect(x, y, colW[j], rowH[i]);
+            const QModelIndex idx = m_model->index(row, col);
+
+            const QVariant bg = idx.data(Qt::BackgroundRole);
+            if (bg.canConvert<QColor>() && bg.value<QColor>().isValid()) {
+                p.setPen(Qt::NoPen); p.setBrush(bg.value<QColor>());
+                p.drawRect(cellRect);
+            }
+            const QString text = idx.data(Qt::DisplayRole).toString();
+            if (!text.isEmpty()) {
+                QFont f = idx.data(Qt::FontRole).isValid()
+                              ? idx.data(Qt::FontRole).value<QFont>() : QFont("Calibri");
+                f.setPixelSize((f.pointSize() > 0 ? f.pointSize() : 11) + 2);
+                p.setFont(f);
+                const QVariant fg = idx.data(Qt::ForegroundRole);
+                p.setPen(fg.canConvert<QColor>() && fg.value<QColor>().isValid()
+                             ? fg.value<QColor>() : QColor("#1C1E26"));
+                int align = idx.data(Qt::TextAlignmentRole).toInt();
+                if (align == 0) align = int(Qt::AlignLeft | Qt::AlignVCenter);
+                p.drawText(cellRect.adjusted(3, 1, -3, -1), align, text);
+            }
+            x += colW[j];
+        }
+        y += rowH[i];
+    }
+
+    // Gridlines.
+    p.setPen(gridLine); p.setBrush(Qt::NoBrush);
+    // Vertical lines: left edge, gutter edge, then each column boundary.
+    { int x = 0; p.drawLine(x, 0, x, gridH);
+      x = hdrW;  p.drawLine(x, 0, x, gridH);
+      for (int i = 0; i < colW.size(); ++i) { x += colW[i]; p.drawLine(x, 0, x, gridH); }
+    }
+    // Horizontal lines: top edge, header band, then each row boundary.
+    { int yy = 0; p.drawLine(0, yy, gridW, yy);
+      yy = hdrH;  p.drawLine(0, yy, gridW, yy);
+      for (int i = 0; i < rowH.size(); ++i) { yy += rowH[i]; p.drawLine(0, yy, gridW, yy); }
+    }
+    p.restore();
+}
+
+void CalcModule::exportToPdf() {
+    QString def = m_currentPath.isEmpty()
+        ? QStringLiteral("Sheet.pdf")
+        : QFileInfo(m_currentPath).completeBaseName() + ".pdf";
+    QString path = QFileDialog::getSaveFileName(this, "Export to PDF", def, "PDF Files (*.pdf)");
+    if (path.isEmpty()) return;
+    if (!path.endsWith(".pdf", Qt::CaseInsensitive)) path += ".pdf";
+
+    QPdfWriter writer(path);
+    writer.setPageSize(QPageSize(QPageSize::A4));
+    writer.setPageOrientation(QPageLayout::Landscape);
+    writer.setPageMargins(QMarginsF(12, 12, 12, 12), QPageLayout::Millimeter);
+
+    QPainter p(&writer);
+    if (!p.isActive()) {
+        QMessageBox::warning(this, "Export to PDF", "Could not write the PDF (is the file open?).");
+        return;
+    }
+    renderSheet(p, QRectF(0, 0, writer.width(), writer.height()));
+    p.end();
+    QMessageBox::information(this, "Export to PDF", QString("Saved to:\n%1").arg(path));
+}
+
+void CalcModule::printPreview() {
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setPageOrientation(QPageLayout::Landscape);
+    QPrintPreviewDialog dlg(&printer, this);
+    dlg.setWindowTitle("Print Preview");
+    connect(&dlg, &QPrintPreviewDialog::paintRequested, this, [this](QPrinter* pr){
+        QPainter p(pr);
+        renderSheet(p, QRectF(0, 0, pr->width(), pr->height()));
+    });
+    dlg.resize(900, 650);
+    dlg.exec();
+}
+
+// Begin typing "=FN(" into the formula bar so the user can fill in arguments.
+void CalcModule::startFunctionEntry(const QString& fn) {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    const QString text = "=" + fn + "(";
+    m_updatingFormulaBar = true;
+    m_formulaBar->setText(text);
+    m_updatingFormulaBar = false;
+    m_formulaBar->setFocus();
+    m_formulaBar->setCursorPosition(text.length());
+}
+
+// Transient "coming soon" tip for features that are not implemented yet.
+void CalcModule::notImplemented(const QString& feature) {
+    QToolTip::showText(QCursor::pos(),
+                       feature + " — coming soon in NativeOffice Calc", this);
+}
+
+// Sort the used data region by the active column. Auto-skips a text header row.
+// Whole rows (content + format) move together; formula refs are not adjusted.
+void CalcModule::sortByColumn(bool ascending) {
+    int c1 = INT_MAX, r1 = INT_MAX, c2 = -1, r2 = -1;
+    const auto& data = m_model->cells();
+    for (auto it = data.begin(); it != data.end(); ++it) {
+        const int col = SpreadsheetModel::keyCol(it->first);
+        const int row = SpreadsheetModel::keyRow(it->first);
+        c1 = std::min(c1, col); c2 = std::max(c2, col);
+        r1 = std::min(r1, row); r2 = std::max(r2, row);
+    }
+    if (c2 < 0 || r2 <= r1) return;                  // empty or single-row
+
+    const QModelIndex cur = m_tableView->currentIndex();
+    const int keyCol = (cur.isValid() && cur.column() >= c1 && cur.column() <= c2)
+                           ? cur.column() : c1;
+
+    // Treat the top row as a header if it has values but none are numeric.
+    bool anyVal = false, anyNum = false;
+    for (int c = c1; c <= c2; ++c) {
+        const QString d = m_model->displayValue(c, r1);
+        if (d.isEmpty()) continue;
+        anyVal = true;
+        bool ok = false; d.toDouble(&ok); if (ok) anyNum = true;
+    }
+    const int startRow = (anyVal && !anyNum) ? r1 + 1 : r1;
+    if (r2 <= startRow) return;
+
+    struct RowRec { QString keyText; bool keyNum; double keyVal; std::vector<Cell> cells; };
+    std::vector<RowRec> rows;
+    for (int row = startRow; row <= r2; ++row) {
+        RowRec rec;
+        rec.keyText = m_model->displayValue(keyCol, row);
+        bool ok = false;
+        rec.keyVal = rec.keyText.toDouble(&ok);
+        rec.keyNum = ok && !rec.keyText.isEmpty();
+        for (int c = c1; c <= c2; ++c) rec.cells.push_back(m_model->cellAt(c, row));
+        rows.push_back(std::move(rec));
+    }
+    std::stable_sort(rows.begin(), rows.end(),
+        [ascending](const RowRec& a, const RowRec& b) {
+            int cmp;
+            if (a.keyNum && b.keyNum)
+                cmp = (a.keyVal < b.keyVal) ? -1 : (a.keyVal > b.keyVal ? 1 : 0);
+            else
+                cmp = QString::compare(a.keyText, b.keyText, Qt::CaseInsensitive);
+            return ascending ? cmp < 0 : cmp > 0;
+        });
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+    const int width = c2 - c1 + 1;
+    for (int i = 0; i < (int)rows.size(); ++i)
+        for (int j = 0; j < width; ++j)
+            edits.push_back({QPoint(c1 + j, startRow + i), rows[i].cells[j]});
+    m_model->applyCellEdits(edits, ascending ? "Sort Ascending" : "Sort Descending");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fill
+// ─────────────────────────────────────────────────────────────────────────────
+// Copy the 'source' block into 'dest', repeating the source pattern (modulo) for
+// cells outside the source. A single source cell therefore just copies down/across.
+void CalcModule::fillRange(const QRect& source, const QRect& dest) {
+    if (!source.isValid() || source.width() == 0 || source.height() == 0) return;
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = dest.top(); row <= dest.bottom(); ++row)
+        for (int col = dest.left(); col <= dest.right(); ++col) {
+            if (source.contains(col, row)) continue;        // leave the source intact
+            if (col < 0 || col >= SpreadsheetModel::NUM_COLS
+                || row < 0 || row >= SpreadsheetModel::NUM_ROWS) continue;
+            const int sc = source.left() + ((col - source.left()) % source.width());
+            const int sr = source.top()  + ((row - source.top())  % source.height());
+            edits.push_back({QPoint(col, row), m_model->cellAt(sc, sr)});
+        }
+    if (!edits.empty()) m_model->applyCellEdits(edits, "Fill");
+}
+
+void CalcModule::fillDown() {
+    const QRect r = selectedRect();
+    if (r.height() <= 1) return;
+    fillRange(QRect(r.left(), r.top(), r.width(), 1), r);     // top row → down
+}
+
+void CalcModule::fillRight() {
+    const QRect r = selectedRect();
+    if (r.width() <= 1) return;
+    fillRange(QRect(r.left(), r.top(), 1, r.height()), r);    // left column → right
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Format application
+// ─────────────────────────────────────────────────────────────────────────────
+void CalcModule::applyFormatToSelection(const std::function<void(CellFormat&)>& fn,
+                                        const QString& undoText) {
+    if (m_updatingToolbar) return;
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = r.top(); row <= r.bottom(); ++row)
+        for (int col = r.left(); col <= r.right(); ++col) {
+            Cell c = m_model->cellAt(col, row);
+            fn(c.format);
+            edits.push_back({QPoint(col, row), c});
+        }
+    m_model->applyCellEdits(edits, undoText);
+}
+
+void CalcModule::onBoldToggled(bool on) {
+    applyFormatToSelection([on](CellFormat& f){ f.bold = on; }, "Bold");
+}
+void CalcModule::onItalicToggled(bool on) {
+    applyFormatToSelection([on](CellFormat& f){ f.italic = on; }, "Italic");
+}
+void CalcModule::onUnderlineToggled(bool on) {
+    applyFormatToSelection([on](CellFormat& f){ f.underline = on; }, "Underline");
+}
+void CalcModule::onStrikeToggled(bool on) {
+    applyFormatToSelection([on](CellFormat& f){ f.strike = on; }, "Strikethrough");
+}
+void CalcModule::onIncreaseFont() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    int sz = (cur.isValid() ? m_model->cellAt(cur.column(), cur.row()).format.fontSize : 0);
+    if (sz <= 0) sz = 11;
+    const int ns = std::min(409, sz + 1);
+    applyFormatToSelection([ns](CellFormat& f){ f.fontSize = ns; }, "Increase Font Size");
+    if (m_sizeCombo) { m_updatingToolbar = true; m_sizeCombo->setCurrentText(QString::number(ns)); m_updatingToolbar = false; }
+}
+void CalcModule::onDecreaseFont() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    int sz = (cur.isValid() ? m_model->cellAt(cur.column(), cur.row()).format.fontSize : 0);
+    if (sz <= 0) sz = 11;
+    const int ns = std::max(1, sz - 1);
+    applyFormatToSelection([ns](CellFormat& f){ f.fontSize = ns; }, "Decrease Font Size");
+    if (m_sizeCombo) { m_updatingToolbar = true; m_sizeCombo->setCurrentText(QString::number(ns)); m_updatingToolbar = false; }
+}
+void CalcModule::onIncreaseIndent() {
+    applyFormatToSelection([](CellFormat& f){ f.indent = std::min(15, f.indent + 1); }, "Increase Indent");
+}
+void CalcModule::onDecreaseIndent() {
+    applyFormatToSelection([](CellFormat& f){ f.indent = std::max(0, f.indent - 1); }, "Decrease Indent");
+}
+void CalcModule::onFormatPainterClicked() {
+    if (!m_formatPainterBtn) return;
+    if (m_formatPainterBtn->isChecked()) {
+        // Capture the active cell's format; arm for the next selection.
+        const QModelIndex cur = m_tableView->currentIndex();
+        m_painterFmt   = cur.isValid() ? m_model->cellAt(cur.column(), cur.row()).format
+                                       : CellFormat{};
+        m_painterArmed = true;
+    } else {
+        m_painterArmed = false;
+    }
+}
+void CalcModule::onFontFamilyChanged() {
+    const QString fam = m_fontCombo->currentFont().family();
+    applyFormatToSelection([fam](CellFormat& f){ f.fontFamily = fam; }, "Font");
+}
+void CalcModule::onFontSizeChanged() {
+    bool ok = false;
+    const int sz = m_sizeCombo->currentText().toInt(&ok);
+    if (!ok || sz <= 0) return;
+    applyFormatToSelection([sz](CellFormat& f){ f.fontSize = sz; }, "Font Size");
+}
+void CalcModule::onTextColorClicked() {
+    const QColor c = QColorDialog::getColor(m_lastTextColor, this, "Text Colour");
+    if (!c.isValid()) return;
+    m_lastTextColor = c;
+    styleColorButton(m_textColorBtn, c);
+    applyFormatToSelection([c](CellFormat& f){ f.textColor = c; }, "Text Colour");
+}
+void CalcModule::onFillColorClicked() {
+    const QColor c = QColorDialog::getColor(m_lastFillColor, this, "Fill Colour");
+    if (!c.isValid()) return;
+    m_lastFillColor = c;
+    styleColorButton(m_fillColorBtn, c);
+    applyFormatToSelection([c](CellFormat& f){ f.bgColor = c; }, "Fill Colour");
+}
+void CalcModule::onAlignClicked() {
+    auto* btn = qobject_cast<QToolButton*>(sender());
+    if (!btn) return;
+    int align = 0;
+    if (btn->isChecked()) {
+        if      (btn == m_alignLeftBtn)   align = Qt::AlignLeft;
+        else if (btn == m_alignCenterBtn) align = Qt::AlignHCenter;
+        else                              align = Qt::AlignRight;
+    }
+    m_updatingToolbar = true;
+    m_alignLeftBtn  ->setChecked(align == Qt::AlignLeft);
+    m_alignCenterBtn->setChecked(align == Qt::AlignHCenter);
+    m_alignRightBtn ->setChecked(align == Qt::AlignRight);
+    m_updatingToolbar = false;
+    applyFormatToSelection([align](CellFormat& f){ f.hAlign = align; }, "Align");
+}
+void CalcModule::onVAlignClicked() {
+    auto* btn = qobject_cast<QToolButton*>(sender());
+    if (!btn) return;
+    int align = 0;
+    if (btn->isChecked()) {
+        if      (btn == m_alignTopBtn) align = Qt::AlignTop;
+        else if (btn == m_alignMidBtn) align = Qt::AlignVCenter;
+        else                           align = Qt::AlignBottom;
+    }
+    m_updatingToolbar = true;
+    m_alignTopBtn->setChecked(align == Qt::AlignTop);
+    m_alignMidBtn->setChecked(align == Qt::AlignVCenter);
+    m_alignBotBtn->setChecked(align == Qt::AlignBottom);
+    m_updatingToolbar = false;
+    applyFormatToSelection([align](CellFormat& f){ f.vAlign = align; }, "Vertical Align");
+}
+
+void CalcModule::onWrapToggled(bool on) {
+    applyFormatToSelection([on](CellFormat& f){ f.wrap = on; }, "Wrap Text");
+    // Grow/shrink rows in the selection to fit wrapped content.
+    const QRect r = selectedRect();
+    for (int row = r.top(); row <= r.bottom(); ++row)
+        m_tableView->resizeRowToContents(row);
+}
+
+void CalcModule::applyMerges() {
+    m_tableView->clearSpans();
+    for (const QRect& r : m_model->merges())
+        m_tableView->setSpan(r.top(), r.left(), r.height(), r.width());
+}
+
+void CalcModule::applySizes() {
+    m_applyingSizes = true;
+    // Reset to grid defaults, then apply this sheet's overrides.
+    for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c)
+        m_tableView->setColumnWidth(c, 64);
+    for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r)
+        m_tableView->setRowHeight(r, 20);
+    const auto& cw = m_model->colWidths();
+    for (auto it = cw.begin(); it != cw.end(); ++it)
+        if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_COLS)
+            m_tableView->setColumnWidth(it.key(), it.value());
+    const auto& rh = m_model->rowHeights();
+    for (auto it = rh.begin(); it != rh.end(); ++it)
+        if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_ROWS)
+            m_tableView->setRowHeight(it.key(), it.value());
+    m_applyingSizes = false;
+}
+
+void CalcModule::onMergeClicked() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+
+    const QRect existing = m_model->mergeContaining(cur.column(), cur.row());
+    if (existing.isValid()) {
+        m_model->removeMergeContaining(cur.column(), cur.row());
+    } else {
+        const QRect r = selectedRect();
+        if (r.width() <= 1 && r.height() <= 1) return;     // nothing to merge
+        m_model->addMerge(r);
+        // Merge & center: centre the anchor (top-left) cell.
+        Cell c = m_model->cellAt(r.left(), r.top());
+        c.format.hAlign = Qt::AlignHCenter;
+        c.format.vAlign = Qt::AlignVCenter;
+        std::vector<std::pair<QPoint, Cell>> edits{ {QPoint(r.left(), r.top()), c} };
+        m_model->applyCellEdits(edits, "Merge Cells");
+    }
+    applyMerges();
+    markDirty();
+    updateToolbarFromCell();
+}
+
+void CalcModule::onClearFormatting() {
+    applyFormatToSelection([](CellFormat& f){ f = CellFormat{}; }, "Clear Formatting");
+}
+
+// ── Formulas / View actions (Sprint 24) ────────────────────────────────────────
+void CalcModule::onShowFormulasToggled(bool on) {
+    if (m_model) m_model->setShowFormulas(on);
+}
+void CalcModule::onCalculateNow() {
+    // Force a full re-evaluation of every formula on the active sheet.
+    if (m_model) m_model->notifyAllChanged();
+}
+void CalcModule::onToggleGridlines(bool on) {
+    if (m_tableView) m_tableView->setShowGrid(on);
+}
+void CalcModule::onToggleHeadings(bool on) {
+    if (m_colHeader) m_colHeader->setVisible(on);
+    if (m_rowHeader) m_rowHeader->setVisible(on);
+}
+void CalcModule::insertSymbolDialog() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    static const QStringList kSymbols = {
+        "€", "£", "¥", "¢", "©", "®", "™", "°", "±", "×", "÷", "≈", "≠", "≤", "≥",
+        "→", "←", "↑", "↓", "•", "★", "✓", "✗", "α", "β", "π", "Σ", "Δ", "Ω", "µ"
+    };
+    bool ok = false;
+    const QString sym = QInputDialog::getItem(this, "Symbol", "Insert symbol:",
+                                              kSymbols, 0, false, &ok);
+    if (!ok || sym.isEmpty()) return;
+    QString content = m_model->rawContent(cur.column(), cur.row());
+    m_model->setCellContent(cur.column(), cur.row(), content + sym, "Insert Symbol");
+    onSelectionChanged();
+}
+
+// ── Number format ─────────────────────────────────────────────────────────────
+void CalcModule::onNumberFormatChanged() {
+    if (m_updatingToolbar) return;
+    const QString code = m_numFmtCombo->currentData().toString();
+    applyFormatToSelection([code](CellFormat& f){ f.numberFormat = code; }, "Number Format");
+}
+void CalcModule::onCurrencyClicked() {
+    applyFormatToSelection([](CellFormat& f){ f.numberFormat = "$#,##0.00"; }, "Currency");
+}
+void CalcModule::onPercentClicked() {
+    applyFormatToSelection([](CellFormat& f){ f.numberFormat = "0%"; }, "Percent");
+}
+void CalcModule::onCommaClicked() {
+    applyFormatToSelection([](CellFormat& f){ f.numberFormat = "#,##0.00"; }, "Comma Style");
+}
+void CalcModule::onIncreaseDecimals() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    const QString code = cur.isValid()
+        ? m_model->cellAt(cur.column(), cur.row()).format.numberFormat : QString();
+    const QString nc = buildNumberCode(code.contains('$'), code.contains('%'),
+                                       code.contains(','), decimalsOfCode(code) + 1);
+    applyFormatToSelection([nc](CellFormat& f){ f.numberFormat = nc; }, "Increase Decimals");
+}
+void CalcModule::onDecreaseDecimals() {
+    const QModelIndex cur = m_tableView->currentIndex();
+    const QString code = cur.isValid()
+        ? m_model->cellAt(cur.column(), cur.row()).format.numberFormat : QString();
+    const int dec = std::max(0, decimalsOfCode(code) - 1);
+    const QString nc = buildNumberCode(code.contains('$'), code.contains('%'),
+                                       code.contains(','), dec);
+    applyFormatToSelection([nc](CellFormat& f){ f.numberFormat = nc; }, "Decrease Decimals");
+}
+
+// ── Borders ───────────────────────────────────────────────────────────────────
+void CalcModule::onBorderMenu(QAction* act) {
+    const int data = act->data().toInt();   // edge mask, 0 = none, -1 = outside
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = r.top(); row <= r.bottom(); ++row)
+        for (int col = r.left(); col <= r.right(); ++col) {
+            Cell c = m_model->cellAt(col, row);
+            CellFormat& f = c.format;
+
+            if (data == 0) {                       // No Border
+                f.borderEdges = 0;
+                f.borderColor = QColor();
+            } else if (data == -1) {               // Outside perimeter
+                int e = 0;
+                if (row == r.top())    e |= CellFormat::BTop;
+                if (row == r.bottom()) e |= CellFormat::BBottom;
+                if (col == r.left())   e |= CellFormat::BLeft;
+                if (col == r.right())  e |= CellFormat::BRight;
+                f.borderEdges = e;
+            } else if (data == CellFormat::BAll) {  // All Borders
+                f.borderEdges = CellFormat::BAll;
+            } else if (data == CellFormat::BBottom) {
+                if (row == r.bottom()) f.borderEdges |= CellFormat::BBottom;
+            } else if (data == CellFormat::BTop) {
+                if (row == r.top())    f.borderEdges |= CellFormat::BTop;
+            }
+
+            if (f.borderEdges && !f.borderColor.isValid())
+                f.borderColor = QColor("#000000");
+            if (!f.borderEdges)
+                f.borderColor = QColor();
+
+            edits.push_back({QPoint(col, row), c});
+        }
+    m_model->applyCellEdits(edits, "Borders");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Row / column context menus
+// ─────────────────────────────────────────────────────────────────────────────
+void CalcModule::onRowHeaderMenu(const QPoint& pos) {
+    const int row = m_rowHeader->logicalIndexAt(pos);
+    if (row < 0) return;
+    QMenu menu(this);
+    QAction* above = menu.addAction("Insert Row Above");
+    QAction* below = menu.addAction("Insert Row Below");
+    menu.addSeparator();
+    QAction* del   = menu.addAction("Delete Row");
+    const QAction* a = menu.exec(m_rowHeader->mapToGlobal(pos));
+    if      (a == above) m_model->insertRowAt(row);
+    else if (a == below) m_model->insertRowAt(row + 1);
+    else if (a == del)   m_model->deleteRowAt(row);
+}
+
+void CalcModule::onColHeaderMenu(const QPoint& pos) {
+    const int col = m_colHeader->logicalIndexAt(pos);
+    if (col < 0) return;
+    QMenu menu(this);
+    QAction* left  = menu.addAction("Insert Column Left");
+    QAction* right = menu.addAction("Insert Column Right");
+    menu.addSeparator();
+    QAction* del   = menu.addAction("Delete Column");
+    const QAction* a = menu.exec(m_colHeader->mapToGlobal(pos));
+    if      (a == left)  m_model->insertColumnAt(col);
+    else if (a == right) m_model->insertColumnAt(col + 1);
+    else if (a == del)   m_model->deleteColumnAt(col);
+}
+
+void CalcModule::onGridContextMenu(const QPoint& pos) {
+    const QModelIndex idx = m_tableView->indexAt(pos);
+    const QModelIndex cur = m_tableView->currentIndex();
+    const int row = idx.isValid() ? idx.row()    : (cur.isValid() ? cur.row()    : 0);
+    const int col = idx.isValid() ? idx.column() : (cur.isValid() ? cur.column() : 0);
+
+    QMenu menu(this);
+    menu.addAction(m_cutAct);
+    menu.addAction(m_copyAct);
+    menu.addAction(m_pasteAct);
+    menu.addAction(m_deleteAct);
+    menu.addSeparator();
+    QAction* insRow = menu.addAction("Insert Row");
+    QAction* delRow = menu.addAction("Delete Row");
+    QAction* insCol = menu.addAction("Insert Column");
+    QAction* delCol = menu.addAction("Delete Column");
+
+    const QAction* a = menu.exec(m_tableView->viewport()->mapToGlobal(pos));
+    if      (a == insRow) m_model->insertRowAt(row);
+    else if (a == delRow) m_model->deleteRowAt(row);
+    else if (a == insCol) m_model->insertColumnAt(col);
+    else if (a == delCol) m_model->deleteColumnAt(col);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Find / Replace
+// ─────────────────────────────────────────────────────────────────────────────
+void CalcModule::buildFindDialog() {
+    if (m_findDialog) return;
+
+    m_findDialog = new QDialog(this);
+    m_findDialog->setWindowTitle("Find and Replace");
+    m_findDialog->setModal(false);
+
+    auto* v = new QVBoxLayout(m_findDialog);
+
+    // Find row
+    auto* findRow = new QWidget(m_findDialog);
+    auto* fl = new QHBoxLayout(findRow);
+    fl->setContentsMargins(0, 0, 0, 0);
+    auto* findLbl = new QLabel("Find:", findRow);
+    findLbl->setFixedWidth(64);
+    m_findEdit = new QLineEdit(findRow);
+    auto* findNextBtn = new QPushButton("Find Next", findRow);
+    auto* findPrevBtn = new QPushButton("Find Prev", findRow);
+    fl->addWidget(findLbl);
+    fl->addWidget(m_findEdit, 1);
+    fl->addWidget(findPrevBtn);
+    fl->addWidget(findNextBtn);
+    v->addWidget(findRow);
+
+    // Replace row (hidden in Find-only mode)
+    m_replaceRow = new QWidget(m_findDialog);
+    auto* rl = new QHBoxLayout(m_replaceRow);
+    rl->setContentsMargins(0, 0, 0, 0);
+    auto* replLbl = new QLabel("Replace:", m_replaceRow);
+    replLbl->setFixedWidth(64);
+    m_replaceEdit = new QLineEdit(m_replaceRow);
+    auto* replBtn    = new QPushButton("Replace", m_replaceRow);
+    auto* replAllBtn = new QPushButton("Replace All", m_replaceRow);
+    rl->addWidget(replLbl);
+    rl->addWidget(m_replaceEdit, 1);
+    rl->addWidget(replBtn);
+    rl->addWidget(replAllBtn);
+    v->addWidget(m_replaceRow);
+
+    m_matchCase = new QCheckBox("Match case", m_findDialog);
+    v->addWidget(m_matchCase);
+
+    connect(findNextBtn, &QPushButton::clicked, this, [this]{ findNext(true);  });
+    connect(findPrevBtn, &QPushButton::clicked, this, [this]{ findNext(false); });
+    connect(m_findEdit,  &QLineEdit::returnPressed, this, [this]{ findNext(true); });
+    connect(replBtn,     &QPushButton::clicked, this, &CalcModule::replaceCurrent);
+    connect(replAllBtn,  &QPushButton::clicked, this, &CalcModule::replaceAll);
+}
+
+void CalcModule::showFindDialog() {
+    buildFindDialog();
+    m_replaceRow->hide();
+    m_findDialog->setWindowTitle("Find");
+    m_findDialog->show();
+    m_findDialog->raise();
+    m_findEdit->setFocus();
+    m_findEdit->selectAll();
+}
+
+void CalcModule::showReplaceDialog() {
+    buildFindDialog();
+    m_replaceRow->show();
+    m_findDialog->setWindowTitle("Find and Replace");
+    m_findDialog->show();
+    m_findDialog->raise();
+    m_findEdit->setFocus();
+    m_findEdit->selectAll();
+}
+
+bool CalcModule::findNext(bool forward) {
+    const QString needle = m_findEdit ? m_findEdit->text() : QString();
+    if (needle.isEmpty()) return false;
+    const auto cs = (m_matchCase && m_matchCase->isChecked())
+                        ? Qt::CaseSensitive : Qt::CaseInsensitive;
+
+    const int C = SpreadsheetModel::NUM_COLS;
+    const int total = SpreadsheetModel::NUM_ROWS * C;
+    const QModelIndex cur = m_tableView->currentIndex();
+    const int start = cur.isValid() ? cur.row() * C + cur.column() : -1;
+
+    for (int step = 1; step <= total; ++step) {
+        int idx = forward ? (start + step) : (start - step);
+        idx = ((idx % total) + total) % total;     // wrap-around
+        const int row = idx / C, col = idx % C;
+        if (m_model->rawContent(col, row).contains(needle, cs)) {
+            const QModelIndex mi = m_model->index(row, col);
+            m_tableView->setCurrentIndex(mi);
+            m_tableView->scrollTo(mi);
+            return true;
+        }
+    }
+    QApplication::beep();
+    return false;
+}
+
+void CalcModule::replaceCurrent() {
+    const QString needle = m_findEdit->text();
+    if (needle.isEmpty()) return;
+    const auto cs = m_matchCase->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (cur.isValid()) {
+        QString content = m_model->rawContent(cur.column(), cur.row());
+        const int i = content.indexOf(needle, 0, cs);
+        if (i >= 0) {
+            content.replace(i, needle.length(), m_replaceEdit->text());
+            m_model->setCellContent(cur.column(), cur.row(), content, "Replace");
+        }
+    }
+    findNext(true);
+}
+
+void CalcModule::replaceAll() {
+    const QString needle = m_findEdit->text();
+    if (needle.isEmpty()) return;
+    const QString repl = m_replaceEdit->text();
+    const auto cs = m_matchCase->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row)
+        for (int col = 0; col < SpreadsheetModel::NUM_COLS; ++col) {
+            Cell c = m_model->cellAt(col, row);
+            if (c.content.contains(needle, cs)) {
+                c.content.replace(needle, repl, cs);
+                edits.push_back({QPoint(col, row), c});
+            }
+        }
+    m_model->applyCellEdits(edits, "Replace All");
+    QWidget* parent = m_findDialog ? static_cast<QWidget*>(m_findDialog)
+                                   : static_cast<QWidget*>(this);
+    QMessageBox::information(parent, "Replace All",
+                            QString("Replaced in %1 cell(s).").arg(edits.size()));
+}
+
+void CalcModule::updateToolbarFromCell() {
+    if (!m_fontCombo) return;
+    const QModelIndex cur = m_tableView->currentIndex();
+    const CellFormat f = cur.isValid()
+                             ? m_model->cellAt(cur.column(), cur.row()).format
+                             : CellFormat{};
+
+    m_updatingToolbar = true;
+    m_fontCombo->setCurrentFont(QFont(f.fontFamily.isEmpty() ? "Calibri" : f.fontFamily));
+    m_sizeCombo->setCurrentText(QString::number(f.fontSize > 0 ? f.fontSize : 11));
+    m_boldBtn->setChecked(f.bold);
+    m_italicBtn->setChecked(f.italic);
+    m_underlineBtn->setChecked(f.underline);
+    if (m_strikeBtn) m_strikeBtn->setChecked(f.strike);
+    m_alignLeftBtn  ->setChecked(f.hAlign == Qt::AlignLeft);
+    m_alignCenterBtn->setChecked(f.hAlign == Qt::AlignHCenter);
+    m_alignRightBtn ->setChecked(f.hAlign == Qt::AlignRight);
+    m_alignTopBtn   ->setChecked(f.vAlign == Qt::AlignTop);
+    m_alignMidBtn   ->setChecked(f.vAlign == Qt::AlignVCenter);
+    m_alignBotBtn   ->setChecked(f.vAlign == Qt::AlignBottom);
+    m_wrapBtn       ->setChecked(f.wrap);
+
+    // Reflect the number format (fall back to General when unrecognised).
+    int fmtIdx = m_numFmtCombo->findData(f.numberFormat);
+    if (fmtIdx < 0) fmtIdx = 0;
+    m_numFmtCombo->setCurrentIndex(fmtIdx);
+
+    m_updatingToolbar = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clipboard
+// ─────────────────────────────────────────────────────────────────────────────
+void CalcModule::setClipboardRange(const QRect& rect, bool isCut) {
+    m_clipRange = rect;
+    m_clipIsCut = isCut;
+    m_ants->setRange(rect, isCut);
+}
+
+void CalcModule::clearMarchingAnts() {
+    m_clipRange = QRect();
+    m_clipIsCut = false;
+    m_ants->setRange(QRect(), false);
+}
+
+void CalcModule::copySelection() {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+
+    // Build TSV (raw content) for interop + a JSON block for in-app fidelity.
+    QString tsv;
+    QJsonArray cellsJson;
+    for (int row = r.top(); row <= r.bottom(); ++row) {
+        QStringList rowParts;
+        for (int col = r.left(); col <= r.right(); ++col) {
+            const Cell c = m_model->cellAt(col, row);
+            // TSV: escape tabs/newlines minimally
+            QString text = c.content;
+            text.replace('\t', ' ').replace('\n', ' ');
+            rowParts << text;
+
+            if (!c.isEmpty()) {
+                QJsonObject o;
+                o["dr"] = row - r.top();
+                o["dc"] = col - r.left();
+                if (!c.content.isEmpty()) o["content"] = c.content;
+                if (!c.format.isDefault()) o["fmt"] = formatToJson(c.format);
+                cellsJson.append(o);
+            }
+        }
+        tsv += rowParts.join('\t');
+        if (row != r.bottom()) tsv += '\n';
+    }
+
+    QJsonObject block;
+    block["rows"]  = r.height();
+    block["cols"]  = r.width();
+    block["cells"] = cellsJson;
+
+    auto* mime = new QMimeData;
+    mime->setText(tsv);
+    mime->setData(kCellsMime, QJsonDocument(block).toJson(QJsonDocument::Compact));
+    QGuiApplication::clipboard()->setMimeData(mime);
+
+    setClipboardRange(r, /*isCut=*/false);
+}
+
+void CalcModule::cutSelection() {
+    copySelection();
+    // Excel-style deferred cut: data stays until paste; just flag it.
+    setClipboardRange(selectedRect(), /*isCut=*/true);
+}
+
+void CalcModule::pasteClipboard() {
+    const QMimeData* mime = QGuiApplication::clipboard()->mimeData();
+    if (!mime) return;
+
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    const int anchorCol = cur.column();
+    const int anchorRow = cur.row();
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+
+    if (mime->hasFormat(kCellsMime)) {
+        // ── In-app block: restore content + format ──────────────────────────
+        const QJsonObject block =
+            QJsonDocument::fromJson(mime->data(kCellsMime)).object();
+        const int rows = block.value("rows").toInt();
+        const int cols = block.value("cols").toInt();
+
+        // Clear the whole target rectangle first (so empty source cells erase).
+        for (int dr = 0; dr < rows; ++dr)
+            for (int dc = 0; dc < cols; ++dc) {
+                const int tc = anchorCol + dc, tr = anchorRow + dr;
+                if (tc < SpreadsheetModel::NUM_COLS && tr < SpreadsheetModel::NUM_ROWS)
+                    edits.push_back({QPoint(tc, tr), Cell{}});
+            }
+        for (const QJsonValue& v : block.value("cells").toArray()) {
+            const QJsonObject o = v.toObject();
+            const int tc = anchorCol + o.value("dc").toInt();
+            const int tr = anchorRow + o.value("dr").toInt();
+            if (tc >= SpreadsheetModel::NUM_COLS || tr >= SpreadsheetModel::NUM_ROWS)
+                continue;
+            Cell c;
+            c.content = o.value("content").toString();
+            if (o.contains("fmt")) c.format = jsonToFormat(o.value("fmt").toObject());
+            edits.push_back({QPoint(tc, tr), c});
+        }
+    } else if (mime->hasText()) {
+        // ── Plain text / TSV: content only ──────────────────────────────────
+        const QStringList lines = mime->text().split('\n');
+        for (int dr = 0; dr < lines.size(); ++dr) {
+            const QStringList parts = lines[dr].split('\t');
+            for (int dc = 0; dc < parts.size(); ++dc) {
+                const int tc = anchorCol + dc, tr = anchorRow + dr;
+                if (tc >= SpreadsheetModel::NUM_COLS || tr >= SpreadsheetModel::NUM_ROWS)
+                    continue;
+                Cell c = m_model->cellAt(tc, tr);
+                c.content = parts[dc];
+                edits.push_back({QPoint(tc, tr), c});
+            }
+        }
+    } else {
+        return;
+    }
+
+    // If this was a cut, also clear the source cells that aren't overwritten.
+    if (m_clipIsCut && !m_clipRange.isNull()) {
+        const QRect tgt(QPoint(anchorCol, anchorRow),
+                        QSize(m_clipRange.width(), m_clipRange.height()));
+        for (int row = m_clipRange.top(); row <= m_clipRange.bottom(); ++row)
+            for (int col = m_clipRange.left(); col <= m_clipRange.right(); ++col)
+                if (!tgt.contains(col, row))
+                    edits.push_back({QPoint(col, row), Cell{}});
+    }
+
+    m_model->applyCellEdits(edits, m_clipIsCut ? "Move Cells" : "Paste");
+    clearMarchingAnts();
+}
+
+void CalcModule::deleteSelection() {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int row = r.top(); row <= r.bottom(); ++row)
+        for (int col = r.left(); col <= r.right(); ++col)
+            edits.push_back({QPoint(col, row), Cell{}});
+    m_model->applyCellEdits(edits, "Clear Cells");
+    clearMarchingAnts();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Event filter — keep the marching-ants overlay sized to the viewport.
+// ─────────────────────────────────────────────────────────────────────────────
+bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == m_tableView->viewport()) {
+        switch (event->type()) {
+        case QEvent::Resize: {
+            const QSize s = m_tableView->viewport()->size();
+            if (m_ants)       m_ants->resize(s);
+            if (m_selOverlay) m_selOverlay->resize(s);
+            updateFrozenViews();
+            break;
+        }
+        case QEvent::MouseButtonPress: {
+            auto* me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton) {
+                const QRect sel = selectedRect();
+                const QRect br = m_tableView->visualRect(
+                    m_model->index(sel.bottom(), sel.right()));
+                const QPoint handle = br.bottomRight();
+                if ((me->position().toPoint() - handle).manhattanLength() <= 6) {
+                    m_filling = true;
+                    m_fillSource = sel;
+                    return true;                       // begin fill drag
+                }
+            }
+            break;
+        }
+        case QEvent::MouseMove:
+            if (m_filling) return true;                // swallow during drag
+            break;
+        case QEvent::MouseButtonRelease:
+            if (m_filling) {
+                auto* me = static_cast<QMouseEvent*>(event);
+                m_filling = false;
+                const QModelIndex idx = m_tableView->indexAt(me->position().toPoint());
+                if (idx.isValid()) {
+                    const int dRow = idx.row()    - m_fillSource.bottom();
+                    const int dCol = idx.column() - m_fillSource.right();
+                    QRect dest = m_fillSource;
+                    if (std::abs(dRow) >= std::abs(dCol) && dRow > 0) dest.setBottom(idx.row());
+                    else if (dCol > 0)                                dest.setRight(idx.column());
+                    if (dest != m_fillSource) fillRange(m_fillSource, dest);
+                }
+                return true;
+            }
+            break;
+        default: break;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Styling
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +3607,108 @@ void CalcModule::applyStyles() {
 /* ── Module root ─────────────────────────────────────────────────── */
 QWidget#calcModule {
     background-color: #FFFFFF;
+}
+
+/* ── Ribbon (tabbed toolbar) ─────────────────────────────────────── */
+QWidget#calcRibbon {
+    background-color: #F6F6F6;
+    border-bottom: 1px solid #D4D4D4;
+}
+/* Tab strip */
+QWidget#ribbonTabs {
+    background-color: #EDEDED;
+    border-bottom: 1px solid #D4D4D4;
+}
+QToolButton#ribbonTab {
+    border: none;
+    background: transparent;
+    color: #444444;
+    font-size: 13px;
+    font-family: "Segoe UI", sans-serif;
+    padding: 5px 16px;
+}
+QToolButton#ribbonTab:hover {
+    background: #E2E8E4;
+}
+QToolButton#ribbonTab:checked {
+    background: #F6F6F6;
+    color: #107C41;
+    font-weight: 700;
+    border-bottom: 2px solid #107C41;
+}
+/* Tool buttons inside the ribbon pages (base) */
+QWidget#calcRibbon QToolButton {
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: #3A3D42;
+    font-size: 11px;
+}
+QWidget#calcRibbon QToolButton:hover {
+    background: #EAF2EC;
+    border: 1px solid #BFD8C8;
+}
+QWidget#calcRibbon QToolButton:checked {
+    background: #D6EBDD;
+    border: 1px solid #107C41;
+}
+/* Large icon-over-text buttons (primary actions) */
+QToolButton#ribbonBig {
+    padding: 2px 3px 1px 3px;
+    min-width: 42px;
+    max-width: 78px;
+    max-height: 54px;
+    font-size: 8px;
+    font-family: "Segoe UI", sans-serif;
+    color: #3A3D42;
+}
+QToolButton#ribbonBig::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: bottom center;
+    bottom: 1px;
+    width: 7px; height: 7px;
+}
+/* Small icon-only buttons in dense clusters */
+QToolButton#ribbonSmall { padding: 0; }
+/* B / I / U / S letter toggles */
+QToolButton#ribbonLetter {
+    color: #3A3D42;
+    font-family: "Segoe UI", "Calibri", serif;
+}
+QWidget#calcRibbon QComboBox,
+QWidget#calcRibbon QFontComboBox {
+    background: #FFFFFF;
+    border: 1px solid #C8C8C8;
+    border-radius: 3px;
+    padding: 2px 4px;
+    color: #1C1E26;
+    font-size: 12px;
+}
+QWidget#calcRibbon QComboBox:focus,
+QWidget#calcRibbon QFontComboBox:focus {
+    border: 1px solid #107C41;
+}
+QLabel#groupLabel {
+    color: #8A8A8A;
+    font-size: 9px;
+    font-family: "Segoe UI", sans-serif;
+}
+QWidget#calcRibbon QCheckBox {
+    color: #444444;
+    font-size: 11px;
+    font-family: "Segoe UI", sans-serif;
+    spacing: 4px;
+}
+QScrollArea#ribbonScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#ribbonScroll > QWidget > QWidget { background: transparent; }
+QFrame#ribbonSep {
+    color: #E0E0E0;
+    background-color: #E0E0E0;
+    max-width: 1px;
+    margin: 4px 2px;
 }
 
 /* ── Formula bar row ─────────────────────────────────────────────── */
@@ -272,53 +3761,78 @@ QLineEdit#formulaBar::placeholder {
     color: rgba(255,255,255,0.35);
 }
 
-/* ── Grid (QTableView) ───────────────────────────────────────────── */
+/* ── Grid (QTableView) — Excel look ──────────────────────────────── */
 QTableView#calcGrid {
     background-color: #FFFFFF;
-    alternate-background-color: #FAFAFA;
-    gridline-color: #E5E7EB;
+    gridline-color: #E2E2E2;          /* soft thin Excel gridline */
     border: none;
-    selection-background-color: #DBEAFE;
+    outline: 0;                        /* no dotted focus rectangle */
+    selection-background-color: #E6EFE9;
     selection-color: #1C1E26;
-    font-size: 12px;
-    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 11px;
+    font-family: "Calibri", "Segoe UI", "Inter", sans-serif;
 }
 
-QTableView#calcGrid::item {
-    padding: 0 6px;
-    border-right: 1px solid #E5E7EB;
-    border-bottom: 1px solid #E5E7EB;
-}
+/* Cell fills / fonts / colours / selection are painted by CalcItemDelegate;
+   no ::item rules here, since a stylesheet item rule would make Qt ignore the
+   model's BackgroundRole. The native gridline still draws the cell edges. */
 
-QTableView#calcGrid::item:selected {
-    background-color: %4;
-    color: #1C1E26;
-    border: 1px solid %3;
-}
-
-QTableView#calcGrid::item:focus {
-    background-color: %5;
-    border: 2px solid %3;
-    color: #1C1E26;
-}
-
-/* Corner button (top-left intersection of headers) */
+/* Corner button (top-left intersection of headers) — light Excel header */
 QTableView#calcGrid QAbstractButton {
-    background-color: %1;
+    background-color: #F5F5F5;
     border: none;
-    border-right:  1px solid %2;
-    border-bottom: 1px solid %2;
+    border-right:  1px solid #D4D4D4;
+    border-bottom: 1px solid #D4D4D4;
 }
 QTableView#calcGrid QAbstractButton:hover {
-    background-color: %6;
+    background-color: #ECECEC;
+}
+
+/* ── Sheet tab bar (bottom, Excel style) ─────────────────────────── */
+QWidget#calcTabBar {
+    background-color: #F0F0F0;
+    border-top: 1px solid #D4D4D4;
+}
+QToolButton#sheetTab, QToolButton#sheetTabActive {
+    border: 1px solid #D4D4D4;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    padding: 3px 14px;
+    margin-top: 4px;
+    color: #444444;
+    font-size: 12px;
+    font-family: "Segoe UI", sans-serif;
+}
+QToolButton#sheetTab {
+    background-color: #E1E1E1;
+}
+QToolButton#sheetTabActive {
+    background-color: #FFFFFF;
+    color: #107C41;
+    font-weight: 700;
+    border-top: 2px solid #107C41;
+}
+QToolButton#sheetTab:hover {
+    background-color: #EAEAEA;
+}
+QToolButton#sheetAddBtn {
+    border: none;
+    background: transparent;
+    color: #107C41;
+    font-size: 16px;
+    font-weight: 700;
+    padding: 2px 8px;
+    margin-top: 4px;
+}
+QToolButton#sheetAddBtn:hover {
+    background-color: #E2E8E4;
+    border-radius: 4px;
 }
 )")
     .arg(ThemeManager::cssColor(t.primary))      // %1 formula bar / header bg
     .arg(ThemeManager::cssColor(t.accent))        // %2 dark border
     .arg(ThemeManager::cssColor(t.secondary))     // %3 scarlet accent
-    .arg("#DBEAFE")                               // %4 selection bg (light blue)
-    .arg("#EFF6FF")                               // %5 focused cell bg
-    .arg(ThemeManager::cssColor(t.sidebarHover))  // %6 corner hover
     );
 }
 
@@ -336,30 +3850,155 @@ void CalcModule::markClean() {
     m_dirty = false;
 }
 
+// Serialize one sheet's sparse cells into a JSON array.
+static QJsonArray cellsToJson(const SpreadsheetModel* m) {
+    QJsonArray cellsArray;
+    const auto& data = m->cells();
+    for (auto it = data.begin(); it != data.end(); ++it) {
+        const int key = it->first;
+        const Cell& c = it->second;
+        QJsonObject cell;
+        cell["col"]   = SpreadsheetModel::keyCol(key);
+        cell["row"]   = SpreadsheetModel::keyRow(key);
+        cell["value"] = c.content;                  // back-compat key
+        if (!c.format.isDefault())
+            cell["fmt"] = formatToJson(c.format);
+        cellsArray.append(cell);
+    }
+    return cellsArray;
+}
+
+// Load a JSON cell array into a model (raw, no undo).
+static void jsonToCells(SpreadsheetModel* m, const QJsonArray& cells) {
+    for (const auto& cellVal : cells) {
+        const QJsonObject cell = cellVal.toObject();
+        const int col = cell["col"].toInt();
+        const int row = cell["row"].toInt();
+        const QString v = cell.contains("content") ? cell["content"].toString()
+                                                    : cell["value"].toString();
+        if (col >= 0 && col < SpreadsheetModel::NUM_COLS
+            && row >= 0 && row < SpreadsheetModel::NUM_ROWS
+            && (!v.isEmpty() || cell.contains("fmt"))) {
+            Cell c;
+            c.content = v;
+            if (cell.contains("fmt")) c.format = jsonToFormat(cell["fmt"].toObject());
+            m->applyCellRaw(col, row, c);
+        }
+    }
+}
+
 bool CalcModule::saveToPath(const QString& path) {
+    // ── .xlsx export ─────────────────────────────────────────────────────────
+    if (path.endsWith(".xlsx", Qt::CaseInsensitive)) {
+        std::vector<XlsxSheet> out;
+        for (auto* s : m_sheets) {
+            XlsxSheet xs;
+            xs.name = s->sheetName();
+            const auto& data = s->cells();
+            for (auto it = data.begin(); it != data.end(); ++it)
+                xs.cells.push_back({SpreadsheetModel::keyCol(it->first),
+                                    SpreadsheetModel::keyRow(it->first),
+                                    it->second.content,
+                                    it->second.format});
+            for (const QRect& m : s->merges()) xs.merges.push_back(mergeToRef(m));
+            const auto& cw = s->colWidths();
+            for (auto it = cw.begin(); it != cw.end(); ++it)
+                xs.colWidths.push_back({it.key(), it.value()});
+            const auto& rh = s->rowHeights();
+            for (auto it = rh.begin(); it != rh.end(); ++it)
+                xs.rowHeights.push_back({it.key(), it.value()});
+            out.push_back(std::move(xs));
+        }
+        if (!exportXlsx(path, out)) return false;
+        m_currentPath = path;
+        m_dirty       = false;
+        emit filePathChanged(path);
+        return true;
+    }
+
+    // ── .csv export (active sheet) ───────────────────────────────────────────
+    if (path.endsWith(".csv", Qt::CaseInsensitive)) {
+        QFile cf(path);
+        if (!cf.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+            return false;
+        // Determine the used bounds.
+        int maxCol = -1, maxRow = -1;
+        const auto& data = m_model->cells();
+        for (auto it = data.begin(); it != data.end(); ++it) {
+            maxCol = std::max(maxCol, SpreadsheetModel::keyCol(it->first));
+            maxRow = std::max(maxRow, SpreadsheetModel::keyRow(it->first));
+        }
+        QTextStream cout(&cf);
+        cout.setEncoding(QStringConverter::Utf8);
+        for (int row = 0; row <= maxRow; ++row) {
+            QStringList fields;
+            for (int col = 0; col <= maxCol; ++col) {
+                QString v = m_model->displayValue(col, row);
+                if (v.contains(',') || v.contains('"') || v.contains('\n')) {
+                    v.replace('"', "\"\"");
+                    v = '"' + v + '"';
+                }
+                fields << v;
+            }
+            cout << fields.join(',') << '\n';
+        }
+        cf.close();
+        m_currentPath = path;
+        m_dirty       = false;
+        emit filePathChanged(path);
+        return true;
+    }
+
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
         return false;
 
-    // Build JSON from the sparse cell data
-    QJsonArray cellsArray;
-    const auto& data = m_model->rawData();
-    for (auto it = data.begin(); it != data.end(); ++it) {
-        const int key = it->first;
-        const int col = key % SpreadsheetModel::NUM_COLS;
-        const int row = key / SpreadsheetModel::NUM_COLS;
-
-        QJsonObject cell;
-        cell["col"]   = col;
-        cell["row"]   = row;
-        cell["value"] = it->second;
-        cellsArray.append(cell);
+    syncChartSpecs();          // capture the active sheet's live chart geometries
+    QJsonArray sheetsArr;
+    for (auto* s : m_sheets) {
+        QJsonObject sheetObj;
+        sheetObj["name"]  = s->sheetName();
+        sheetObj["cells"] = cellsToJson(s);
+        if (!s->merges().isEmpty()) {
+            QJsonArray mergesArr;
+            for (const QRect& m : s->merges()) mergesArr.append(mergeToRef(m));
+            sheetObj["merges"] = mergesArr;
+        }
+        if (!s->colWidths().isEmpty()) {
+            QJsonObject cw;
+            const auto& w = s->colWidths();
+            for (auto it = w.begin(); it != w.end(); ++it)
+                cw[QString::number(it.key())] = it.value();
+            sheetObj["colw"] = cw;
+        }
+        if (!s->rowHeights().isEmpty()) {
+            QJsonObject rh;
+            const auto& h = s->rowHeights();
+            for (auto it = h.begin(); it != h.end(); ++it)
+                rh[QString::number(it.key())] = it.value();
+            sheetObj["rowh"] = rh;
+        }
+        if (!s->charts().isEmpty()) {
+            QJsonArray ca;
+            for (const ChartSpec& cs : s->charts()) {
+                QJsonObject co;
+                co["t"]  = int(cs.type);
+                co["c1"] = cs.range.left();  co["r1"] = cs.range.top();
+                co["c2"] = cs.range.right(); co["r2"] = cs.range.bottom();
+                co["x"]  = cs.geom.x();      co["y"]  = cs.geom.y();
+                co["w"]  = cs.geom.width();  co["h"]  = cs.geom.height();
+                ca.append(co);
+            }
+            sheetObj["charts"] = ca;
+        }
+        sheetsArr.append(sheetObj);
     }
 
     QJsonObject root;
-    root["type"]    = "calc";
-    root["version"] = 1;
-    root["cells"]   = cellsArray;
+    root["type"]        = "calc";
+    root["version"]     = 2;
+    root["activeSheet"] = m_activeSheet;
+    root["sheets"]      = sheetsArr;
 
     QTextStream out(&f);
     out.setEncoding(QStringConverter::Utf8);
@@ -374,56 +4013,130 @@ bool CalcModule::saveToPath(const QString& path) {
 }
 
 bool CalcModule::loadFromPath(const QString& path) {
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-        return false;
+    const bool isXlsx = path.endsWith(".xlsx", Qt::CaseInsensitive);
 
-    QTextStream in(&f);
-    in.setEncoding(QStringConverter::Utf8);
-    QString content = in.readAll();
-    f.close();
+    // Read .xlsx (binary) up front so we can bail before tearing down on failure.
+    std::vector<XlsxSheet> xlsxSheets;
+    QString content;
+    QJsonObject root;
 
-    // Strip the .noff header comment if present
-    content.remove("<!-- NativeOffice Calc Spreadsheet (.noff) -->\n");
+    if (isXlsx) {
+        if (!importXlsx(path, xlsxSheets)) return false;
+    } else {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+        QTextStream in(&f);
+        in.setEncoding(QStringConverter::Utf8);
+        content = in.readAll();
+        f.close();
+        content.remove("<!-- NativeOffice Calc Spreadsheet (.noff) -->\n");
+        QJsonParseError err;
+        const QJsonDocument doc = QJsonDocument::fromJson(content.toUtf8(), &err);
+        root = doc.isObject() ? doc.object() : QJsonObject();
+    }
 
     m_ignoreChange = true;
-    m_model->clearAll();
 
-    // Try JSON parse first
-    QJsonParseError err;
-    const QJsonDocument doc = QJsonDocument::fromJson(content.toUtf8(), &err);
+    // Tear down the current sheets.
+    m_tableView->setModel(nullptr);
+    for (auto* s : m_sheets) { m_undoGroup->removeStack(s->undoStack()); s->deleteLater(); }
+    m_sheets.clear();
+    m_activeSheet = 0;
 
-    if (!doc.isNull() && doc.isObject()) {
-        // ── JSON format ──────────────────────────────────────────────────
-        const QJsonObject root  = doc.object();
-        const QJsonArray  cells = root["cells"].toArray();
-
-        for (const auto& cellVal : cells) {
-            const QJsonObject cell = cellVal.toObject();
-            const int col   = cell["col"].toInt();
-            const int row   = cell["row"].toInt();
-            const QString v = cell["value"].toString();
-
-            if (col >= 0 && col < SpreadsheetModel::NUM_COLS
-                && row >= 0 && row < SpreadsheetModel::NUM_ROWS
-                && !v.isEmpty()) {
-                m_model->setData(m_model->index(row, col), v, Qt::EditRole);
+    if (isXlsx) {
+        // ── .xlsx import ─────────────────────────────────────────────────
+        for (const XlsxSheet& xs : xlsxSheets) {
+            QString name = xs.name.isEmpty() || sheetByName(xs.name)
+                               ? QString("Sheet%1").arg(m_sheets.size() + 1) : xs.name;
+            SpreadsheetModel* m = createSheet(name);
+            for (const XlsxCell& c : xs.cells)
+                if (c.col >= 0 && c.col < SpreadsheetModel::NUM_COLS
+                    && c.row >= 0 && c.row < SpreadsheetModel::NUM_ROWS
+                    && (!c.content.isEmpty() || !c.format.isDefault()))
+                    m->applyCellRaw(c.col, c.row, Cell{c.content, c.format});
+            QVector<QRect> mg;
+            for (const QString& ref : xs.merges) {
+                const QRect r = refToMerge(ref);
+                if (r.isValid()) mg.push_back(r);
+            }
+            m->setMerges(mg);
+            QHash<int, int> cw, rh;
+            for (const auto& p : xs.colWidths)  cw.insert(p.first, p.second);
+            for (const auto& p : xs.rowHeights) rh.insert(p.first, p.second);
+            m->setColWidths(cw);
+            m->setRowHeights(rh);
+        }
+    } else if (root.contains("sheets")) {
+        // ── v2 multi-sheet ───────────────────────────────────────────────
+        const QJsonArray sheets = root["sheets"].toArray();
+        for (const auto& sv : sheets) {
+            const QJsonObject so = sv.toObject();
+            QString name = so["name"].toString();
+            if (name.isEmpty() || sheetByName(name))
+                name = QString("Sheet%1").arg(m_sheets.size() + 1);
+            SpreadsheetModel* m = createSheet(name);
+            jsonToCells(m, so["cells"].toArray());
+            if (so.contains("merges")) {
+                QVector<QRect> mg;
+                for (const QJsonValue& mv : so["merges"].toArray()) {
+                    const QRect r = refToMerge(mv.toString());
+                    if (r.isValid()) mg.push_back(r);
+                }
+                m->setMerges(mg);
+            }
+            if (so.contains("colw")) {
+                QHash<int, int> cw;
+                const QJsonObject o = so["colw"].toObject();
+                for (auto it = o.begin(); it != o.end(); ++it)
+                    cw.insert(it.key().toInt(), it.value().toInt());
+                m->setColWidths(cw);
+            }
+            if (so.contains("rowh")) {
+                QHash<int, int> rh;
+                const QJsonObject o = so["rowh"].toObject();
+                for (auto it = o.begin(); it != o.end(); ++it)
+                    rh.insert(it.key().toInt(), it.value().toInt());
+                m->setRowHeights(rh);
+            }
+            if (so.contains("charts")) {
+                QVector<ChartSpec> cs;
+                for (const QJsonValue& cv : so["charts"].toArray()) {
+                    const QJsonObject co = cv.toObject();
+                    ChartSpec s;
+                    s.type  = chartTypeFromInt(co["t"].toInt());
+                    s.range = QRect(QPoint(co["c1"].toInt(), co["r1"].toInt()),
+                                    QPoint(co["c2"].toInt(), co["r2"].toInt()));
+                    s.geom  = QRect(co["x"].toInt(), co["y"].toInt(),
+                                    co["w"].toInt(), co["h"].toInt());
+                    cs.push_back(s);
+                }
+                m->setCharts(cs);
             }
         }
+        m_activeSheet = root.value("activeSheet").toInt(0);
+    } else if (root.contains("cells")) {
+        // ── v1 single-sheet ──────────────────────────────────────────────
+        jsonToCells(createSheet("Sheet1"), root["cells"].toArray());
     } else {
         // ── CSV fallback ─────────────────────────────────────────────────
+        SpreadsheetModel* m = createSheet("Sheet1");
         const QStringList lines = content.split('\n', Qt::SkipEmptyParts);
         for (int row = 0; row < lines.size() && row < SpreadsheetModel::NUM_ROWS; ++row) {
             const QStringList cols = lines[row].split(',');
             for (int col = 0; col < cols.size() && col < SpreadsheetModel::NUM_COLS; ++col) {
                 const QString v = cols[col].trimmed();
-                if (!v.isEmpty())
-                    m_model->setData(m_model->index(row, col), v, Qt::EditRole);
+                if (!v.isEmpty()) m->applyCellRaw(col, row, Cell{v, CellFormat{}});
             }
         }
     }
 
+    if (m_sheets.isEmpty()) createSheet("Sheet1");
+    if (m_activeSheet < 0 || m_activeSheet >= m_sheets.size()) m_activeSheet = 0;
+
+    for (auto* s : m_sheets) { s->notifyAllChanged(); s->undoStack()->clear(); }
     m_ignoreChange = false;
+
+    switchToSheet(m_activeSheet);
 
     m_currentPath = path;
     m_dirty       = false;

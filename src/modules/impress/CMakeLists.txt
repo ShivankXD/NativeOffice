@@ -16,6 +16,8 @@ add_library(ImpressModule STATIC
     ImpressStatusBar.h
     PresentModeWindow.cpp
     PresentModeWindow.h
+    PptxImport.cpp
+    PptxImport.h
 )
 
 target_include_directories(ImpressModule PUBLIC

@@ -166,4 +166,54 @@ QMenu::icon {
     .arg(cssColor(t.accentLight));  // %11 default button hover
 }
 
+QString ThemeManager::inputDialogStyleSheet() {
+    return QStringLiteral(R"(
+QInputDialog, QDialog {
+    background-color: #FFFFFF;
+}
+QLabel {
+    background: transparent;
+    color: #1C1E26;
+    font-size: 13px;
+}
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {
+    background-color: #FFFFFF;
+    color: #1C1E26;
+    border: 1px solid #D5D8DF;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+    selection-background-color: #E8372A;
+    selection-color: #FFFFFF;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {
+    border: 1px solid #E8372A;
+}
+QPushButton {
+    background-color: #FFFFFF;
+    color: #1C1E26;
+    border: 1px solid #D5D8DF;
+    border-radius: 6px;
+    padding: 6px 18px;
+    min-width: 84px;
+    font-size: 13px;
+    font-weight: 500;
+}
+QPushButton:hover {
+    background-color: #F5F6FA;
+    border-color: #E8372A;
+}
+QPushButton:default {
+    background-color: #E8372A;
+    color: #FFFFFF;
+    border-color: #E8372A;
+    font-weight: 600;
+}
+QPushButton:default:hover {
+    background-color: #FF5247;
+    border-color: #FF5247;
+}
+)");
+}
+
 } // namespace NativeOffice

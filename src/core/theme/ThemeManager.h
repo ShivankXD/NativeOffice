@@ -65,6 +65,12 @@ public:
     // Generates a full Qt stylesheet for the application window
     [[nodiscard]] QString applicationStyleSheet() const;
 
+    // Self-contained stylesheet for prompt/input dialogs (QInputDialog and
+    // friends). Set it directly on the dialog instance so it overrides any
+    // inherited app/module stylesheet — guarantees a light surface with
+    // high-contrast, visible text in the input field.
+    [[nodiscard]] static QString inputDialogStyleSheet();
+
     // Helper: build a CSS color string from a QColor
     [[nodiscard]] static QString cssColor(const QColor& c);
 

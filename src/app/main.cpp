@@ -46,9 +46,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
 static const QString NOFF_FILTER =
     "NativeOffice Document (*.noff);;HTML Document (*.html);;All Files (*)";
+// Open: accept Excel, NativeOffice and CSV spreadsheets.
 static const QString CALC_FILTER =
+    "Spreadsheets (*.xlsx *.noff *.csv);;Excel Workbook (*.xlsx);;"
     "NativeOffice Spreadsheet (*.noff);;CSV File (*.csv);;All Files (*)";
+// Save As: Excel (.xlsx) is offered first so it is the default format.
+static const QString CALC_SAVE_FILTER =
+    "Excel Workbook (*.xlsx);;NativeOffice Spreadsheet (*.noff);;CSV File (*.csv)";
 static const QString IMPRESS_FILTER =
+    "NativeOffice Presentation (*.noff);;All Files (*)";
+// Save As: PowerPoint (.pptx) is offered first so it is the default format.
+static const QString IMPRESS_SAVE_FILTER =
+    "PowerPoint Presentation (*.pptx);;NativeOffice Presentation (*.noff);;All Files (*)";
+// Open: accept PowerPoint and NativeOffice presentations.
+static const QString IMPRESS_OPEN_FILTER =
+    "Presentations (*.pptx *.noff);;PowerPoint Presentation (*.pptx);;"
     "NativeOffice Presentation (*.noff);;All Files (*)";
 static const QString PDF_FILTER =
     "PDF Document (*.pdf)";
@@ -178,14 +190,21 @@ public:
     NativeOffice::CalcModule* calc() const { return m_calc; }
 
     bool saveAs() {
-        const QString path = QFileDialog::getSaveFileName(
+        QString selectedFilter;
+        QString path = QFileDialog::getSaveFileName(
             this, "Save As…",
             m_calc->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/Untitled.noff"
+                ? QDir::homePath() + "/Untitled.xlsx"
                 : m_calc->currentFilePath(),
-            CALC_FILTER);
+            CALC_SAVE_FILTER, &selectedFilter);
 
         if (path.isEmpty()) return false;
+        // Append the extension matching the chosen filter if the user omitted one.
+        if (QFileInfo(path).suffix().isEmpty()) {
+            if      (selectedFilter.contains("noff")) path += ".noff";
+            else if (selectedFilter.contains("csv"))  path += ".csv";
+            else                                       path += ".xlsx";
+        }
         return performSave(path);
     }
 
@@ -266,12 +285,13 @@ public:
     NativeOffice::ImpressModule* impress() const { return m_impress; }
 
     bool saveAs() {
-        const QString path = QFileDialog::getSaveFileName(
-            this, "Save As…",
+        const QString suggested =
             m_impress->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/Untitled.noff"
-                : m_impress->currentFilePath(),
-            IMPRESS_FILTER);
+                ? QDir::homePath() + "/Untitled.pptx"
+                : QFileInfo(m_impress->currentFilePath()).absolutePath() + "/"
+                      + QFileInfo(m_impress->currentFilePath()).completeBaseName() + ".pptx";
+        const QString path = QFileDialog::getSaveFileName(
+            this, "Save As…", suggested, IMPRESS_SAVE_FILTER);
 
         if (path.isEmpty()) return false;
         return performSave(path);
@@ -313,7 +333,12 @@ protected:
 
 private:
     bool performSave(const QString& path) {
-        if (!m_impress->saveToPath(path)) {
+        // Route by extension: a .pptx path is exported as a PowerPoint package;
+        // anything else is saved as the native .noff document.
+        const bool ok = path.endsWith(".pptx", Qt::CaseInsensitive)
+                            ? m_impress->exportPptxTo(path)
+                            : m_impress->saveToPath(path);
+        if (!ok) {
             QMessageBox::critical(this, "Save Failed",
                 "Could not write to:\n" + path);
             return false;
@@ -497,7 +522,15 @@ static CalcWindow* createCalcWindow(const QString& filePath) {
     auto* actClose = fileMenu->addAction("&Close");
     actClose->setShortcut(QKeySequence::Close);
 
-    mb->addMenu("&Edit");
+    auto* editMenu = mb->addMenu("&Edit");
+    editMenu->addAction(calc->undoAction());
+    editMenu->addAction(calc->redoAction());
+    editMenu->addSeparator();
+    editMenu->addAction(calc->cutAction());
+    editMenu->addAction(calc->copyAction());
+    editMenu->addAction(calc->pasteAction());
+    editMenu->addAction(calc->deleteAction());
+
     mb->addMenu("&View");
     mb->addMenu("&Help");
 
@@ -625,8 +658,19 @@ QMenuBar::item:pressed {
         const QString path = QFileDialog::getOpenFileName(
             win, "Open Presentation",
             QDir::homePath(),
-            IMPRESS_FILTER);
-        if (!path.isEmpty()) {
+            IMPRESS_OPEN_FILTER);
+        if (path.isEmpty()) return;
+        // If this window is still the untouched, untitled, single-slide blank
+        // that opens with the app, load the file into it instead of spawning a
+        // second window (which would leave the empty one lingering).
+        auto* im = win->impress();
+        const bool fresh = im->currentFilePath().isEmpty() && im->slideCount() <= 1;
+        if (fresh) {
+            if (im->loadFromPath(path))
+                NativeOffice::RecentFilesManager::instance().addFile(path, "Impress");
+            else
+                QMessageBox::critical(win, "Open Failed", "Could not read:\n" + path);
+        } else {
             createImpressWindow(path)->show();
         }
     });

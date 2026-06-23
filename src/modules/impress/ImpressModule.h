@@ -40,6 +40,7 @@ class QTabWidget;
 class QTimer;
 class QListWidget;
 class QLabel;
+class QToolButton;
 class QVariantAnimation;
 
 namespace NativeOffice {
@@ -180,6 +181,10 @@ private:
     // ── Effect-preview overlay (sits over the canvas during a preview) ────
     QLabel*            m_previewOverlay { nullptr };
     QVariantAnimation* m_previewAnim    { nullptr };
+
+    // ── Always-visible quick-access undo/redo (in the top brand bar) ──────
+    QToolButton* m_brandUndoBtn { nullptr };
+    QToolButton* m_brandRedoBtn { nullptr };
 };
 
 } // namespace NativeOffice

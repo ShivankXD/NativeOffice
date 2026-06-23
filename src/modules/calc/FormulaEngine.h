@@ -1,27 +1,36 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// FormulaEngine.h  (Sprint 4 → Sprint 9)
-// Stateless formula evaluator for NativeOffice Calc.
+// FormulaEngine.h  (Sprint 4 → Sprint 10)
+// Value-based formula evaluator for NativeOffice Calc.
 //
 // Supported syntax (case-insensitive cell refs and function names):
 //   Plain text / numbers  → returned as-is
-//   =<expr>               → evaluated arithmetic expression
+//   =<expr>               → evaluated expression
 //
-// Expression grammar (recursive descent):
-//   expr     = term     { ('+' | '-') term     }
-//   term     = factor   { ('*' | '/') factor   }
-//   factor   = number | funcCall | cellRef | '(' expr ')' | unary '-' factor
-//   funcCall = IDENT '(' range { ',' range } ')'        (e.g. SUM, AVERAGE)
-//   range    = cellRef ':' cellRef                       (e.g. A1:A5, A1:C3)
-//   number   = ['-'] digit+ ['.' digit+]
-//   cellRef  = [A-Za-z]+ [0-9]+                         (e.g. A1, BC3, Z100)
+// Expression grammar (recursive descent, lowest → highest precedence):
+//   expr     = concat
+//   concat   = compare { '&' compare }                  (text concatenation)
+//   compare  = addsub  { ('='|'<>'|'<='|'>='|'<'|'>') addsub }
+//   addsub   = muldiv  { ('+'|'-') muldiv }
+//   muldiv   = power   { ('*'|'/') power }
+//   power    = unary   { '^' unary }
+//   unary    = ('-'|'+') unary | primary
+//   primary  = number | string | TRUE | FALSE
+//            | funcCall | cellRef | '(' expr ')'
+//   funcCall = IDENT '(' [ arg { ',' arg } ] ')'
+//   arg      = range | expr
+//   range    = cellRef ':' cellRef
 //
-// Cell references are resolved via a callback so the engine stays decoupled
-// from any particular model or storage backend.
-//
-// Error tokens:
-//   #ERR  — parse failure, divide-by-zero, AVERAGE with no numeric cells
-//   #CIRC — circular reference (detected in SpreadsheetModel, not here)
+// Values are numbers, text, booleans, or error tokens. Computational errors
+// propagate as values so functions like IFERROR can inspect them:
+//   #DIV/0!  divide by zero
+//   #VALUE!  wrong value type (e.g. text where a number is needed)
+//   #N/A     value not available
+//   #NAME?   unknown function name
+//   #NUM!    numeric overflow / domain error (e.g. SQRT of negative)
+//   #REF!    invalid cell reference
+//   #ERR     generic parse failure
+//   #CIRC    circular reference (detected in SpreadsheetModel, not here)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QString>
@@ -33,10 +42,12 @@ namespace NativeOffice {
 
 class FormulaEngine {
 public:
-    // Callback type: given column-index (0-based) and row-index (0-based),
-    // return the raw string stored in that cell (not the evaluated value,
-    // to avoid infinite recursion — the engine recurses itself when needed).
-    using CellLookup = std::function<QString(int col, int row)>;
+    // Resolve a cell reference to its already-EVALUATED display value.
+    // 'sheet' is empty for the current sheet, or a sheet name for cross-sheet
+    // references (e.g. Sheet2!A1). Returning the evaluated value (rather than
+    // raw content) means the engine never self-recurses — the model's
+    // displayValue() drives recursion and per-cell circular detection.
+    using CellLookup = std::function<QString(const QString& sheet, int col, int row)>;
 
     FormulaEngine() = default;
 
@@ -45,50 +56,87 @@ public:
     [[nodiscard]] QString evaluate(const QString&    input,
                                    const CellLookup& lookup) const;
 
-    // Parse a cell reference string like "A1", "BC23" into (col, row) indices.
-    // col and row are 0-based.  Returns false if the string is not a valid ref.
+    // ── Static address helpers ────────────────────────────────────────────
     [[nodiscard]] static bool parseCellRef(const QString& ref, int& col, int& row);
-
-    // Convert a 0-based column index to its letter label (0→"A", 25→"Z", 26→"AA").
     [[nodiscard]] static QString colLabel(int col);
-
-    // Convert a 0-based row index to its display label (0→"1", 99→"100").
     [[nodiscard]] static QString rowLabel(int row);
-
-    // Convert a (col, row) pair to a cell address string, e.g. (0,0) → "A1".
     [[nodiscard]] static QString cellAddress(int col, int row);
-
-    // ── Sprint 9: Range helpers ───────────────────────────────────────────
-    // Expand a range string like "A1:A5" into individual cell addresses.
-    // Handles vertical (A1:A5), horizontal (A1:C1), and rectangular (A1:C5).
-    // Returns an empty list if the input is not a valid range.
     [[nodiscard]] static QStringList expandRange(const QString& rangeStr);
 
 private:
-    // ── Recursive-descent parser internals ────────────────────────────────
+    // ── Value model ───────────────────────────────────────────────────────
+    struct Value {
+        enum Kind { Number, Text, Boolean, Error };
+        Kind    kind { Number };
+        double  num  { 0.0 };
+        QString text;            // payload for Text / Error (token)
+
+        static Value number(double n)        { return {Number,  n, {}}; }
+        static Value boolean(bool b)         { return {Boolean, b ? 1.0 : 0.0, {}}; }
+        static Value string(const QString& s){ return {Text,    0.0, s}; }
+        static Value error(const QString& e) { return {Error,   0.0, e}; }
+        static Value empty()                 { return {Text,    0.0, QString()}; }
+
+        bool isError() const { return kind == Error; }
+    };
+
+    // A function argument: either a flattened range or a single scalar value.
+    struct Arg {
+        bool           isRange { false };
+        QVector<Value> values;          // range: every non-empty cell; scalar: one
+        // 2D grid of the range INCLUDING empties (rows × cols), for lookup
+        // functions (VLOOKUP/HLOOKUP/INDEX/MATCH). Empty for scalar args.
+        QVector<QVector<Value>> grid;
+    };
+
+    // Number-formatting of a final Value into the display string.
+    [[nodiscard]] QString formatValue(const Value& v) const;
+
+    // Evaluate a raw cell string (or formula) to a Value (used for recursion).
+    [[nodiscard]] Value evaluateValue(const QString& input,
+                                      const CellLookup& lookup) const;
+
+    // ── Recursive-descent parser ──────────────────────────────────────────
     struct Parser {
-        const QString&    src;
-        int               pos  { 0 };
-        const CellLookup& lookup;
+        const QString&       src;
+        int                  pos { 0 };
+        const CellLookup&    lookup;
         const FormulaEngine& engine;
-        bool              error { false };
+        bool                 syntaxError { false };   // malformed input → #ERR
 
-        double parseExpr();
-        double parseTerm();
-        double parseFactor();
-        double parseNumber();
-        double parseCellRef();
+        Value parseExpr();
+        Value parseConcat();
+        Value parseCompare();
+        Value parseAddSub();
+        Value parseMulDiv();
+        Value parsePower();
+        Value parseUnary();
+        Value parsePrimary();
 
-        // Sprint 9: function call & range support
-        double parseFuncCall(const QString& funcName);
-        QVector<double> resolveRange(const QString& startRef, const QString& endRef);
+        Value parseNumber();
+        Value parseString();
+        Value parseRefToValue(const QString& sheet, const QString& token);
+        Value parseFuncCall(const QString& name);
+        Arg   parseArg();
 
         void   skipWs();
+        QChar  peekCh() const;
         char   peek() const;
         char   consume();
         bool   match(char c);
+        QString readRefToken();                  // [A-Za-z]+[0-9]+ or empty
+        QString readQualifiedRef(QString& sheet);// optional "Sheet!" prefix + ref
     };
+
+    // Function dispatch. Returns Error("#NAME?") for unknown names.
+    static Value callFunction(const QString& upperName, QVector<Arg>& args);
+
+    // Coerce a Value to a number; sets err to a #VALUE!/#DIV etc. on failure.
+    static double toNumber(const Value& v, bool& ok);
+    static QString toText(const Value& v);
+
+    // Recursion guard against circular references / runaway chains.
+    mutable int m_evalDepth { 0 };
 };
 
 } // namespace NativeOffice
-

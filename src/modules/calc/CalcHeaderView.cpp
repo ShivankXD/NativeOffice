@@ -32,38 +32,44 @@ void CalcHeaderView::paintSection(QPainter*    painter,
     const bool isHorizontal = (orientation() == Qt::Horizontal);
     const bool highlighted  = m_highlighted.contains(logicalIndex);
 
-    // ── Background ─────────────────────────────────────────────────────────
-    QColor bgColor;
-    if (highlighted) {
-        bgColor = QColor("#E8372A");               // Scarlet active
-    } else if (isHorizontal) {
-        bgColor = QColor("#2C3140");               // Charcoal col header
-    } else {
-        bgColor = QColor("#343848");               // Slightly lighter row header
-    }
-    painter->fillRect(rect, bgColor);
+    // Excel palette: light-gray headers, green highlight for the selected
+    // row/column, a green accent line on the inner edge, thin gray borders.
+    const QColor kHeaderBg   ("#F5F5F5");
+    const QColor kSelectedBg ("#CFE7DA");   // light green
+    const QColor kBorder     ("#D4D4D4");
+    const QColor kText       ("#5A5A5A");
+    const QColor kSelText    ("#0E703C");   // Excel green
+    const QColor kAccent     ("#107C41");   // Excel green accent
 
-    // ── Bottom/right border ─────────────────────────────────────────────────
-    painter->setPen(QPen(QColor("#1A1F2E"), 1));
-    if (isHorizontal) {
-        painter->drawLine(rect.bottomLeft(), rect.bottomRight());
-        painter->drawLine(rect.topRight(), rect.bottomRight());
-    } else {
-        painter->drawLine(rect.topRight(), rect.bottomRight());
-        painter->drawLine(rect.bottomLeft(), rect.bottomRight());
+    // ── Background ─────────────────────────────────────────────────────────
+    painter->fillRect(rect, highlighted ? kSelectedBg : kHeaderBg);
+
+    // ── Thin gray borders (right + bottom) ───────────────────────────────────
+    painter->setPen(QPen(kBorder, 1));
+    painter->drawLine(rect.topRight(),   rect.bottomRight());
+    painter->drawLine(rect.bottomLeft(), rect.bottomRight());
+
+    // ── Green accent line along the grid-facing edge when selected ────────────
+    if (highlighted) {
+        painter->setPen(QPen(kAccent, 2));
+        if (isHorizontal) {
+            const int y = rect.bottom() - 1;
+            painter->drawLine(rect.left(), y, rect.right(), y);
+        } else {
+            const int x = rect.right() - 1;
+            painter->drawLine(x, rect.top(), x, rect.bottom());
+        }
     }
 
     // ── Label ───────────────────────────────────────────────────────────────
     QFont f = painter->font();
     f.setFamily("Segoe UI");
-    f.setPointSize(10);
-    f.setWeight(highlighted ? QFont::Bold : QFont::Medium);
+    f.setPointSize(9);
+    f.setWeight(highlighted ? QFont::DemiBold : QFont::Normal);
     painter->setFont(f);
 
-    painter->setPen(highlighted ? Qt::white
-                                : QColor(255, 255, 255, 200));
+    painter->setPen(highlighted ? kSelText : kText);
 
-    // Leave a 2 px inset so text doesn't touch the border
     const QRect textRect = rect.adjusted(2, 1, -2, -1);
     const QString label  = model()->headerData(logicalIndex, orientation()).toString();
     painter->drawText(textRect, Qt::AlignCenter, label);

@@ -61,6 +61,7 @@ public:
     static constexpr qreal SLIDE_H = 540.0;
 
     explicit SlideScene(QObject* parent = nullptr);
+    ~SlideScene() override;
 
     // Populate the scene from a SlideData object (used when switching slides)
     void loadFromData(const SlideData& data);
@@ -122,6 +123,7 @@ public:
     // slide-show window can read it back without index correlation.
     static constexpr int AnimationKey = 0;
     static constexpr int HyperlinkKey = 1;   // QString URL stored on each item
+    static constexpr int LockedKey    = 2;   // bool: non-movable backdrop element
     void setSelectedAnimation(ItemAnimation anim);
     [[nodiscard]] ItemAnimation selectedAnimation() const;
     [[nodiscard]] bool hasSelection() const;

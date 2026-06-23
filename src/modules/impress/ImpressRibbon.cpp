@@ -585,15 +585,8 @@ QWidget* ImpressRibbon::buildHomeTab() {
     layout->setContentsMargins(8, 4, 8, 2);
     layout->setSpacing(0);
 
-    // ── Quick access: undo / redo (no group caption; hover shows the name) ─
-    m_btnUndo = makeIconBtn(undoIcon(), "Undo");
-    m_btnRedo = makeIconBtn(redoIcon(), "Redo");
-    m_btnUndo->setEnabled(false);
-    m_btnRedo->setEnabled(false);
-    connect(m_btnUndo, &QToolButton::clicked, this, &ImpressRibbon::undoRequested);
-    connect(m_btnRedo, &QToolButton::clicked, this, &ImpressRibbon::redoRequested);
-    layout->addWidget(makeGroup("", { m_btnUndo, m_btnRedo }));
-    layout->addWidget(makeSeparator());
+    // Undo / redo now live in the always-visible top brand bar (so they work
+    // regardless of which ribbon tab is active), not here in the Home tab.
 
     // ── Slides group ────────────────────────────────────────────────────
     auto* btnNew = makeCmdBtn("New Slide", "Add a new slide", 104);
@@ -1270,8 +1263,10 @@ void ImpressRibbon::resetInsertMode() {
 }
 
 void ImpressRibbon::setUndoRedoEnabled(bool undoEnabled, bool redoEnabled) {
-    m_btnUndo->setEnabled(undoEnabled);
-    m_btnRedo->setEnabled(redoEnabled);
+    // Undo/redo buttons were moved to the brand bar; keep this null-safe in case
+    // anything still calls it.
+    if (m_btnUndo) m_btnUndo->setEnabled(undoEnabled);
+    if (m_btnRedo) m_btnRedo->setEnabled(redoEnabled);
 }
 
 void ImpressRibbon::syncCharFormat(bool bold, bool italic, bool underline, bool strike,

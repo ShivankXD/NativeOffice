@@ -11,6 +11,7 @@
 #include "OutlineWidget.h"
 #include "SlideScene.h"
 #include "PresentModeWindow.h"
+#include "PptxImport.h"
 #include "core/theme/ThemeManager.h"
 
 #include <QHBoxLayout>
@@ -32,12 +33,15 @@
 #include <QScrollArea>
 #include <QGridLayout>
 #include <QToolButton>
+#include <QShortcut>
 #include <QIcon>
 #include <QPixmap>
 #include <QSizePolicy>
 #include <QMessageBox>
 #include <QResizeEvent>
+#include <QPaintEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPdfWriter>
 #include <QFileDialog>
 #include <QDir>
@@ -219,9 +223,10 @@ void ImpressModule::buildUi() {
     connect(m_ribbon, &ImpressRibbon::undoRequested, this, &ImpressModule::undo);
     connect(m_ribbon, &ImpressRibbon::redoRequested, this, &ImpressModule::redo);
 
-    // Keep the ribbon's undo/redo buttons enabled in step with the stack
+    // Keep the always-visible brand-bar undo/redo buttons in step with the stack.
     auto refreshUndoButtons = [this] {
-        m_ribbon->setUndoRedoEnabled(m_undoStack->canUndo(), m_undoStack->canRedo());
+        if (m_brandUndoBtn) m_brandUndoBtn->setEnabled(m_undoStack->canUndo());
+        if (m_brandRedoBtn) m_brandRedoBtn->setEnabled(m_undoStack->canRedo());
     };
     connect(m_undoStack, &QUndoStack::canUndoChanged, this, [refreshUndoButtons](bool){ refreshUndoButtons(); });
     connect(m_undoStack, &QUndoStack::canRedoChanged, this, [refreshUndoButtons](bool){ refreshUndoButtons(); });
@@ -480,41 +485,164 @@ void ImpressModule::buildUi() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Brand tray — logo + tagline pinned top-left on a translucent white card
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Full-width brand banner ──────────────────────────────────────────────────
+// A custom-painted bar that spans the whole window width: a white surface with
+// soft decorative clouds, a dot grid and a ring on the right, and the logo card
+// + rocket + tagline on the left.
+namespace {
+// Undo / redo glyphs (a curved arrow + arrowhead), matching the ribbon icons.
+QIcon navIcon(bool redo) {
+    QPixmap pm(40, 40);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    QPen pen(QColor("#2C3140"), 2.6);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    QPainterPath path;
+    QPolygonF h;
+    if (!redo) {
+        path.moveTo(12, 18); path.cubicTo(17, 9, 28, 10, 30, 21);
+        h << QPointF(7, 15) << QPointF(16, 14) << QPointF(11, 23);
+    } else {
+        path.moveTo(28, 18); path.cubicTo(23, 9, 12, 10, 10, 21);
+        h << QPointF(33, 15) << QPointF(24, 14) << QPointF(29, 23);
+    }
+    p.drawPath(path);
+    p.setBrush(QColor("#2C3140"));
+    p.setPen(Qt::NoPen);
+    p.drawPolygon(h);
+    return QIcon(pm);
+}
+
+class BrandBar : public QWidget {
+public:
+    explicit BrandBar(QWidget* parent = nullptr) : QWidget(parent) {}
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+
+        const double W = width(), H = height();
+        p.fillRect(rect(), QColor("#FFFFFF"));
+
+        p.setPen(Qt::NoPen);
+
+        // Soft cloud cluster anchored to the bottom-right corner (img1 motif).
+        p.setBrush(QColor("#CFE0F8"));
+        p.drawEllipse(QRectF(W - 160, H - 18, 56, 56));
+        p.drawEllipse(QRectF(W - 110, H - 42, 88, 88));
+        p.drawEllipse(QRectF(W - 40,  H - 20, 64, 64));
+        p.setBrush(QColor("#B7CFF4"));
+        p.drawEllipse(QRectF(W - 118, H - 10, 52, 52));
+        p.drawEllipse(QRectF(W - 64,  H - 16, 60, 60));
+
+        // A solid accent dot resting just above the cloud.
+        p.setBrush(QColor("#7FAEEE"));
+        p.drawEllipse(QRectF(W - 125, 8, 10, 10));
+
+        // Thin teal ring near the top-right.
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor("#54C7C2"), 2));
+        p.drawEllipse(QRectF(W - 35, 6, 14, 14));
+
+        // A small 3×3 grid of dots to the left of the cloud.
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#AFC3E6"));
+        const double gx = W - 212.0, gy = (H - 22) / 2.0 + 1.0, step = 10.0;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                p.drawEllipse(QRectF(gx + c * step - 2, gy + r * step - 2, 4, 4));
+
+        // Bottom hairline separator.
+        p.setPen(QPen(QColor("#E2E4E9"), 1));
+        p.drawLine(QPointF(0, H - 0.5), QPointF(W, H - 0.5));
+    }
+};
+} // namespace
+
 QWidget* ImpressModule::buildBrandBar() {
-    auto* bar = new QWidget(this);
+    auto* bar = new BrandBar(this);
     bar->setObjectName("impressBrandBar");
-    bar->setFixedHeight(48);
+    bar->setFixedHeight(54);
+    bar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     auto* barLayout = new QHBoxLayout(bar);
-    barLayout->setContentsMargins(12, 6, 12, 6);
-    barLayout->setSpacing(0);
+    barLayout->setContentsMargins(16, 0, 16, 0);
+    barLayout->setSpacing(12);
 
-    // The translucent white "tray" that the logo + text sit on.
-    auto* tray = new QWidget(bar);
-    tray->setObjectName("impressBrandTray");
+    // Logo (logo.jpg) inside a rounded white card.
+    auto* card = new QFrame(bar);
+    card->setObjectName("impressBrandLogoCard");
+    auto* cardLayout = new QHBoxLayout(card);
+    cardLayout->setContentsMargins(9, 4, 9, 4);
+    cardLayout->setSpacing(0);
 
-    auto* trayLayout = new QHBoxLayout(tray);
-    trayLayout->setContentsMargins(10, 4, 16, 4);
-    trayLayout->setSpacing(10);
-
-    // Logo (logo.jpg) on top-left of the tray.
-    auto* logo = new QLabel(tray);
+    auto* logo = new QLabel(card);
     logo->setObjectName("impressBrandLogo");
     QPixmap pm(":/assets/logo.jpg");
     if (!pm.isNull()) {
-        logo->setPixmap(pm.scaledToHeight(28, Qt::SmoothTransformation));
+        logo->setPixmap(pm.scaledToHeight(26, Qt::SmoothTransformation));
     } else {
         logo->setText("NP");   // graceful fallback if the resource is missing
     }
     logo->setAlignment(Qt::AlignCenter);
+    cardLayout->addWidget(logo);
 
-    auto* tagline = new QLabel("NativeOffice is your go to OfficeSuite!", tray);
+    // Vertical divider.
+    auto* divider = new QFrame(bar);
+    divider->setObjectName("impressBrandDivider");
+    divider->setFrameShape(QFrame::VLine);
+    divider->setFixedSize(1, 24);
+
+    // Rocket glyph.
+    auto* rocket = new QLabel(QString::fromUtf8("\xF0\x9F\x9A\x80"), bar);  // 🚀
+    rocket->setObjectName("impressBrandRocket");
+
+    // Tagline: bold product name + lighter strapline.
+    auto* tagline = new QLabel(bar);
     tagline->setObjectName("impressBrandText");
+    tagline->setTextFormat(Qt::RichText);
+    tagline->setText(
+        "<span style='color:#1A2233; font-weight:800;'>NativeOffice</span>"
+        "<span style='color:#5A6071;'>&nbsp;&nbsp;is your go to OfficeSuite!</span>");
 
-    trayLayout->addWidget(logo);
-    trayLayout->addWidget(tagline);
+    // Always-visible quick-access undo / redo (independent of the ribbon tab).
+    auto makeNavBtn = [bar](const QIcon& icon, const QString& tip,
+                            const QKeySequence& sc) {
+        auto* b = new QToolButton(bar);
+        b->setObjectName("impressBrandNavBtn");
+        b->setIcon(icon);
+        b->setIconSize(QSize(22, 22));
+        b->setToolTip(tip);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setFixedSize(32, 32);
+        b->setShortcut(sc);
+        b->setEnabled(false);
+        return b;
+    };
+    m_brandUndoBtn = makeNavBtn(navIcon(false), "Undo (Ctrl+Z)", QKeySequence::Undo);
+    m_brandRedoBtn = makeNavBtn(navIcon(true),  "Redo (Ctrl+Y)", QKeySequence::Redo);
+    connect(m_brandUndoBtn, &QToolButton::clicked, this, &ImpressModule::undo);
+    connect(m_brandRedoBtn, &QToolButton::clicked, this, &ImpressModule::redo);
 
-    barLayout->addWidget(tray, 0, Qt::AlignLeft);
+    auto* navDivider = new QFrame(bar);
+    navDivider->setObjectName("impressBrandDivider");
+    navDivider->setFrameShape(QFrame::VLine);
+    navDivider->setFixedSize(1, 24);
+
+    barLayout->addWidget(card, 0, Qt::AlignVCenter);
+    barLayout->addWidget(divider, 0, Qt::AlignVCenter);
+    barLayout->addWidget(rocket, 0, Qt::AlignVCenter);
+    barLayout->addWidget(tagline, 0, Qt::AlignVCenter);
+    barLayout->addSpacing(18);
+    barLayout->addWidget(navDivider, 0, Qt::AlignVCenter);
+    barLayout->addSpacing(8);
+    barLayout->addWidget(m_brandUndoBtn, 0, Qt::AlignVCenter);
+    barLayout->addWidget(m_brandRedoBtn, 0, Qt::AlignVCenter);
     barLayout->addStretch();
     return bar;
 }
@@ -554,9 +682,16 @@ QWidget* ImpressModule::buildCommentsPanel() {
 
     connect(addBtn, &QPushButton::clicked, this, [this] {
         if (m_currentIdx < 0) return;
-        bool ok = false;
-        const QString t = QInputDialog::getMultiLineText(this, "New Comment", "Comment:", "", &ok);
-        if (!ok || t.trimmed().isEmpty()) return;
+        QInputDialog dlg(this);
+        dlg.setWindowTitle("New Comment");
+        dlg.setLabelText("Comment:");
+        dlg.setInputMode(QInputDialog::TextInput);
+        dlg.setOption(QInputDialog::UsePlainTextEditForTextInput, true);
+        dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+        dlg.resize(420, 240);
+        if (dlg.exec() != QDialog::Accepted) return;
+        const QString t = dlg.textValue();
+        if (t.trimmed().isEmpty()) return;
         m_slideData[m_currentIdx].comments.push_back({ "You", t.trimmed() });
         refreshComments();
         if (!m_dirty) { m_dirty = true; emit documentModified(); }
@@ -1118,29 +1253,44 @@ void ImpressModule::applyStyles() {
 QWidget#impressModule {
     background-color: #E8E9ED;
 }
-QWidget#impressBrandBar {
-    background-color: #F3F4F6;
-    border-bottom: 1px solid #E2E4E9;
-}
-QWidget#impressBrandTray {
-    background-color: rgba(255, 255, 255, 0.65);
-    border: 1px solid rgba(255, 255, 255, 0.85);
-    border-radius: 9px;
+QFrame#impressBrandLogoCard {
+    background-color: #FFFFFF;
+    border: 1px solid #EDF0F6;
+    border-radius: 10px;
 }
 QLabel#impressBrandLogo {
     background: transparent;
-    border-radius: 6px;
     color: #E8372A;
     font-size: 14px;
     font-weight: 900;
     font-family: "Segoe UI", sans-serif;
-    min-width: 30px;
+    min-width: 26px;
+}
+QFrame#impressBrandDivider {
+    color: #DCE0E8;
+    background-color: #DCE0E8;
+    border: none;
+}
+QLabel#impressBrandRocket {
+    background: transparent;
+    font-size: 20px;
+    font-family: "Segoe UI Emoji", "Segoe UI", sans-serif;
+}
+QToolButton#impressBrandNavBtn {
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+}
+QToolButton#impressBrandNavBtn:hover {
+    background-color: #ECEEF3;
+}
+QToolButton#impressBrandNavBtn:pressed {
+    background-color: #DDE0E8;
 }
 QLabel#impressBrandText {
     background: transparent;
     color: #2C3140;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 15px;
     font-family: "Segoe UI", "Inter", sans-serif;
 }
 QWidget#impressBody {
@@ -2012,6 +2162,12 @@ bool ImpressModule::exportPptxTo(const QString& path) {
         return false;
     f.write(pkg);
     f.close();
+
+    // Saving to .pptx adopts that file as the working document (it is now the
+    // native format on disk), so a subsequent plain Save round-trips to it.
+    m_currentPath = path;
+    m_dirty       = false;
+    emit filePathChanged(path);
     return true;
 }
 
@@ -2309,6 +2465,7 @@ QJsonObject ImpressModule::deckToJson() const {
             if (item.shadow) itemObj["shadow"] = true;
             if (item.opacity < 1.0) itemObj["opacity"] = item.opacity;
             if (!item.hyperlink.isEmpty()) itemObj["hyperlink"] = item.hyperlink;
+            if (item.locked) itemObj["locked"] = true;
 
             itemsArray.append(itemObj);
         }
@@ -2396,6 +2553,7 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
             si.shadow    = itemObj["shadow"].toBool(false);
             si.opacity   = itemObj["opacity"].toDouble(1.0);
             si.hyperlink = itemObj["hyperlink"].toString();
+            si.locked    = itemObj["locked"].toBool(false);
 
             data.items.push_back(si);
         }
@@ -2426,6 +2584,32 @@ bool ImpressModule::saveToPath(const QString& path) {
 }
 
 bool ImpressModule::loadFromPath(const QString& path) {
+    // PowerPoint packages are ZIP archives beginning with the "PK" signature —
+    // import those via the .pptx reader instead of the JSON (.noff) parser.
+    {
+        QFile probe(path);
+        if (probe.open(QIODevice::ReadOnly)) {
+            const QByteArray magic = probe.read(2);
+            probe.close();
+            if (magic == QByteArray("PK")) {
+                std::vector<SlideData> slides;
+                if (!importPptx(path, slides) || slides.empty())
+                    return false;
+                m_ignoreChange = true;
+                clearDeck();
+                for (const auto& d : slides) createSlide(d);
+                m_ignoreChange = false;
+                if (!m_scenes.empty()) switchToSlide(0);
+                m_currentPath = path;
+                m_dirty       = false;
+                emit filePathChanged(path);
+                captureUndoBaseline();
+                m_undoStack->clear();
+                return true;
+            }
+        }
+    }
+
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
         return false;

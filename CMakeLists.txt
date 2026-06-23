@@ -33,6 +33,7 @@ find_package(Qt6 REQUIRED COMPONENTS
     Widgets
     Svg
     PrintSupport
+    Charts
 )
 
 qt_standard_project_setup()

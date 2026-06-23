@@ -147,6 +147,7 @@ struct SlideItem {
     bool          shadow    { false };  // soft drop shadow on this item
     qreal         opacity   { 1.0 };    // 0..1 object opacity
     QString       hyperlink;            // URL opened on click in slide show
+    bool          locked    { false };  // fixed backdrop: not movable/selectable
 
     // ── Table items ───────────────────────────────────────────────────────
     int                  rows  { 0 };
