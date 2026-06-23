@@ -271,6 +271,81 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CalcBanner — a slim full-width branded strip above the ribbon. Painted so it
+// adapts to any window width (logo + tagline pinned left, soft decorations right).
+// ─────────────────────────────────────────────────────────────────────────────
+class CalcBanner : public QWidget {
+public:
+    explicit CalcBanner(QWidget* parent = nullptr) : QWidget(parent) {
+        setObjectName("calcBanner");
+        setFixedHeight(44);
+    }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const int w = width(), h = height();
+        p.fillRect(rect(), QColor("#FFFFFF"));
+
+        // ── Right-side decorations (soft blue clouds, dots, circles) ───────────
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#E2EAF8"));
+        p.drawEllipse(QPointF(w - 70, h + 8), 40, 26);
+        p.drawEllipse(QPointF(w - 26, h + 10), 50, 32);
+        p.setBrush(QColor("#CFDcF4"));
+        p.drawEllipse(QPointF(w - 4, h + 6), 44, 28);
+        // 3×3 dot grid
+        p.setBrush(QColor("#C3C8D4"));
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                p.drawEllipse(QPointF(w - 188 + c * 6.5, h / 2.0 - 6.5 + r * 6.5), 1.5, 1.5);
+        // accent dots / ring
+        p.setBrush(QColor("#3B82F6"));
+        p.drawEllipse(QPointF(w - 150, h / 2.0 - 7), 3.4, 3.4);
+        p.setBrush(Qt::NoBrush);
+        QPen ring(QColor("#34B6A7")); ring.setWidthF(1.7); p.setPen(ring);
+        p.drawEllipse(QPointF(w - 128, h / 2.0 + 4), 5.5, 5.5);
+
+        // ── Left: logo tile "NP" ───────────────────────────────────────────────
+        const QRectF logo(12, (h - 28) / 2.0, 28, 28);
+        p.setPen(QPen(QColor("#DADDE4"), 1));
+        p.setBrush(Qt::white);
+        p.drawRoundedRect(logo, 7, 7);
+        QFont lf("Segoe UI"); lf.setBold(true); lf.setPixelSize(14); p.setFont(lf);
+        p.setPen(QColor("#2C3140"));
+        p.drawText(QRectF(logo.left() + 3, logo.top(), 13, logo.height()), Qt::AlignCenter, "N");
+        p.setPen(QColor("#E8372A"));
+        p.drawText(QRectF(logo.left() + 12, logo.top(), 13, logo.height()), Qt::AlignCenter, "P");
+
+        // divider
+        p.setPen(QPen(QColor("#E6E8ED"), 1));
+        p.drawLine(QPointF(50, 10), QPointF(50, h - 10));
+
+        // rocket
+        { QFont ef("Segoe UI Emoji"); ef.setPixelSize(16); p.setFont(ef);
+          p.setPen(QColor("#2C3140"));
+          p.drawText(QRectF(58, 0, 24, h), Qt::AlignVCenter | Qt::AlignLeft, QString::fromUtf8("\xF0\x9F\x9A\x80")); }
+
+        // title + tagline
+        QFont tf("Segoe UI"); tf.setBold(true); tf.setPixelSize(15); p.setFont(tf);
+        const QFontMetrics tfm(tf);
+        const int tx = 86;
+        p.setPen(QColor("#2C3140"));
+        p.drawText(QRectF(tx, 0, tfm.horizontalAdvance("NativeOffice") + 4, h),
+                   Qt::AlignVCenter | Qt::AlignLeft, "NativeOffice");
+        const int sx = tx + tfm.horizontalAdvance("NativeOffice") + 8;
+        QFont sf("Segoe UI"); sf.setPixelSize(13); p.setFont(sf);
+        p.setPen(QColor("#9097A6"));
+        p.drawText(QRectF(sx, 0, w - sx - 150, h),
+                   Qt::AlignVCenter | Qt::AlignLeft, "is your go to OfficeSuite!");
+
+        // bottom hairline
+        p.setPen(QPen(QColor("#E4E6EB"), 1));
+        p.drawLine(0, h - 1, w, h - 1);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CalcItemDelegate — paints each cell from the model's format roles. A custom
 // delegate is required because a QTableView::item stylesheet rule makes Qt's
 // stylesheet style ignore the model's BackgroundRole; here we paint fill, text
@@ -625,6 +700,7 @@ void CalcModule::buildUi() {
     // push the bottom tab bar off the window — make it yield to the fixed bars.
     m_tableView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
 
+    rootLayout->addWidget(new CalcBanner(this));   // full-width branded strip
     rootLayout->addWidget(m_ribbon);
     rootLayout->addWidget(fbarRow);
     rootLayout->addWidget(m_tableView, 1);
@@ -976,7 +1052,7 @@ static QString buildNumberCode(bool currency, bool percent, bool thousands, int 
 void CalcModule::buildRibbon() {
     m_ribbon = new QWidget(this);
     m_ribbon->setObjectName("calcRibbon");
-    m_ribbon->setFixedHeight(112);
+    m_ribbon->setFixedHeight(140);
 
     auto* rootV = new QVBoxLayout(m_ribbon);
     rootV->setContentsMargins(0, 0, 0, 0);
@@ -1023,12 +1099,12 @@ void CalcModule::buildRibbon() {
     auto group = [&](QHBoxLayout* pageLay, const QString& title) -> QHBoxLayout* {
         auto* g  = new QWidget(m_ribbon);
         auto* gv = new QVBoxLayout(g);
-        gv->setContentsMargins(4, 3, 4, 2);
-        gv->setSpacing(1);
+        gv->setContentsMargins(6, 3, 6, 2);
+        gv->setSpacing(2);
         auto* rowW = new QWidget(g);
         auto* row  = new QHBoxLayout(rowW);
         row->setContentsMargins(0, 0, 0, 0);
-        row->setSpacing(1);
+        row->setSpacing(3);
         auto* lbl = new QLabel(title, g);
         lbl->setObjectName("groupLabel");
         lbl->setAlignment(Qt::AlignHCenter);
@@ -1061,11 +1137,18 @@ void CalcModule::buildRibbon() {
         b->setObjectName("ribbonBig");
         b->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
         b->setIcon(calcIcon(icon));
-        b->setIconSize(QSize(18, 18));
+        b->setIconSize(QSize(20, 20));
         b->setText(wrap2(label));
         b->setToolTip(tip.isEmpty() ? label : tip);
         b->setCheckable(checkable);
         b->setFocusPolicy(Qt::NoFocus);
+        // Size the button to fit its widest text line so labels never elide.
+        { QFont mf("Segoe UI"); mf.setPixelSize(11);
+          const QFontMetrics fm(mf);
+          int wmax = 0;
+          for (const QString& line : b->text().split('\n'))
+              wmax = std::max(wmax, fm.horizontalAdvance(line));
+          b->setMinimumWidth(std::min(120, std::max(52, wmax + 14))); }
         return b;
     };
     // Small icon-only button (dense clusters).
@@ -1363,12 +1446,12 @@ void CalcModule::buildRibbon() {
             auto* ins = big("insert-cells", "Insert", "Insert cells, rows, columns or a sheet");
             ins->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(ins);
-            connect(m->addAction("Insert Row Above"),   &QAction::triggered, this, [this, curRow]{ m_model->insertRowAt(curRow()); });
-            connect(m->addAction("Insert Row Below"),   &QAction::triggered, this, [this, curRow]{ m_model->insertRowAt(curRow() + 1); });
-            connect(m->addAction("Insert Column Left"), &QAction::triggered, this, [this, curCol]{ m_model->insertColumnAt(curCol()); });
-            connect(m->addAction("Insert Column Right"),&QAction::triggered, this, [this, curCol]{ m_model->insertColumnAt(curCol() + 1); });
+            connect(mi(m, "insert-cells", "Insert Row Above"),   &QAction::triggered, this, [this, curRow]{ m_model->insertRowAt(curRow()); });
+            connect(mi(m, "insert-cells", "Insert Row Below"),   &QAction::triggered, this, [this, curRow]{ m_model->insertRowAt(curRow() + 1); });
+            connect(mi(m, "insert-cells", "Insert Column Left"), &QAction::triggered, this, [this, curCol]{ m_model->insertColumnAt(curCol()); });
+            connect(mi(m, "insert-cells", "Insert Column Right"),&QAction::triggered, this, [this, curCol]{ m_model->insertColumnAt(curCol() + 1); });
             m->addSeparator();
-            connect(m->addAction("Insert Sheet"),       &QAction::triggered, this, [this]{ addSheet(QString("Sheet%1").arg(m_sheets.size() + 1)); });
+            connect(mi(m, "table", "Insert Sheet"),       &QAction::triggered, this, [this]{ addSheet(QString("Sheet%1").arg(m_sheets.size() + 1)); });
             ins->setMenu(m);
             cellsG->addWidget(ins);
         }
@@ -1376,10 +1459,10 @@ void CalcModule::buildRibbon() {
             auto* del = big("delete-cells", "Delete", "Delete rows, columns or a sheet");
             del->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(del);
-            connect(m->addAction("Delete Row"),    &QAction::triggered, this, [this, curRow]{ m_model->deleteRowAt(curRow()); });
-            connect(m->addAction("Delete Column"), &QAction::triggered, this, [this, curCol]{ m_model->deleteColumnAt(curCol()); });
+            connect(mi(m, "delete-cells", "Delete Row"),    &QAction::triggered, this, [this, curRow]{ m_model->deleteRowAt(curRow()); });
+            connect(mi(m, "delete-cells", "Delete Column"), &QAction::triggered, this, [this, curCol]{ m_model->deleteColumnAt(curCol()); });
             m->addSeparator();
-            connect(m->addAction("Delete Sheet"),  &QAction::triggered, this, [this]{ deleteSheet(m_activeSheet); });
+            connect(mi(m, "delete-cells", "Delete Sheet"),  &QAction::triggered, this, [this]{ deleteSheet(m_activeSheet); });
             del->setMenu(m);
             cellsG->addWidget(del);
         }
@@ -1387,19 +1470,19 @@ void CalcModule::buildRibbon() {
             auto* fmt = big("format-cells", "Format", "Row height / column width / autofit");
             fmt->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(fmt);
-            connect(m->addAction("Row Height…"), &QAction::triggered, this, [this, curRow]{
+            connect(mi(m, "format-cells", "Row Height…"), &QAction::triggered, this, [this, curRow]{
                 bool ok=false; const int h = QInputDialog::getInt(this, "Row Height", "Height (px):",
                     m_tableView->rowHeight(curRow()), 8, 600, 1, &ok);
                 if (ok) { m_tableView->setRowHeight(curRow(), h); m_model->setRowHeight(curRow(), h); markDirty(); }
             });
-            connect(m->addAction("Column Width…"), &QAction::triggered, this, [this, curCol]{
+            connect(mi(m, "format-cells", "Column Width…"), &QAction::triggered, this, [this, curCol]{
                 bool ok=false; const int w = QInputDialog::getInt(this, "Column Width", "Width (px):",
                     m_tableView->columnWidth(curCol()), 8, 1000, 1, &ok);
                 if (ok) { m_tableView->setColumnWidth(curCol(), w); m_model->setColWidth(curCol(), w); markDirty(); }
             });
             m->addSeparator();
-            connect(m->addAction("AutoFit Row Height"),  &QAction::triggered, this, [this, curRow]{ m_tableView->resizeRowToContents(curRow()); });
-            connect(m->addAction("AutoFit Column Width"),&QAction::triggered, this, [this, curCol]{ m_tableView->resizeColumnToContents(curCol()); });
+            connect(mi(m, "format-cells", "AutoFit Row Height"),  &QAction::triggered, this, [this, curRow]{ m_tableView->resizeRowToContents(curRow()); });
+            connect(mi(m, "format-cells", "AutoFit Column Width"),&QAction::triggered, this, [this, curCol]{ m_tableView->resizeColumnToContents(curCol()); });
             fmt->setMenu(m);
             cellsG->addWidget(fmt);
         }
@@ -1413,7 +1496,7 @@ void CalcModule::buildRibbon() {
             auto* m = new QMenu(sum);
             for (const char* fn : {"SUM", "AVERAGE", "COUNT", "MAX", "MIN"}) {
                 const QString name = QString::fromUtf8(fn);
-                connect(m->addAction(name), &QAction::triggered, this, [this, name]{ insertFunction(name); });
+                connect(mi(m, "sigma", name), &QAction::triggered, this, [this, name]{ insertFunction(name); });
             }
             sum->setMenu(m);
             ed->addWidget(sum);
@@ -1423,8 +1506,8 @@ void CalcModule::buildRibbon() {
             auto* fill = small("fill", "Fill");
             fill->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(fill);
-            connect(m->addAction("Fill Down (Ctrl+D)"),  &QAction::triggered, this, [this]{ fillDown(); });
-            connect(m->addAction("Fill Right (Ctrl+R)"), &QAction::triggered, this, [this]{ fillRight(); });
+            connect(mi(m, "fill", "Fill Down (Ctrl+D)"),  &QAction::triggered, this, [this]{ fillDown(); });
+            connect(mi(m, "fill", "Fill Right (Ctrl+R)"), &QAction::triggered, this, [this]{ fillRight(); });
             fill->setMenu(m);
             addEd(fill);
         }
@@ -1432,9 +1515,9 @@ void CalcModule::buildRibbon() {
             auto* clr = small("clear", "Clear");
             clr->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(clr);
-            connect(m->addAction("Clear All"),      &QAction::triggered, this, [this]{ onClearFormatting(); deleteSelection(); });
-            connect(m->addAction("Clear Formats"),  &QAction::triggered, this, &CalcModule::onClearFormatting);
-            connect(m->addAction("Clear Contents"), &QAction::triggered, this, &CalcModule::deleteSelection);
+            connect(mi(m, "clear",        "Clear All"),      &QAction::triggered, this, [this]{ onClearFormatting(); deleteSelection(); });
+            connect(mi(m, "clear-format", "Clear Formats"),  &QAction::triggered, this, &CalcModule::onClearFormatting);
+            connect(mi(m, "delete-cells", "Clear Contents"), &QAction::triggered, this, &CalcModule::deleteSelection);
             clr->setMenu(m);
             addEd(clr);
         }
@@ -1442,9 +1525,9 @@ void CalcModule::buildRibbon() {
             auto* sf = small("sort-filter", "Sort & Filter");
             sf->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(sf);
-            connect(m->addAction("Sort A → Z"), &QAction::triggered, this, [this]{ sortByColumn(true); });
-            connect(m->addAction("Sort Z → A"), &QAction::triggered, this, [this]{ sortByColumn(false); });
-            connect(m->addAction("Filter"),     &QAction::triggered, this, [this]{ notImplemented("AutoFilter"); });
+            connect(mi(m, "sort-az", "Sort A → Z"), &QAction::triggered, this, [this]{ sortByColumn(true); });
+            connect(mi(m, "sort-za", "Sort Z → A"), &QAction::triggered, this, [this]{ sortByColumn(false); });
+            connect(mi(m, "filter",  "Filter"),     &QAction::triggered, this, [this]{ showColumnFilter(); });
             sf->setMenu(m);
             addEd(sf);
         }
@@ -1452,9 +1535,9 @@ void CalcModule::buildRibbon() {
             auto* fs = small("find", "Find & Select");
             fs->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(fs);
-            connect(m->addAction("Find… (Ctrl+F)"),    &QAction::triggered, this, &CalcModule::showFindDialog);
-            connect(m->addAction("Replace… (Ctrl+H)"), &QAction::triggered, this, &CalcModule::showReplaceDialog);
-            connect(m->addAction("Go To…"),            &QAction::triggered, this, [this]{ notImplemented("Go To"); });
+            connect(mi(m, "find",     "Find… (Ctrl+F)"),    &QAction::triggered, this, &CalcModule::showFindDialog);
+            connect(mi(m, "find",     "Replace… (Ctrl+H)"), &QAction::triggered, this, &CalcModule::showReplaceDialog);
+            connect(mi(m, "generic",  "Go To…"),            &QAction::triggered, this, [this]{ insertTextValue("Go To", "Cell (e.g. B5):"); });
             fs->setMenu(m);
             addEd(fs);
         }
@@ -1462,25 +1545,35 @@ void CalcModule::buildRibbon() {
         pl->addStretch(1);
     }
 
+    // Vertical stack of checkboxes inside a group.
+    auto checkColumn = [&](QHBoxLayout* into) {
+        auto* w = new QWidget(m_ribbon);
+        auto* v = new QVBoxLayout(w);
+        v->setContentsMargins(2, 1, 2, 1);
+        v->setSpacing(4);
+        into->addWidget(w);
+        return v;
+    };
+
     // ══ INSERT PAGE ══════════════════════════════════════════════════════════
     {
         QHBoxLayout* pl = newPage();
 
         QHBoxLayout* tables = group(pl, "Tables");
-        soonBig(tables, "pivot-table", "PivotTable");
-        soonBig(tables, "pivot-chart", "PivotChart");
-        soonBig(tables, "table",       "Table");
+        act(tables, "pivot-table", "Pivot\nTable", "Summarise the table (group & total) on a new sheet", [this]{ pivotSummary(false); });
+        act(tables, "pivot-chart", "Pivot\nChart", "Summarise the table and chart it", [this]{ pivotSummary(true); });
+        act(tables, "table",       "Table",        "Format the selection as a banded table", [this]{ formatAsTable(); });
 
-        QHBoxLayout* illus = group(pl, "Illustrations");
-        soonBig(illus, "picture",   "Pictures");
-        soonBig(illus, "camera",    "Screenshot");
-        soonBig(illus, "shapes",    "Shapes");
-        soonBig(illus, "icons-lib", "Icons");
+        QHBoxLayout* ill = group(pl, "Illustrations");
+        act(ill, "picture",   "Pictures",   "Insert a picture from a file", [this]{ insertImageObject(); });
+        act(ill, "camera",    "Screenshot", "Insert an image", [this]{ insertImageObject(); });
+        act(ill, "shapes",    "Shapes",     "Insert an image/shape", [this]{ insertImageObject(); });
+        act(ill, "icons-lib", "Icons",      "Insert an icon image", [this]{ insertImageObject(); });
 
         QHBoxLayout* textG = group(pl, "Text");
-        soonBig(textG, "wordart",     "WordArt");
-        soonBig(textG, "textbox",     "Text Box");
-        soonBig(textG, "file-object", "Object");
+        act(textG, "wordart",     "WordArt",  "Style the selection as bold coloured WordArt", [this]{ applyWordArt(); });
+        act(textG, "textbox",     "Text\nBox","Insert a floating text box", [this]{ insertTextBoxObject(); });
+        act(textG, "file-object", "Object",   "Insert a file path / object reference", [this]{ insertTextValue("Insert Object", "File path or text:"); });
 
         QHBoxLayout* charts = group(pl, "Charts");
         {
@@ -1488,96 +1581,65 @@ void CalcModule::buildRibbon() {
             cb->setPopupMode(QToolButton::MenuButtonPopup);
             connect(cb, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Column); });
             auto* m = new QMenu(cb);
-            struct { const char* label; ChartType t; } items[] = {
-                {"Column", ChartType::Column}, {"Bar", ChartType::Bar},
-                {"Line", ChartType::Line},     {"Area", ChartType::Area},
-                {"Pie", ChartType::Pie},       {"Scatter", ChartType::Scatter},
+            struct { const char* label; const char* icon; ChartType t; } items[] = {
+                {"Column","chart",ChartType::Column}, {"Bar","chart",ChartType::Bar},
+                {"Line","chart-line",ChartType::Line}, {"Area","chart-line",ChartType::Area},
+                {"Pie","chart-pie",ChartType::Pie}, {"Scatter","chart-scatter",ChartType::Scatter},
             };
             for (auto& it : items) {
                 const ChartType t = it.t;
-                connect(m->addAction(QString::fromUtf8(it.label)), &QAction::triggered,
+                connect(mi(m, it.icon, QString::fromUtf8(it.label)), &QAction::triggered,
                         this, [this, t]{ insertChart(t); });
             }
             cb->setMenu(m);
             charts->addWidget(cb);
         }
-        auto* lineB = big("chart-line", "Line", "Insert a line chart");
-        connect(lineB, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Line); });
-        charts->addWidget(lineB);
-        auto* pieB = big("chart-pie", "Pie", "Insert a pie chart");
-        connect(pieB, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Pie); });
-        charts->addWidget(pieB);
-        auto* scatB = big("chart-scatter", "Scatter", "Insert a scatter chart");
-        connect(scatB, &QToolButton::clicked, this, [this]{ insertChart(ChartType::Scatter); });
-        charts->addWidget(scatB);
+        act(charts, "chart-line",    "Line",    "Insert a line chart",    [this]{ insertChart(ChartType::Line); });
+        act(charts, "chart-pie",     "Pie",     "Insert a pie chart",     [this]{ insertChart(ChartType::Pie); });
+        act(charts, "chart-scatter", "Scatter", "Insert a scatter chart", [this]{ insertChart(ChartType::Scatter); });
 
         QHBoxLayout* spark = group(pl, "Sparklines");
-        soonBig(spark, "sparkline", "Sparklines");
-
-        QHBoxLayout* linksG = group(pl, "Links");
-        soonBig(linksG, "link", "Link");
+        act(spark, "sparkline", "Sparkline", "Insert a mini line chart of the selection", [this]{ insertChart(ChartType::Line); });
 
         QHBoxLayout* sym = group(pl, "Symbols");
-        soonBig(sym, "equation", "Equation");
-        auto* symBtn = big("symbol", "Symbol", "Insert a symbol");
-        connect(symBtn, &QToolButton::clicked, this, &CalcModule::insertSymbolDialog);
-        sym->addWidget(symBtn);
-        soonBig(sym, "latex", "LaTeX");
+        act(sym, "symbol",   "Symbol",   "Insert a symbol",   [this]{ insertSymbolDialog(); });
+        act(sym, "equation", "Equation", "Insert an equation", [this]{ insertTextValue("Equation", "Equation text:"); });
+        act(sym, "latex",    "LaTeX",    "Insert LaTeX text",  [this]{ insertTextValue("LaTeX", "LaTeX text:"); });
+
+        QHBoxLayout* linksG = group(pl, "Links");
+        act(linksG, "link", "Link", "Insert a hyperlink into the cell", [this]{ insertHyperlink(); });
 
         QHBoxLayout* media = group(pl, "Media");
-        soonBig(media, "forms",  "Forms");
-        soonBig(media, "camera", "Camera");
+        act(media, "camera", "Camera", "Insert an image", [this]{ insertImageObject(); });
+        act(media, "forms",  "Forms",  "Online forms (not in this build)", [this]{ featureInfo("Forms", "Online forms aren't part of this build."); });
 
         pl->addStretch(1);
     }
 
     // ══ PAGE LAYOUT PAGE ══════════════════════════════════════════════════════
-    auto soonMenuBig = [&](QHBoxLayout* into, const QString& icon, const QString& label,
-                           const QStringList& items) {
-        auto* b = big(icon, label, label);
-        b->setPopupMode(QToolButton::InstantPopup);
-        auto* m = new QMenu(b);
-        for (const QString& it : items)
-            connect(m->addAction(it), &QAction::triggered, this, [this, it]{ notImplemented(it); });
-        b->setMenu(m);
-        into->addWidget(b);
-        return b;
-    };
-    auto checkColumn = [&](QHBoxLayout* into) {
-        auto* w = new QWidget(m_ribbon);
-        auto* v = new QVBoxLayout(w);
-        v->setContentsMargins(2, 2, 2, 2);
-        v->setSpacing(4);
-        into->addWidget(w);
-        return v;
-    };
     {
         QHBoxLayout* pl = newPage();
 
         QHBoxLayout* print = group(pl, "Print");
+        act(print, "print-preview", "Print\nPreview", "Preview / print the sheet", [this]{ printPreview(); });
         {
-            auto* pv = big("print-preview", "Print Preview", "Preview / print the sheet");
-            connect(pv, &QToolButton::clicked, this, &CalcModule::printPreview);
-            print->addWidget(pv);
-        }
-        {
-            auto* pa = big("print-area", "Print Area", "Print Area");
+            auto* pa = big("print-area", "Print\nArea", "Print Area");
             pa->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(pa);
-            connect(m->addAction("Set Print Area"),   &QAction::triggered, this, [this]{ notImplemented("Set Print Area"); });
-            connect(m->addAction("Clear Print Area"), &QAction::triggered, this, [this]{ notImplemented("Clear Print Area"); });
+            connect(mi(m, "print-area", "Set Print Area"),   &QAction::triggered, this, [this]{ setPrintArea(); });
+            connect(mi(m, "clear",      "Clear Print Area"), &QAction::triggered, this, [this]{ clearPrintArea(); });
             pa->setMenu(m);
             print->addWidget(pa);
         }
 
         QHBoxLayout* setup = group(pl, "Page Setup");
-        soonMenuBig(setup, "margins",     "Margins",     {"Normal", "Wide", "Narrow", "Custom Margins…"});
-        soonMenuBig(setup, "page-orient", "Orientation", {"Portrait", "Landscape"});
-        soonMenuBig(setup, "page-size",   "Size",        {"A4", "Letter", "Legal", "A3"});
-        soonBig(setup, "print-titles", "Print Titles");
+        act(setup, "margins",      "Margins",      "Print margins", [this]{ featureInfo("Margins", "Page margins for printing aren't configurable yet."); });
+        act(setup, "page-orient",  "Orientation",  "Page orientation", [this]{ featureInfo("Orientation", "PDF/print currently uses landscape."); });
+        act(setup, "page-size",    "Size",         "Page size", [this]{ featureInfo("Size", "PDF/print currently uses A4."); });
+        act(setup, "print-titles", "Print\nTitles","Repeat header rows", [this]{ featureInfo("Print Titles", "Repeating print titles aren't supported yet."); });
 
         QHBoxLayout* opts = group(pl, "Sheet Options");
-        soonBig(opts, "header-footer", "Header & Footer", "Print Header and Footer");
+        act(opts, "header-footer", "Header\n& Footer", "Header and footer", [this]{ featureInfo("Header & Footer", "Headers/footers aren't supported yet."); });
         auto* col = checkColumn(opts);
         auto* glChk = new QCheckBox("Gridlines", m_ribbon);
         glChk->setChecked(true);
@@ -1589,13 +1651,12 @@ void CalcModule::buildRibbon() {
         col->addWidget(hdChk);
 
         QHBoxLayout* brk = group(pl, "Page Break");
-        soonBig(brk, "page-break",   "Break Preview", "Page Break Preview");
-        soonBig(brk, "insert-break", "Insert Break",  "Insert Page Break");
+        act(brk, "page-break",   "Break\nPreview", "Page break preview", [this]{ printPreview(); });
+        act(brk, "insert-break", "Insert\nBreak",  "Insert a page break", [this]{ featureInfo("Insert Page Break", "Manual page breaks aren't supported yet."); });
 
         QHBoxLayout* themesG = group(pl, "Themes");
-        soonBig(themesG, "themes",     "Themes");
-        soonBig(themesG, "background", "Background");
-        soonBig(themesG, "settings",   "Settings");
+        act(themesG, "themes",     "Themes",     "Workbook theme", [this]{ featureInfo("Themes", "Workbook themes aren't supported yet."); });
+        act(themesG, "background", "Background", "Set the sheet background colour", [this]{ setSheetBackground(); });
 
         pl->addStretch(1);
     }
@@ -1605,7 +1666,10 @@ void CalcModule::buildRibbon() {
         QHBoxLayout* pl = newPage();
 
         QHBoxLayout* lib = group(pl, "Function Library");
-        soonBig(lib, "fx", "Insert Function");
+        act(lib, "fx", "Insert\nFunction", "Start a formula", [this]{
+            m_formulaBar->setText("="); m_formulaBar->setFocus();
+            m_formulaBar->setCursorPosition(1);
+        });
         {
             auto* sum = big("autosum", "AutoSum", "AutoSum");
             sum->setPopupMode(QToolButton::MenuButtonPopup);
@@ -1613,55 +1677,38 @@ void CalcModule::buildRibbon() {
             auto* m = new QMenu(sum);
             for (const char* fn : {"SUM", "AVERAGE", "COUNT", "MAX", "MIN"}) {
                 const QString name = QString::fromUtf8(fn);
-                connect(m->addAction(name), &QAction::triggered, this, [this, name]{ insertFunction(name); });
+                connect(mi(m, "sigma", name), &QAction::triggered, this, [this, name]{ insertFunction(name); });
             }
             sum->setMenu(m);
             lib->addWidget(sum);
         }
-        fnBig(lib, "recently-used", "Recent",     "Recently Used", {"SUM", "AVERAGE", "IF", "COUNT", "MAX"});
-        fnBig(lib, "fn-financial",  "Financial",  "Financial",     {"PMT", "FV", "PV", "NPV", "RATE", "IRR"});
-        fnBig(lib, "fn-logical",    "Logical",    "Logical",       {"IF", "AND", "OR", "NOT", "IFERROR", "TRUE", "FALSE"});
-        fnBig(lib, "fn-text",       "Text",       "Text",          {"CONCATENATE", "LEFT", "RIGHT", "MID", "LEN", "UPPER",
-                                                                     "LOWER", "TRIM", "FIND", "SEARCH", "SUBSTITUTE", "TEXT"});
-        fnBig(lib, "fn-datetime",   "Date/Time",  "Date & Time",   {"TODAY", "NOW", "DATE", "DAY", "MONTH", "YEAR"});
-        fnBig(lib, "fn-lookup",     "Lookup",     "Lookup & Reference", {"VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "LOOKUP"});
-        fnBig(lib, "fn-math",       "Math",       "Math & Trig",   {"SUM", "ABS", "SQRT", "POWER", "ROUND", "MOD",
-                                                                     "PRODUCT", "SUMIF", "INT"});
-        fnBig(lib, "fn-more",       "More",       "More Functions",{"AVERAGE", "COUNT", "COUNTA", "COUNTIF",
-                                                                     "MIN", "MAX", "SUBTOTAL"});
+        fnBig(lib, "recently-used", "Recent",    "Recently Used", {"SUM","AVERAGE","IF","COUNT","MAX"});
+        fnBig(lib, "fn-financial",  "Financial", "Financial",     {"PMT","FV","PV","NPV","RATE","IRR"});
+        fnBig(lib, "fn-logical",    "Logical",   "Logical",       {"IF","AND","OR","NOT","IFERROR","TRUE","FALSE"});
+        fnBig(lib, "fn-text",       "Text",      "Text",          {"CONCATENATE","LEFT","RIGHT","MID","LEN","UPPER","LOWER","TRIM","FIND","SEARCH","SUBSTITUTE","TEXT"});
+        fnBig(lib, "fn-datetime",   "Date &\nTime", "Date & Time",{"TODAY","NOW","DATE","DAY","MONTH","YEAR","WEEKDAY"});
+        fnBig(lib, "fn-lookup",     "Lookup",    "Lookup & Reference", {"VLOOKUP","HLOOKUP","INDEX","MATCH","LOOKUP"});
+        fnBig(lib, "fn-math",       "Math",      "Math & Trig",   {"SUM","ABS","SQRT","POWER","ROUND","ROUNDUP","ROUNDDOWN","MOD","PRODUCT","SUMIF","INT"});
+        fnBig(lib, "fn-more",       "More",      "More Functions",{"AVERAGE","COUNT","COUNTA","COUNTIF","MIN","MAX","SUBTOTAL"});
 
         QHBoxLayout* names = group(pl, "Defined Names");
-        soonBig(names, "name-manager", "Name Manager");
-        soonBig(names, "define-name",  "Define Name");
-        soonBig(names, "use-in-formula", "Use in Formula");
+        act(names, "name-manager",   "Name\nManager", "Manage defined names", [this]{ nameManager(); });
+        act(names, "define-name",    "Define\nName",  "Name the current selection", [this]{ defineName(); });
+        act(names, "use-in-formula", "Use in\nFormula","Insert a name into the formula bar", [this]{ useNameInFormula(); });
 
         QHBoxLayout* audit = group(pl, "Formula Auditing");
-        soonBig(audit, "trace-prec",    "Precedents", "Trace Precedents");
-        soonBig(audit, "trace-dep",     "Dependents", "Trace Dependents");
-        soonBig(audit, "remove-arrows", "Remove Arrows");
-        m_showFormulasBtn = big("show-formulas", "Show Formulas",
-                                "Show Formulas (toggle raw formulas / results)", true);
+        act(audit, "trace-prec",    "Trace\nPrec.", "Select cells this formula refers to", [this]{ traceReferences(false); });
+        act(audit, "trace-dep",     "Trace\nDep.",  "Select cells that refer to this cell", [this]{ traceReferences(true); });
+        act(audit, "remove-arrows", "Remove\nArrows","Clear the trace selection", [this]{ removeTraceArrows(); });
+        m_showFormulasBtn = big("show-formulas", "Show\nFormulas", "Toggle raw formulas / results", true);
         connect(m_showFormulasBtn, &QToolButton::toggled, this, &CalcModule::onShowFormulasToggled);
         audit->addWidget(m_showFormulasBtn);
-        soonBig(audit, "error-check", "Error Check", "Error Checking");
-        soonBig(audit, "evaluate",    "Evaluate",    "Evaluate Formula");
+        act(audit, "error-check", "Error\nCheck",  "Find the first error on the sheet", [this]{ errorCheck(); });
+        act(audit, "evaluate",    "Evaluate",      "Show the active formula's result", [this]{ evaluateFormula(); });
 
         QHBoxLayout* calc = group(pl, "Calculation");
-        {
-            auto* co = big("calc-options", "Options", "Calculation Options");
-            co->setPopupMode(QToolButton::InstantPopup);
-            auto* m = new QMenu(co);
-            connect(m->addAction("Automatic"), &QAction::triggered, this, [this]{ onCalculateNow(); });
-            connect(m->addAction("Manual"),    &QAction::triggered, this, [this]{ notImplemented("Manual Calculation"); });
-            co->setMenu(m);
-            calc->addWidget(co);
-        }
-        auto* calcNow = big("calc-now", "Calculate Now", "Calculate Now (F9)");
-        connect(calcNow, &QToolButton::clicked, this, &CalcModule::onCalculateNow);
-        calc->addWidget(calcNow);
-        auto* calcSheet = big("calc-sheet", "Calc Sheet", "Calculate Sheet");
-        connect(calcSheet, &QToolButton::clicked, this, &CalcModule::onCalculateNow);
-        calc->addWidget(calcSheet);
+        act(calc, "calc-now",   "Calculate\nNow",  "Recompute every formula (F9)", [this]{ onCalculateNow(); });
+        act(calc, "calc-sheet", "Calc\nSheet",     "Recompute this sheet", [this]{ onCalculateNow(); });
 
         pl->addStretch(1);
     }
@@ -1671,56 +1718,39 @@ void CalcModule::buildRibbon() {
         QHBoxLayout* pl = newPage();
 
         QHBoxLayout* sortG = group(pl, "Sort & Filter");
-        auto* sortAsc = big("sort-az", "Sort ↑", "Sort ascending by the active column");
-        connect(sortAsc, &QToolButton::clicked, this, [this]{ sortByColumn(true); });
-        sortG->addWidget(sortAsc);
-        auto* sortDesc = big("sort-za", "Sort ↓", "Sort descending by the active column");
-        connect(sortDesc, &QToolButton::clicked, this, [this]{ sortByColumn(false); });
-        sortG->addWidget(sortDesc);
-        auto* filterB = big("filter", "Filter", "Filter the active column by value");
-        connect(filterB, &QToolButton::clicked, this, &CalcModule::showColumnFilter);
-        sortG->addWidget(filterB);
-        auto* showAllB = big("show-all", "Show All", "Clear all filters");
-        connect(showAllB, &QToolButton::clicked, this, &CalcModule::clearFilters);
-        sortG->addWidget(showAllB);
-        auto* reapplyB = big("reapply", "Reapply", "Re-apply the current filters");
-        connect(reapplyB, &QToolButton::clicked, this, &CalcModule::applyFilters);
-        sortG->addWidget(reapplyB);
+        act(sortG, "sort-az", "Sort ↑",  "Sort ascending by the active column", [this]{ sortByColumn(true); });
+        act(sortG, "sort-za", "Sort ↓",  "Sort descending by the active column", [this]{ sortByColumn(false); });
+        act(sortG, "filter",  "Filter",  "Filter the active column by value", [this]{ showColumnFilter(); });
+        act(sortG, "show-all","Show\nAll","Clear all filters", [this]{ clearFilters(); });
+        act(sortG, "reapply", "Reapply", "Re-apply the current filters", [this]{ applyFilters(); });
 
-        QHBoxLayout* tools = group(pl, "Data Tools");
-        soonBig(tools, "highlight-dup", "Highlight Dup.", "Highlight Duplicates");
-        soonBig(tools, "manage-dup",    "Manage Dup.",    "Manage Duplicates");
-        soonBig(tools, "text-columns",  "Text to Cols",   "Text to Columns");
-        soonBig(tools, "validation",    "Validation");
+        QHBoxLayout* dt = group(pl, "Data Tools");
+        act(dt, "highlight-dup", "Highlight\nDup.", "Highlight duplicate values in the selection", [this]{ highlightDuplicates(); });
+        act(dt, "manage-dup",    "Remove\nDup.",    "Remove duplicate rows", [this]{ removeDuplicates(); });
+        act(dt, "text-columns",  "Text to\nCols",   "Split the active column by a delimiter", [this]{ textToColumns(); });
+        act(dt, "validation",    "Validation",      "Set a drop-down list for the column", [this]{ setDropdownValidation(); });
         {
             auto* fill = big("fill", "Fill", "Fill down or right");
             fill->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(fill);
-            connect(m->addAction("Fill Down (Ctrl+D)"),  &QAction::triggered, this, [this]{ fillDown(); });
-            connect(m->addAction("Fill Right (Ctrl+R)"), &QAction::triggered, this, [this]{ fillRight(); });
+            connect(mi(m, "fill", "Fill Down (Ctrl+D)"),  &QAction::triggered, this, [this]{ fillDown(); });
+            connect(mi(m, "fill", "Fill Right (Ctrl+R)"), &QAction::triggered, this, [this]{ fillRight(); });
             fill->setMenu(m);
-            tools->addWidget(fill);
+            dt->addWidget(fill);
         }
-        soonBig(tools, "consolidate", "Consolidate");
-        soonBig(tools, "dropdown",    "Drop-Down", "Insert Drop-Down List");
 
         QHBoxLayout* outline = group(pl, "Outline");
-        soonBig(outline, "subtotal",    "Subtotal");
-        soonBig(outline, "group",       "Group");
-        soonBig(outline, "ungroup",     "Ungroup");
-        soonBig(outline, "show-detail", "Show Detail");
-        soonBig(outline, "hide-detail", "Hide Detail");
+        act(outline, "group",    "Group",   "Hide the selected rows", [this]{ hideSelectedRows(); });
+        act(outline, "ungroup",  "Ungroup", "Show all hidden rows", [this]{ unhideAllRows(); });
+        act(outline, "subtotal", "Subtotal","Automatic subtotals (not yet)", [this]{ featureInfo("Subtotal", "Automatic subtotals aren't supported yet."); });
 
         QHBoxLayout* getG = group(pl, "Get & Transform");
-        soonBig(getG, "get-data",   "Get Data");
-        soonBig(getG, "edit-links", "Edit Links");
-        soonBig(getG, "refresh",    "Refresh All");
-        soonBig(getG, "what-if",    "What-If", "What-If Analysis");
+        act(getG, "get-data", "Get\nData",   "Import a CSV into the sheet", [this]{ importData(); });
+        act(getG, "refresh",  "Refresh\nAll", "Recompute all formulas", [this]{ onCalculateNow(); });
+        act(getG, "what-if",  "What-If",      "Goal Seek / scenarios (not yet)", [this]{ featureInfo("What-If Analysis", "Goal Seek / scenarios aren't supported yet."); });
 
         QHBoxLayout* findG = group(pl, "Find");
-        auto* findB = big("find", "Find", "Find (Ctrl+F)");
-        connect(findB, &QToolButton::clicked, this, &CalcModule::showFindDialog);
-        findG->addWidget(findB);
+        act(findG, "find", "Find", "Find (Ctrl+F)", [this]{ showFindDialog(); });
 
         pl->addStretch(1);
     }
@@ -1730,22 +1760,21 @@ void CalcModule::buildRibbon() {
         QHBoxLayout* pl = newPage();
 
         QHBoxLayout* proof = group(pl, "Proofing");
-        soonBig(proof, "spelling",  "Spelling");
-        soonBig(proof, "thesaurus", "Thesaurus");
+        act(proof, "spelling",  "Spelling",  "Spell check (not in this build)", [this]{ featureInfo("Spelling", "A spell-checker isn't included in this build."); });
+        act(proof, "thesaurus", "Thesaurus", "Thesaurus (not in this build)", [this]{ featureInfo("Thesaurus", "A thesaurus isn't included in this build."); });
 
-        QHBoxLayout* comments = group(pl, "Comments");
-        soonBig(comments, "new-comment",    "New Comment");
-        soonBig(comments, "delete-comment", "Delete");
-        soonBig(comments, "prev",           "Previous");
-        soonBig(comments, "next",           "Next");
-        soonBig(comments, "show-comments",  "Show");
+        QHBoxLayout* cm = group(pl, "Comments");
+        act(cm, "new-comment",    "New\nComment", "Add or edit a comment on the cell", [this]{ addEditComment(); });
+        act(cm, "delete-comment", "Delete",       "Delete the cell's comment", [this]{ deleteComment(); });
+        act(cm, "prev",           "Previous",     "Go to the previous comment", [this]{ gotoComment(false); });
+        act(cm, "next",           "Next",         "Go to the next comment", [this]{ gotoComment(true); });
+        act(cm, "show-comments",  "Show",         "Show/hide comment markers", [this]{ toggleShowComments(); });
 
         QHBoxLayout* protect = group(pl, "Protect");
-        soonBig(protect, "lock-cell",     "Lock Cell");
-        soonBig(protect, "allow-edit",    "Allow Edit", "Allow Edit Ranges");
-        soonBig(protect, "protect-sheet", "Protect Sheet");
-        soonBig(protect, "protect-book",  "Protect Workbook");
-        soonBig(protect, "share",         "Share Workbook");
+        act(protect, "protect-sheet", "Protect\nSheet", "Make the sheet read-only", [this]{ toggleProtectSheet(); });
+        act(protect, "lock-cell",     "Lock\nCell",     "Toggle sheet protection", [this]{ toggleProtectSheet(); });
+        act(protect, "protect-book",  "Protect\nBook",  "Workbook protection (not yet)", [this]{ featureInfo("Protect Workbook", "Workbook-structure protection isn't supported yet."); });
+        act(protect, "share",         "Share",          "Co-authoring (needs an online service)", [this]{ featureInfo("Share Workbook", "Co-authoring needs an online service not in this build."); });
 
         pl->addStretch(1);
     }
@@ -1755,11 +1784,10 @@ void CalcModule::buildRibbon() {
         QHBoxLayout* pl = newPage();
 
         QHBoxLayout* views = group(pl, "Workbook Views");
-        soonBig(views, "view-normal",     "Normal");
-        soonBig(views, "page-break",      "Page Break Preview");
-        soonBig(views, "view-pagelayout", "Page Layout");
-        soonBig(views, "eye",             "Eye Protection");
-        soonBig(views, "highlight-rc",    "Highlight Row/Col");
+        act(views, "view-normal",     "Normal",          "Reset zoom to 100%", [this]{ m_zoom = 1.0; resetZoom(); });
+        act(views, "view-pagelayout", "Page\nLayout",    "Print-style preview", [this]{ printPreview(); });
+        act(views, "eye",             "Eye\nProtection", "Tint the sheet a soft green", [this]{ toggleEyeProtection(); });
+        act(views, "highlight-rc",    "Highlight\nRow/Col","Highlight the active row & column header", [this]{ toggleHighlightActive(); });
 
         QHBoxLayout* show = group(pl, "Show");
         auto* sc = checkColumn(show);
@@ -1774,43 +1802,39 @@ void CalcModule::buildRibbon() {
         glChk2->setChecked(true);
         connect(glChk2, &QCheckBox::toggled, this, &CalcModule::onToggleGridlines);
         sc->addWidget(glChk2);
-        auto* sc2 = checkColumn(show);
         auto* hdChk2 = new QCheckBox("Headings", m_ribbon);
         hdChk2->setChecked(true);
         connect(hdChk2, &QCheckBox::toggled, this, &CalcModule::onToggleHeadings);
-        sc2->addWidget(hdChk2);
-        soonBig(show, "custom-views", "Custom Views");
+        sc->addWidget(hdChk2);
 
         QHBoxLayout* zoom = group(pl, "Zoom");
-        soonBig(zoom, "zoom-in",  "Zoom In");
-        soonBig(zoom, "zoom-100", "100%");
+        act(zoom, "zoom-in",  "Zoom\nIn",  "Zoom in", [this]{ zoomBy(+10); });
+        act(zoom, "zoom-out", "Zoom\nOut", "Zoom out", [this]{ zoomBy(-10); });
+        act(zoom, "zoom-100", "100%",      "Reset zoom", [this]{ m_zoom = 1.0; resetZoom(); });
 
         QHBoxLayout* winG = group(pl, "Window");
-        auto* fsBtn = big("full-screen", "Full Screen", "Toggle full screen", true);
-        connect(fsBtn, &QToolButton::toggled, this, [this](bool on){
-            if (auto* w = this->window()) { if (on) w->showFullScreen(); else w->showNormal(); }
-        });
-        winG->addWidget(fsBtn);
         {
-            auto* fz = big("freeze", "Freeze Panes", "Keep rows/columns visible while scrolling");
+            auto* fz = big("freeze", "Freeze\nPanes", "Keep rows/columns visible while scrolling");
             fz->setPopupMode(QToolButton::InstantPopup);
             auto* m = new QMenu(fz);
-            connect(m->addAction("Freeze Panes (at selection)"), &QAction::triggered, this, [this]{
+            connect(mi(m, "freeze", "Freeze Panes (at selection)"), &QAction::triggered, this, [this]{
                 const QModelIndex c = m_tableView->currentIndex();
                 setFreeze(c.isValid() ? c.row() : 0, c.isValid() ? c.column() : 0);
             });
-            connect(m->addAction("Freeze Top Row"),      &QAction::triggered, this, [this]{ setFreeze(1, 0); });
-            connect(m->addAction("Freeze First Column"), &QAction::triggered, this, [this]{ setFreeze(0, 1); });
+            connect(mi(m, "freeze", "Freeze Top Row"),      &QAction::triggered, this, [this]{ setFreeze(1, 0); });
+            connect(mi(m, "freeze", "Freeze First Column"), &QAction::triggered, this, [this]{ setFreeze(0, 1); });
             m->addSeparator();
-            connect(m->addAction("Unfreeze Panes"),      &QAction::triggered, this, [this]{ setFreeze(0, 0); });
+            connect(mi(m, "clear",  "Unfreeze Panes"),      &QAction::triggered, this, [this]{ setFreeze(0, 0); });
             fz->setMenu(m);
             winG->addWidget(fz);
         }
-        soonBig(winG, "arrange-all",  "Arrange All");
-        soonBig(winG, "new-window",   "New Window");
-        soonBig(winG, "split-window", "Split");
-        soonBig(winG, "side-by-side", "Side by Side");
-        soonBig(winG, "sync-scroll",  "Sync Scrolling");
+        {
+            auto* fsBtn = big("full-screen", "Full\nScreen", "Toggle full screen", true);
+            connect(fsBtn, &QToolButton::toggled, this, [this](bool on){
+                if (auto* w = this->window()) { if (on) w->showFullScreen(); else w->showNormal(); } });
+            winG->addWidget(fsBtn);
+        }
+        act(winG, "new-window", "New\nWindow", "Open another NativeOffice window", [this]{ openNewWindow(); });
 
         pl->addStretch(1);
     }
@@ -1819,30 +1843,21 @@ void CalcModule::buildRibbon() {
     {
         QHBoxLayout* pl = newPage();
 
-        QHBoxLayout* conv = group(pl, "Convert");
-        {
-            auto* ep = big("export-pdf", "Export to PDF", "Export the sheet to a PDF file");
-            connect(ep, &QToolButton::clicked, this, &CalcModule::exportToPdf);
-            conv->addWidget(ep);
-        }
-        soonBig(conv, "export-pic",   "Export to Picture");
-        soonBig(conv, "extract-text", "Extract Text");
-        soonBig(conv, "picture-pdf",  "Picture to PDF");
-        soonBig(conv, "pdf-excel",    "PDF to Excel");
-        soonBig(conv, "split-merge",  "Split or Merge");
+        QHBoxLayout* conv = group(pl, "Convert & Export");
+        act(conv, "export-pdf",   "Export\nto PDF", "Export the sheet to a PDF file", [this]{ exportToPdf(); });
+        act(conv, "export-pic",   "Export\nPicture","Export the sheet as a PNG image", [this]{ exportToImage(); });
+        act(conv, "extract-text", "Extract\nText",  "Export the sheet as a .txt file", [this]{ exportToText(); });
 
         QHBoxLayout* sheetT = group(pl, "Sheet");
-        soonBig(sheetT, "split-sheet", "Split Sheet");
-        soonBig(sheetT, "merge-sheet", "Merge Sheet");
+        act(sheetT, "merge-sheet", "Merge\nSheets", "Combine every sheet into a new one", [this]{ mergeAllSheets(); });
+        act(sheetT, "split-sheet", "Split\nSheet",  "Split a sheet into files (not yet)", [this]{ featureInfo("Split Sheet", "Splitting a sheet into files isn't supported yet."); });
 
         QHBoxLayout* cloud = group(pl, "Cloud & Files");
-        soonBig(cloud, "auto-backup",  "Auto Backup");
-        soonBig(cloud, "save-cloud",   "Save to Cloud");
-        soonBig(cloud, "file-collect", "File Collect");
-        soonBig(cloud, "scan-mobile",  "Scan to Mobile");
-        soonBig(cloud, "design-lib",   "Design Library");
-        soonBig(cloud, "invoice",      "Invoice Maker");
-        soonBig(cloud, "batch-rename", "Batch Rename");
+        act(cloud, "auto-backup", "Auto\nBackup",  "Automatic backup (not configured)", [this]{ featureInfo("Auto Backup", "Automatic backup isn't configured in this build."); });
+        act(cloud, "save-cloud",  "Save to\nCloud", "Cloud sync (needs an account)", [this]{ featureInfo("Save to Cloud", "Cloud sync needs an online account not in this build."); });
+        act(cloud, "scan-mobile", "Scan to\nMobile","Mobile pairing (online service)", [this]{ featureInfo("Scan to Mobile", "Mobile pairing needs an online service."); });
+        act(cloud, "design-lib",  "Design\nLibrary","Online template library", [this]{ featureInfo("Design Library", "The online template library isn't part of this build."); });
+        act(cloud, "invoice",     "Invoice\nMaker", "Invoice templates", [this]{ featureInfo("Invoice Maker", "The invoice template gallery isn't part of this build."); });
 
         pl->addStretch(1);
     }
@@ -1852,19 +1867,17 @@ void CalcModule::buildRibbon() {
         QHBoxLayout* pl = newPage();
 
         QHBoxLayout* sb = group(pl, "Smart Toolbox");
-        soonBig(sb, "smart-insert", "Insert");
-        soonBig(sb, "smart-fill",   "Fill");
-        soonBig(sb, "smart-delete", "Delete");
-        soonBig(sb, "smart-format", "Format");
-        soonBig(sb, "smart-calc",   "Calculate");
-        soonBig(sb, "smart-text",   "Text");
-        soonBig(sb, "smart-catalog","Catalog");
+        act(sb, "smart-insert", "Insert\nRow", "Insert a row at the cursor", [this]{ const QModelIndex c = m_tableView->currentIndex(); m_model->insertRowAt(c.isValid()?c.row():0); });
+        act(sb, "fill",         "Fill\nDown",  "Fill down", [this]{ fillDown(); });
+        act(sb, "delete-cells", "Delete",      "Delete the selection", [this]{ deleteSelection(); });
+        act(sb, "format-table", "Format\nTable","Format the selection as a table", [this]{ formatAsTable(); });
+        act(sb, "calculator",   "Calculate",   "Recompute formulas", [this]{ onCalculateNow(); });
 
-        QHBoxLayout* sb2 = group(pl, "Advanced");
-        soonBig(sb2, "manage-dup",   "Manage Duplicates");
-        soonBig(sb2, "text-columns", "Advanced Text to Columns");
-        soonBig(sb2, "merge-sheet",  "Merge Sheet");
-        soonBig(sb2, "split-sheet",  "Split Sheet");
+        QHBoxLayout* adv = group(pl, "Advanced");
+        act(adv, "manage-dup",   "Remove\nDup.",  "Remove duplicate rows", [this]{ removeDuplicates(); });
+        act(adv, "highlight-dup","Highlight\nDup.","Highlight duplicates", [this]{ highlightDuplicates(); });
+        act(adv, "text-columns", "Text to\nCols", "Split a column by a delimiter", [this]{ textToColumns(); });
+        act(adv, "merge-sheet",  "Merge\nSheets", "Combine all sheets", [this]{ mergeAllSheets(); });
 
         pl->addStretch(1);
     }
@@ -1878,13 +1891,6 @@ void CalcModule::buildRibbon() {
     addToggleSc(QKeySequence("Ctrl+B"), m_boldBtn);
     addToggleSc(QKeySequence("Ctrl+I"), m_italicBtn);
     addToggleSc(QKeySequence("Ctrl+U"), m_underlineBtn);
-
-    const int _dbgTab = qEnvironmentVariableIntValue("CALC_START_TAB");  // TEMP verify
-    if (_dbgTab > 0 && _dbgTab < m_ribbonTabBtns.size()) {
-        m_ribbonStack->setCurrentIndex(_dbgTab);
-        for (int i = 0; i < m_ribbonTabBtns.size(); ++i)
-            m_ribbonTabBtns[i]->setChecked(i == _dbgTab);
-    }
 }
 
 // Insert =FN(range) into the active cell, auto-detecting a contiguous numeric
@@ -2250,7 +2256,7 @@ void CalcModule::insertTextValue(const QString& title, const QString& prompt) {
     onSelectionChanged();
 }
 
-void CalcModule::pivotSummary() {
+void CalcModule::pivotSummary(bool alsoChart) {
     int c1, r1, c2, r2;
     if (!usedRange(m_model, c1, r1, c2, r2) || c2 <= c1) {
         featureInfo("PivotTable", "Select a table with at least a label column and a value column.");
@@ -2267,14 +2273,19 @@ void CalcModule::pivotSummary() {
     }
     if (order.isEmpty()) { featureInfo("PivotTable", "No data to summarise."); return; }
     addSheet(QString("Pivot%1").arg(m_sheets.size() + 1));   // switches to the new sheet
-    m_model->setCellContent(0, 0, m_model->displayValue(c1, r1).isEmpty()
-                                      ? "Group" : "Group", "Pivot");
+    m_model->setCellContent(0, 0, "Group", "Pivot");
     m_model->setCellContent(1, 0, "Total", "Pivot");
     int rr = 1;
     for (const QString& k : order) {
         m_model->setCellContent(0, rr, k, "Pivot");
         m_model->setCellContent(1, rr, QString::number(sums[k]), "Pivot");
         ++rr;
+    }
+    if (alsoChart) {
+        m_tableView->selectionModel()->select(
+            QItemSelection(m_model->index(0, 0), m_model->index(rr - 1, 1)),
+            QItemSelectionModel::ClearAndSelect);
+        insertChart(ChartType::Column);
     }
     onSelectionChanged();
 }
@@ -3616,23 +3627,26 @@ QWidget#calcRibbon {
 }
 /* Tab strip */
 QWidget#ribbonTabs {
-    background-color: #EDEDED;
-    border-bottom: 1px solid #D4D4D4;
+    background-color: #F7F8FA;
+    border-bottom: 1px solid #E3E5EA;
 }
-QToolButton#ribbonTab {
+QWidget#ribbonTabs QToolButton#ribbonTab {
     border: none;
+    border-radius: 0;
     background: transparent;
-    color: #444444;
+    color: #5A6071;
     font-size: 13px;
-    font-family: "Segoe UI", sans-serif;
-    padding: 5px 16px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-weight: 500;
+    padding: 6px 18px;
 }
-QToolButton#ribbonTab:hover {
-    background: #E2E8E4;
+QWidget#ribbonTabs QToolButton#ribbonTab:hover {
+    background: #E7E9EE;
+    color: #1C1E26;
 }
-QToolButton#ribbonTab:checked {
-    background: #F6F6F6;
-    color: #107C41;
+QWidget#ribbonTabs QToolButton#ribbonTab:checked {
+    background: #FFFFFF;
+    color: #1C1E26;
     font-weight: 700;
     border-bottom: 2px solid #107C41;
 }
@@ -3654,13 +3668,10 @@ QWidget#calcRibbon QToolButton:checked {
 }
 /* Large icon-over-text buttons (primary actions) */
 QToolButton#ribbonBig {
-    padding: 2px 3px 1px 3px;
-    min-width: 42px;
-    max-width: 78px;
-    max-height: 54px;
-    font-size: 8px;
-    font-family: "Segoe UI", sans-serif;
-    color: #3A3D42;
+    padding: 3px 5px 2px 5px;
+    font-size: 11px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    color: #3A3F4B;
 }
 QToolButton#ribbonBig::menu-indicator {
     subcontrol-origin: padding;

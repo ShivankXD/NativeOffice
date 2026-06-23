@@ -507,6 +507,20 @@ static CalcWindow* createCalcWindow(const QString& filePath) {
 
     // ── Menu bar ──────────────────────────────────────────────────────────
     auto* mb       = win->menuBar();
+    // Light, clean menu bar (no black hero strip) to sit above the banner.
+    mb->setStyleSheet(R"(
+QMenuBar {
+    background-color: #FFFFFF;
+    color: #2C3140;
+    border-bottom: 1px solid #E6E8ED;
+    padding: 2px 6px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+}
+QMenuBar::item { background: transparent; color: #2C3140; padding: 5px 12px; border-radius: 6px; }
+QMenuBar::item:selected { background-color: #EAF3EE; color: #107C41; }
+QMenuBar::item:pressed  { background-color: #E0EFE6; color: #0E6F3A; }
+)");
     auto* fileMenu = mb->addMenu("&File");
 
     auto* actNew = fileMenu->addAction("&New Spreadsheet");

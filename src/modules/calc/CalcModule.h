@@ -172,7 +172,7 @@ private:
     void insertHyperlink();                   // URL into the active cell
     void applyWordArt();                      // bold coloured large font on selection
     void insertTextValue(const QString& title, const QString& prompt); // generic input → cell
-    void pivotSummary();                      // group-by-sum of the used range → new sheet
+    void pivotSummary(bool alsoChart = false);// group-by-sum of the used range → new sheet
     // Page Layout
     void setPrintArea();                      // active selection becomes the print range
     void clearPrintArea();
