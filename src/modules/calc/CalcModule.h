@@ -371,6 +371,13 @@ private:
     // ── Charts (live widgets for the active sheet) ─────────────────────────────
     QVector<ChartObject*> m_chartObjs;
 
+    // ── Floating-object cell anchoring (charts/images scroll with the grid) ────
+    struct ObjAnchor { int col; int row; int dx; int dy; };
+    QHash<QWidget*, ObjAnchor> m_objAnchors;
+    void anchorWidget(QWidget* w);             // record the cell under w's top-left
+    void repositionFloatingObjects();          // move anchored objects on scroll/resize
+    void insertImagePixmap(const QPixmap& pm); // create a floating image from a pixmap
+
     // ── AutoFilter: column → set of allowed display values ─────────────────────
     QHash<int, QSet<QString>> m_columnFilters;
 

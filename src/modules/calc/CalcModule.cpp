@@ -229,45 +229,86 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 class FloatingItem : public QFrame {
 public:
+    std::function<void()> onMoved;          // fired after a drag / resize finishes
+
     FloatingItem(QWidget* content, const QRect& geom, QWidget* parent)
         : QFrame(parent)
     {
         setObjectName("floatItem");
-        setStyleSheet("QFrame#floatItem{background:transparent;border:1px solid #B6BBC2;}");
+        setStyleSheet("QFrame#floatItem{background:#FFFFFF;border:1px solid #B6BBC2;}");
         auto* v = new QVBoxLayout(this);
         v->setContentsMargins(1, 16, 1, 1);
         v->setSpacing(0);
-        auto* bar = new QWidget(this);
-        bar->setObjectName("floatBar");
-        bar->setStyleSheet("QWidget#floatBar{background:#F3F4F6;}");
-        bar->setGeometry(0, 0, geom.width(), 15);
-        auto* close = new QToolButton(this);
-        close->setText("✕");
-        close->setStyleSheet("QToolButton{border:none;background:transparent;color:#888;font-size:10px;}");
-        close->setGeometry(geom.width() - 16, 0, 15, 15);
-        connect(close, &QToolButton::clicked, this, [this]{ deleteLater(); });
-        m_close = close;
+
+        m_bar = new QWidget(this);
+        m_bar->setObjectName("floatBar");
+        m_bar->setCursor(Qt::SizeAllCursor);
+        m_bar->setStyleSheet("QWidget#floatBar{background:#F3F4F6;}");
+        m_close = new QToolButton(this);
+        m_close->setText("✕");
+        m_close->setStyleSheet("QToolButton{border:none;background:transparent;color:#888;font-size:10px;}");
+        connect(m_close, &QToolButton::clicked, this, [this]{ deleteLater(); });
+
         if (content) { content->setParent(this); v->addWidget(content); }
+
+        m_grip = new QWidget(this);
+        m_grip->setFixedSize(14, 14);
+        m_grip->setCursor(Qt::SizeFDiagCursor);
+        m_grip->setStyleSheet("background:transparent;");
+
+        setMinimumSize(80, 60);
         setGeometry(geom);
+        m_bar->installEventFilter(this);
+        m_grip->installEventFilter(this);
     }
 protected:
     void resizeEvent(QResizeEvent*) override {
+        if (m_bar)   m_bar->setGeometry(0, 0, width(), 15);
         if (m_close) m_close->move(width() - 16, 0);
+        if (m_grip)  { m_grip->move(width() - 14, height() - 14); m_grip->raise(); }
     }
-    void mousePressEvent(QMouseEvent* e) override {
-        if (e->button() == Qt::LeftButton && e->position().y() < 16) {
-            m_drag = true; m_press = e->globalPosition().toPoint(); m_start = pos(); raise();
+    bool eventFilter(QObject* w, QEvent* e) override {
+        if (w == m_bar) {
+            if (e->type() == QEvent::MouseButtonPress) {
+                m_drag = true; m_press = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
+                m_start = geometry(); raise(); return true;
+            } else if (e->type() == QEvent::MouseMove && m_drag) {
+                const QPoint d = static_cast<QMouseEvent*>(e)->globalPosition().toPoint() - m_press;
+                QRect g = m_start; g.moveTopLeft(m_start.topLeft() + d);
+                if (parentWidget()) {
+                    const QRect pr = parentWidget()->rect();
+                    if (g.left() < 0) g.moveLeft(0);
+                    if (g.top()  < 0) g.moveTop(0);
+                    if (g.right()  > pr.right())  g.moveRight(pr.right());
+                    if (g.bottom() > pr.bottom()) g.moveBottom(pr.bottom());
+                }
+                setGeometry(g); return true;
+            } else if (e->type() == QEvent::MouseButtonRelease && m_drag) {
+                m_drag = false; if (onMoved) onMoved(); return true;
+            }
         }
+        if (w == m_grip) {
+            if (e->type() == QEvent::MouseButtonPress) {
+                m_resize = true; m_press = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
+                m_start = geometry(); return true;
+            } else if (e->type() == QEvent::MouseMove && m_resize) {
+                const QPoint d = static_cast<QMouseEvent*>(e)->globalPosition().toPoint() - m_press;
+                resize(std::max(80, m_start.width() + d.x()), std::max(60, m_start.height() + d.y()));
+                return true;
+            } else if (e->type() == QEvent::MouseButtonRelease && m_resize) {
+                m_resize = false; if (onMoved) onMoved(); return true;
+            }
+        }
+        return QFrame::eventFilter(w, e);
     }
-    void mouseMoveEvent(QMouseEvent* e) override {
-        if (m_drag) move(m_start + (e->globalPosition().toPoint() - m_press));
-    }
-    void mouseReleaseEvent(QMouseEvent*) override { m_drag = false; }
 private:
+    QWidget*     m_bar   { nullptr };
     QToolButton* m_close { nullptr };
-    bool   m_drag { false };
-    QPoint m_press, m_start0;
-    QPoint m_start;
+    QWidget*     m_grip  { nullptr };
+    bool   m_drag   { false };
+    bool   m_resize { false };
+    QPoint m_press;
+    QRect  m_start;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -558,7 +599,7 @@ CalcModule::CalcModule(QWidget* parent)
     m_ants->raise();                       // copy border sits above selection box
     m_tableView->viewport()->installEventFilter(this);
 
-    auto repaintOverlays = [this]{ m_selOverlay->update(); m_ants->update(); updateFrozenViews(); };
+    auto repaintOverlays = [this]{ m_selOverlay->update(); m_ants->update(); updateFrozenViews(); repositionFloatingObjects(); };
     connect(m_tableView->horizontalScrollBar(), &QScrollBar::valueChanged, this, repaintOverlays);
     connect(m_tableView->verticalScrollBar(),   &QScrollBar::valueChanged, this, repaintOverlays);
 
@@ -833,6 +874,7 @@ void CalcModule::switchToSheet(int index) {
     setFreeze(0, 0);             // freeze views hold the old selection model
     for (QWidget* w : m_floatingItems) w->deleteLater();
     m_floatingItems.clear();
+    m_objAnchors.clear();
 
     applyMerges();
     applySizes();
@@ -1933,15 +1975,18 @@ ChartObject* CalcModule::createChartObject(const ChartSpec& spec) {
     obj->raise();
     connect(obj, &ChartObject::closed, this, [this](ChartObject* c){
         m_chartObjs.removeAll(c);
+        m_objAnchors.remove(c);
         c->deleteLater();
         syncChartSpecs();
         markDirty();
     });
-    connect(obj, &ChartObject::geometryEdited, this, [this]{
+    connect(obj, &ChartObject::geometryEdited, this, [this, obj]{
+        anchorWidget(obj);          // re-anchor after a drag/resize
         syncChartSpecs();
         markDirty();
     });
     m_chartObjs.push_back(obj);
+    anchorWidget(obj);              // anchor to the cell it sits over
     return obj;
 }
 
@@ -2174,14 +2219,33 @@ void CalcModule::featureInfo(const QString& name, const QString& detail) {
     QMessageBox::information(this, name, detail);
 }
 
+// ── Floating-object anchoring (objects scroll with the grid) ─────────────────
+void CalcModule::anchorWidget(QWidget* w) {
+    if (!w) return;
+    const QPoint tl = w->pos();
+    int col = m_tableView->columnAt(tl.x()); if (col < 0) col = 0;
+    int row = m_tableView->rowAt(tl.y());    if (row < 0) row = 0;
+    ObjAnchor a;
+    a.col = col; a.row = row;
+    a.dx = tl.x() - m_tableView->columnViewportPosition(col);
+    a.dy = tl.y() - m_tableView->rowViewportPosition(row);
+    m_objAnchors.insert(w, a);
+}
+
+void CalcModule::repositionFloatingObjects() {
+    for (auto it = m_objAnchors.begin(); it != m_objAnchors.end(); ++it) {
+        QWidget* w = it.key();
+        if (!w) continue;
+        const ObjAnchor& a = it.value();
+        const QRect cr = m_tableView->visualRect(m_model->index(a.row, a.col));
+        w->move(cr.x() + a.dx, cr.y() + a.dy);
+    }
+}
+
 // ── Insert ───────────────────────────────────────────────────────────────────
-void CalcModule::insertImageObject() {
-    const QString path = QFileDialog::getOpenFileName(
-        this, "Insert Picture", QString(), "Images (*.png *.jpg *.jpeg *.bmp *.gif)");
-    if (path.isEmpty()) return;
-    QPixmap pm(path);
-    if (pm.isNull()) { featureInfo("Insert Picture", "Could not load that image."); return; }
-    pm = pm.scaled(QSize(300, 220), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+void CalcModule::insertImagePixmap(const QPixmap& src) {
+    if (src.isNull()) return;
+    QPixmap pm = src.scaled(QSize(300, 220), Qt::KeepAspectRatio, Qt::SmoothTransformation);
     auto* lbl = new QLabel;
     lbl->setPixmap(pm);
     lbl->setScaledContents(true);
@@ -2190,7 +2254,19 @@ void CalcModule::insertImageObject() {
     auto* item = new FloatingItem(lbl, g, m_tableView->viewport());
     item->show(); item->raise();
     m_floatingItems.push_back(item);
+    anchorWidget(item);
+    item->onMoved = [this, item]{ anchorWidget(item); };
+    connect(item, &QObject::destroyed, this, [this](QObject* o){ m_objAnchors.remove(static_cast<QWidget*>(o)); });
     markDirty();
+}
+
+void CalcModule::insertImageObject() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Insert Picture", QString(), "Images (*.png *.jpg *.jpeg *.bmp *.gif)");
+    if (path.isEmpty()) return;
+    QPixmap pm(path);
+    if (pm.isNull()) { featureInfo("Insert Picture", "Could not load that image."); return; }
+    insertImagePixmap(pm);
 }
 
 void CalcModule::insertTextBoxObject() {
@@ -2200,6 +2276,9 @@ void CalcModule::insertTextBoxObject() {
     auto* item = new FloatingItem(edit, QRect(60, 40, 170, 44), m_tableView->viewport());
     item->show(); item->raise();
     m_floatingItems.push_back(item);
+    anchorWidget(item);
+    item->onMoved = [this, item]{ anchorWidget(item); };
+    connect(item, &QObject::destroyed, this, [this](QObject* o){ m_objAnchors.remove(static_cast<QWidget*>(o)); });
     edit->setFocus();
     markDirty();
 }
@@ -3479,6 +3558,12 @@ void CalcModule::pasteClipboard() {
     const QMimeData* mime = QGuiApplication::clipboard()->mimeData();
     if (!mime) return;
 
+    // ── Image from the system clipboard → floating picture on the grid ──────
+    if (mime->hasImage()) {
+        const QImage img = qvariant_cast<QImage>(mime->imageData());
+        if (!img.isNull()) { insertImagePixmap(QPixmap::fromImage(img)); return; }
+    }
+
     const QModelIndex cur = m_tableView->currentIndex();
     if (!cur.isValid()) return;
     const int anchorCol = cur.column();
@@ -3566,6 +3651,7 @@ bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
             if (m_ants)       m_ants->resize(s);
             if (m_selOverlay) m_selOverlay->resize(s);
             updateFrozenViews();
+            repositionFloatingObjects();
             break;
         }
         case QEvent::MouseButtonPress: {
@@ -3612,8 +3698,6 @@ bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
 // Styling
 // ─────────────────────────────────────────────────────────────────────────────
 void CalcModule::applyStyles() {
-    const auto& t = ThemeManager::instance().theme();
-
     setStyleSheet(QString(R"(
 /* ── Module root ─────────────────────────────────────────────────── */
 QWidget#calcModule {
@@ -3722,25 +3806,27 @@ QFrame#ribbonSep {
     margin: 4px 2px;
 }
 
-/* ── Formula bar row ─────────────────────────────────────────────── */
+/* ── Formula bar row (clean white) ───────────────────────────────── */
 QWidget#formulaBarRow {
-    background-color: %1;
-    border-bottom: 1px solid %2;
+    background-color: #FFFFFF;
+    border-bottom: 1px solid #E2E4E9;
 }
 
 /* ── Name box ───────────────────────────────────────────────────── */
 QLabel#nameBox {
-    color: #FFFFFF;
+    color: #1C1E26;
     font-size: 12px;
     font-weight: 700;
     font-family: "Segoe UI", "Inter", monospace;
-    background: transparent;
+    background: #F5F6F8;
+    border: 1px solid #E2E4E9;
+    border-radius: 4px;
     padding: 0 8px;
 }
 
 /* ── fx label ───────────────────────────────────────────────────── */
 QLabel#fxLabel {
-    color: %3;
+    color: #8A90A0;
     font-size: 12px;
     font-style: italic;
     font-family: "Segoe UI", serif;
@@ -3749,27 +3835,27 @@ QLabel#fxLabel {
 
 /* ── Separators ─────────────────────────────────────────────────── */
 QFrame#fbarSep {
-    background-color: rgba(255,255,255,0.12);
+    background-color: #E2E4E9;
     border: none;
 }
 
 /* ── Formula bar input ──────────────────────────────────────────── */
 QLineEdit#formulaBar {
-    background-color: rgba(255,255,255,0.08);
-    color: #FFFFFF;
+    background-color: #FFFFFF;
+    color: #1C1E26;
     border: none;
     border-left: none;
     padding: 4px 10px;
     font-size: 13px;
     font-family: "Segoe UI", "Consolas", monospace;
-    selection-background-color: %3;
+    selection-background-color: #107C41;
     selection-color: #FFFFFF;
 }
 QLineEdit#formulaBar:focus {
-    background-color: rgba(255,255,255,0.14);
+    background-color: #FFFFFF;
 }
 QLineEdit#formulaBar::placeholder {
-    color: rgba(255,255,255,0.35);
+    color: #AEB4C0;
 }
 
 /* ── Grid (QTableView) — Excel look ──────────────────────────────── */
@@ -3841,9 +3927,6 @@ QToolButton#sheetAddBtn:hover {
     border-radius: 4px;
 }
 )")
-    .arg(ThemeManager::cssColor(t.primary))      // %1 formula bar / header bg
-    .arg(ThemeManager::cssColor(t.accent))        // %2 dark border
-    .arg(ThemeManager::cssColor(t.secondary))     // %3 scarlet accent
     );
 }
 
