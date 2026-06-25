@@ -16,6 +16,7 @@
 #include <QTime>
 #include <QHash>
 #include <QRegularExpression>
+#include <algorithm>
 #include <cmath>
 
 namespace NativeOffice {
@@ -88,6 +89,76 @@ QString rewriteFormula(const QString& formula, GridOp op, int index) {
                 continue;
             }
             out += letters;                           // TRUE/FALSE/bare name
+            continue;
+        }
+        out += ch; ++i;
+    }
+    return out;
+}
+
+// Shift the *relative* cell references in a conditional-format formula by
+// (dCol,dRow). A '$' prefix locks that component (absolute) and is stripped from
+// the output so the existing FormulaEngine — which has no '$' support — can
+// evaluate the resulting concrete address. Skips string literals and function
+// names; leaves TRUE/FALSE and defined names verbatim.
+QString shiftCondFormula(const QString& formula, int dCol, int dRow) {
+    if (!formula.startsWith('=')) return formula;
+    const QString& s = formula;
+    QString out = "=";
+    int i = 1;
+    while (i < s.size()) {
+        const QChar ch = s[i];
+        if (ch == '"') {                               // string literal
+            out += ch; ++i;
+            while (i < s.size()) {
+                out += s[i];
+                if (s[i] == '"') {
+                    ++i;
+                    if (i < s.size() && s[i] == '"') { out += s[i]; ++i; continue; }
+                    break;
+                }
+                ++i;
+            }
+            continue;
+        }
+        // Possible cell reference: optional '$', letters, optional '$', digits.
+        if (ch == '$' || ch.isLetter()) {
+            const int start = i;
+            bool colAbs = false, rowAbs = false;
+            int j = i;
+            if (s[j] == '$') { colAbs = true; ++j; }
+            const int ls = j;
+            while (j < s.size() && s[j].isLetter()) ++j;
+            const QString letters = s.mid(ls, j - ls);
+
+            // Function name (no '$', letters followed by '(') → leave verbatim.
+            if (!colAbs && !letters.isEmpty()) {
+                int k = j;
+                while (k < s.size() && s[k].isSpace()) ++k;
+                if (k < s.size() && s[k] == '(') { out += letters; i = j; continue; }
+            }
+
+            int j2 = j;
+            if (j2 < s.size() && s[j2] == '$') { rowAbs = true; ++j2; }
+            const int ds = j2;
+            while (j2 < s.size() && s[j2].isDigit()) ++j2;
+            const QString digits = s.mid(ds, j2 - ds);
+
+            int col = 0, row = 0;
+            if (!letters.isEmpty() && !digits.isEmpty()
+                && FormulaEngine::parseCellRef(letters + digits, col, row)) {
+                if (!colAbs) col += dCol;
+                if (!rowAbs) row += dRow;
+                col = std::clamp(col, 0, SpreadsheetModel::NUM_COLS - 1);
+                row = std::clamp(row, 0, SpreadsheetModel::NUM_ROWS - 1);
+                out += FormulaEngine::cellAddress(col, row);
+                i = j2;
+                continue;
+            }
+
+            // Not a cell ref (TRUE/FALSE, a defined name, a stray '$').
+            if (!letters.isEmpty()) { out += letters; i = j; }
+            else { out += s[start]; i = start + 1; }
             continue;
         }
         out += ch; ++i;
@@ -182,12 +253,14 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
     }
 
     case Qt::FontRole: {
+        const CondFormatRule::Result cf = evalCondFormat(col, row);
+        const bool boldEff = fmt.bold || (cf.matched && cf.bold);
         if (fmt.fontFamily.isEmpty() && fmt.fontSize == 0
-            && !fmt.bold && !fmt.italic && !fmt.underline && !fmt.strike)
+            && !boldEff && !fmt.italic && !fmt.underline && !fmt.strike)
             return {};   // grid default font
         QFont f(fmt.fontFamily.isEmpty() ? QStringLiteral("Calibri") : fmt.fontFamily);
         f.setPointSize(fmt.fontSize > 0 ? fmt.fontSize : 11);
-        f.setBold(fmt.bold);
+        f.setBold(boldEff);
         f.setItalic(fmt.italic);
         f.setUnderline(fmt.underline);
         f.setStrikeOut(fmt.strike);
@@ -195,6 +268,10 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
     }
 
     case Qt::ForegroundRole: {
+        // Conditional formatting overrides the cell's own colour when matched.
+        const CondFormatRule::Result cf = evalCondFormat(col, row);
+        if (cf.matched && cf.textColor.isValid())
+            return cf.textColor;
         if (fmt.textColor.isValid())
             return fmt.textColor;
         const QString display = displayValue(col, row);
@@ -207,10 +284,15 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
         return QColor("#1C1E26");            // text → charcoal
     }
 
-    case Qt::BackgroundRole:
+    case Qt::BackgroundRole: {
+        // Conditional formatting fill wins over the cell's own fill.
+        const CondFormatRule::Result cf = evalCondFormat(col, row);
+        if (cf.matched && cf.bgColor.isValid())
+            return cf.bgColor;
         if (fmt.bgColor.isValid())
             return fmt.bgColor;
         return {};
+    }
 
     case Qt::ToolTipRole: {
         const QString cm = comment(col, row);
@@ -352,6 +434,50 @@ QString SpreadsheetModel::displayValue(int col, int row) const {
     const QString result = m_engine.evaluate(raw, lookup);
     m_evaluating[key]    = false;
     return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conditional formatting
+// ─────────────────────────────────────────────────────────────────────────────
+// Evaluate every rule covering (col,row). Each rule's formula has its relative
+// references shifted by the cell's offset from the rule's range top-left, then
+// is run through the same FormulaEngine as ordinary cells. A rule matches when
+// its formula yields TRUE (or a non-zero number). List order is priority order
+// (index 0 highest); the first rule to set a property wins it.
+CondFormatRule::Result SpreadsheetModel::evalCondFormat(int col, int row) const {
+    CondFormatRule::Result res;
+    if (m_condRules.isEmpty()) return res;
+
+    const FormulaEngine::CellLookup lookup =
+        [this](const QString& sheet, int c, int r) -> QString {
+            if (sheet.isEmpty()) return displayValue(c, r);
+            return m_crossSheetLookup ? m_crossSheetLookup(sheet, c, r)
+                                      : QString("#REF!");
+        };
+
+    for (const CondFormatRule& rule : m_condRules) {
+        if (!rule.range.contains(col, row)) continue;
+        if (!rule.formula.startsWith('=')) continue;
+
+        const int dCol = col - rule.range.left();
+        const int dRow = row - rule.range.top();
+        const QString concrete = shiftCondFormula(rule.formula, dCol, dRow);
+        const QString r = m_engine.evaluate(concrete, lookup).trimmed();
+
+        bool truthy = (r.compare(QStringLiteral("TRUE"), Qt::CaseInsensitive) == 0);
+        if (!truthy) {
+            bool isNum = false;
+            const double v = r.toDouble(&isNum);
+            if (isNum && v != 0.0) truthy = true;
+        }
+        if (!truthy) continue;
+
+        res.matched = true;
+        if (rule.bgColor.isValid()   && !res.bgColor.isValid())   res.bgColor   = rule.bgColor;
+        if (rule.textColor.isValid() && !res.textColor.isValid()) res.textColor = rule.textColor;
+        if (rule.bold) res.bold = true;
+    }
+    return res;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

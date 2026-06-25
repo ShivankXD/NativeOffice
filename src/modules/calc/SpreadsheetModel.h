@@ -28,6 +28,7 @@
 
 #include "Cell.h"
 #include "ChartSpec.h"
+#include "CondFormat.h"
 #include "FormulaEngine.h"
 
 #include <QAbstractTableModel>
@@ -164,6 +165,22 @@ public:
     void addChart(const ChartSpec& c) { m_charts.push_back(c); }
     void clearCharts() { m_charts.clear(); }
 
+    // ── Conditional formatting rules (stored in the data model) ──────────────
+    // Rules are evaluated live in data() for the colour/font roles. List order is
+    // priority order: index 0 is highest priority and wins each property it sets.
+    [[nodiscard]] const QVector<CondFormatRule>& condRules() const { return m_condRules; }
+    void setCondRules(const QVector<CondFormatRule>& r) { m_condRules = r; notifyAllChanged(); }
+    void addCondRule(const CondFormatRule& r) { m_condRules.push_back(r); notifyAllChanged(); }
+    void updateCondRule(int i, const CondFormatRule& r) {
+        if (i >= 0 && i < m_condRules.size()) { m_condRules[i] = r; notifyAllChanged(); }
+    }
+    void removeCondRule(int i) {
+        if (i >= 0 && i < m_condRules.size()) { m_condRules.remove(i); notifyAllChanged(); }
+    }
+    void clearCondRules() { m_condRules.clear(); notifyAllChanged(); }
+    // Evaluate every rule covering (col,row); returns the merged styling override.
+    [[nodiscard]] CondFormatRule::Result evalCondFormat(int col, int row) const;
+
     // ── Workbook context (multi-sheet) ──────────────────────────────────────
     void setSheetName(const QString& name) { m_sheetName = name; }
     [[nodiscard]] QString sheetName() const { return m_sheetName; }
@@ -190,6 +207,7 @@ private:
     QHash<int, int>  m_colWidths;
     QHash<int, int>  m_rowHeights;
     QVector<ChartSpec> m_charts;
+    QVector<CondFormatRule> m_condRules;
     QHash<QString, QString> m_definedNames;
     QHash<int, QString>     m_comments;
     QHash<int, QStringList> m_validations;

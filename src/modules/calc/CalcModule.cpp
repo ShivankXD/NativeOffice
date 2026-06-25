@@ -69,6 +69,15 @@
 #include <QTextOption>
 #include <QMenu>
 #include <QLocale>
+// Markdown / Pandas / Conditional formatting features
+#include <QPlainTextEdit>
+#include <QSyntaxHighlighter>
+#include <QTextCharFormat>
+#include <QRegularExpression>
+#include <QRadioButton>
+#include <QFormLayout>
+#include <QButtonGroup>
+#include <QPropertyAnimation>
 // Sprint 13: find/replace
 #include <QDialog>
 #include <QCheckBox>
@@ -624,6 +633,333 @@ static QRect refToMerge(const QString& ref) {
                  QPoint(qMax(c1, c2), qMax(r1, r2)));
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Data-export features (Markdown / Pandas) — file-local helpers & widgets
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Parse "A1" or "A1:C3" into a normalized QRect (left,top .. right,bottom).
+static QRect parseRangeRef(const QString& ref) {
+    const QString s = ref.trimmed();
+    if (s.isEmpty()) return {};
+    if (!s.contains(':')) {
+        int c = 0, r = 0;
+        if (!FormulaEngine::parseCellRef(s, c, r)) return {};
+        return QRect(c, r, 1, 1);
+    }
+    return refToMerge(s);   // handles the "A1:C3" form
+}
+
+// Build a GitHub-flavored Markdown table from the model's range. The first row
+// of the range is the header; the separator row matches each column's width
+// (minimum 3 dashes). Pipes inside cells are escaped; newlines flattened.
+static QString rangeToMarkdown(const SpreadsheetModel* m, const QRect& r) {
+    const int rows = r.height(), cols = r.width();
+    QVector<QVector<QString>> grid(rows, QVector<QString>(cols));
+    QVector<int> widths(cols, 3);
+    for (int rr = 0; rr < rows; ++rr)
+        for (int cc = 0; cc < cols; ++cc) {
+            QString v = m->displayValue(r.left() + cc, r.top() + rr);
+            v.replace('\\', "\\\\").replace('|', "\\|");
+            v.replace('\n', ' ').replace('\r', ' ');
+            grid[rr][cc] = v;
+            widths[cc] = std::max(widths[cc], int(v.size()));
+        }
+
+    auto rowLine = [&](const QVector<QString>& cells) {
+        QString line = "|";
+        for (int cc = 0; cc < cols; ++cc)
+            line += " " + cells[cc].leftJustified(widths[cc], ' ') + " |";
+        return line;
+    };
+
+    QStringList lines;
+    lines << rowLine(grid[0]);                       // header row
+    QString sep = "|";
+    for (int cc = 0; cc < cols; ++cc)
+        sep += " " + QString(widths[cc], '-') + " |";
+    lines << sep;                                    // separator row
+    for (int rr = 1; rr < rows; ++rr)
+        lines << rowLine(grid[rr]);
+    return lines.join('\n');
+}
+
+// Python string literal: wrap in double quotes, escaping backslash & quote.
+static QString pyStr(const QString& s) {
+    QString t = s;
+    t.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "");
+    return "\"" + t + "\"";
+}
+
+// A single CSV field: quote when it contains a comma, quote, or newline.
+static QString csvField(const QString& s) {
+    if (s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r')) {
+        QString t = s; t.replace('"', "\"\"");
+        return "\"" + t + "\"";
+    }
+    return s;
+}
+
+// Build pandas code from the model's range. The first row supplies column names.
+// csvMode=false → inline pd.DataFrame({...}); csvMode=true → CSV + read_csv.
+// Columns whose body values are all numeric become number lists; others become
+// string lists. Empty cells → None (inline) / "" (CSV).
+static QString rangeToPandas(const SpreadsheetModel* m, const QRect& r, bool csvMode) {
+    const int rows = r.height(), cols = r.width();
+    auto val = [&](int cc, int rr) { return m->displayValue(r.left() + cc, r.top() + rr); };
+
+    QStringList headers;
+    for (int cc = 0; cc < cols; ++cc) {
+        QString h = val(cc, 0);
+        if (h.trimmed().isEmpty()) h = QString("Column%1").arg(cc + 1);
+        headers << h;
+    }
+
+    if (csvMode) {
+        QStringList lines;
+        QStringList hcells;
+        for (int cc = 0; cc < cols; ++cc) hcells << csvField(headers[cc]);
+        lines << hcells.join(',');
+        for (int rr = 1; rr < rows; ++rr) {
+            QStringList cells;
+            for (int cc = 0; cc < cols; ++cc) cells << csvField(val(cc, rr));
+            lines << cells.join(',');
+        }
+        QString out;
+        out += "import pandas as pd\n";
+        out += "import io\n\n";
+        out += "csv_data = \"\"\"" + lines.join('\n') + "\"\"\"\n\n";
+        out += "df = pd.read_csv(io.StringIO(csv_data))\n";
+        return out;
+    }
+
+    // ── Inline DataFrame ──────────────────────────────────────────────────────
+    QString out;
+    out += "import pandas as pd\n\n";
+    out += "df = pd.DataFrame({\n";
+    for (int cc = 0; cc < cols; ++cc) {
+        bool numeric = (rows > 1);
+        for (int rr = 1; rr < rows; ++rr) {
+            const QString v = val(cc, rr);
+            if (v.isEmpty()) continue;
+            bool ok = false; v.toDouble(&ok);
+            if (!ok) { numeric = false; break; }
+        }
+        QStringList items;
+        for (int rr = 1; rr < rows; ++rr) {
+            const QString v = val(cc, rr);
+            if (v.isEmpty())     items << "None";
+            else if (numeric)    items << v;
+            else                 items << pyStr(v);
+        }
+        QString line = "    " + pyStr(headers[cc]) + ": [" + items.join(", ") + "]";
+        if (cc != cols - 1) line += ",";
+        out += line + "\n";
+    }
+    out += "})\n";
+    return out;
+}
+
+// Minimal Python syntax highlighter: keywords, strings, numbers, comments.
+class PythonHighlighter : public QSyntaxHighlighter {
+public:
+    explicit PythonHighlighter(QTextDocument* doc) : QSyntaxHighlighter(doc) {
+        m_kw.setForeground(QColor("#569CD6"));  m_kw.setFontWeight(QFont::Bold);
+        m_str.setForeground(QColor("#CE9178"));
+        m_num.setForeground(QColor("#B5CEA8"));
+        m_com.setForeground(QColor("#6A9955")); m_com.setFontItalic(true);
+        for (const QString& k : {QStringLiteral("import"), QStringLiteral("from"),
+                                 QStringLiteral("as"), QStringLiteral("def"),
+                                 QStringLiteral("return"), QStringLiteral("None"),
+                                 QStringLiteral("True"), QStringLiteral("False")})
+            m_keywords << QRegularExpression("\\b" + k + "\\b");
+    }
+protected:
+    void highlightBlock(const QString& text) override {
+        // numbers
+        QRegularExpression numRe("\\b[0-9]+(\\.[0-9]+)?\\b");
+        for (auto it = numRe.globalMatch(text); it.hasNext(); ) {
+            const auto mm = it.next();
+            setFormat(mm.capturedStart(), mm.capturedLength(), m_num);
+        }
+        // keywords
+        for (const QRegularExpression& re : m_keywords)
+            for (auto it = re.globalMatch(text); it.hasNext(); ) {
+                const auto mm = it.next();
+                setFormat(mm.capturedStart(), mm.capturedLength(), m_kw);
+            }
+        // strings (single line; override numbers/keywords within)
+        QRegularExpression strRe("\"[^\"]*\"|'[^']*'");
+        for (auto it = strRe.globalMatch(text); it.hasNext(); ) {
+            const auto mm = it.next();
+            setFormat(mm.capturedStart(), mm.capturedLength(), m_str);
+        }
+        // comment to end of line
+        const int h = text.indexOf('#');
+        if (h >= 0) setFormat(h, text.size() - h, m_com);
+    }
+private:
+    QTextCharFormat m_kw, m_str, m_num, m_com;
+    QVector<QRegularExpression> m_keywords;
+};
+
+// Non-blocking floating panel showing generated pandas code with a mode toggle,
+// Expand, Copy and Close. Uses std::function callbacks (file-local; no moc).
+class PandasCodeWidget : public QFrame {
+public:
+    std::function<void()> onModeChanged;
+    std::function<void()> onCopy;
+    std::function<void()> onClose;
+
+    explicit PandasCodeWidget(QWidget* parent) : QFrame(parent) {
+        setObjectName("pandasPanel");
+        setAutoFillBackground(true);
+        setAttribute(Qt::WA_NoMousePropagation);
+        setStyleSheet("QFrame#pandasPanel{background:#1E1E2E;border:1px solid #3A3D4A;"
+                      "border-radius:6px;}");
+        setMinimumSize(300, 180);
+
+        auto* v = new QVBoxLayout(this);
+        v->setContentsMargins(0, 0, 0, 0);
+        v->setSpacing(0);
+
+        // ── Title bar (drag handle) ──────────────────────────────────────────
+        m_bar = new QWidget(this);
+        m_bar->setObjectName("pandasBar");
+        m_bar->setCursor(Qt::SizeAllCursor);
+        m_bar->setStyleSheet("QWidget#pandasBar{background:#2A2C3A;"
+                             "border-top-left-radius:6px;border-top-right-radius:6px;}");
+        auto* hb = new QHBoxLayout(m_bar);
+        hb->setContentsMargins(10, 5, 5, 5);
+        hb->setSpacing(6);
+        auto* title = new QLabel("Pandas Export", m_bar);
+        title->setStyleSheet("color:#E6E6EF;font-weight:bold;font-size:11px;background:transparent;");
+        hb->addWidget(title);
+        hb->addStretch(1);
+
+        auto mkBtn = [this](const QString& text, const QString& tip) {
+            auto* b = new QToolButton(m_bar);
+            b->setText(text);
+            b->setToolTip(tip);
+            b->setCursor(Qt::ArrowCursor);
+            b->setStyleSheet("QToolButton{border:none;color:#C9CBD6;background:transparent;"
+                             "font-size:11px;padding:2px 6px;border-radius:3px;}"
+                             "QToolButton:hover{background:#3D4051;color:#FFFFFF;}");
+            return b;
+        };
+        m_expandBtn = mkBtn("Expand", "Expand / Restore the panel");
+        m_copyBtn   = mkBtn("Copy",   "Copy code to clipboard");
+        m_closeBtn  = mkBtn("\xE2\x9C\x95", "Close");
+        hb->addWidget(m_expandBtn);
+        hb->addWidget(m_copyBtn);
+        hb->addWidget(m_closeBtn);
+        v->addWidget(m_bar);
+
+        // ── Mode toggle row ──────────────────────────────────────────────────
+        auto* modeRow = new QWidget(this);
+        modeRow->setStyleSheet("background:#23232F;");
+        auto* mr = new QHBoxLayout(modeRow);
+        mr->setContentsMargins(10, 4, 10, 4);
+        mr->setSpacing(12);
+        auto* lbl = new QLabel("Output:", modeRow);
+        lbl->setStyleSheet("color:#9AA0AC;font-size:10px;background:transparent;");
+        m_inlineBtn = new QRadioButton("Inline DataFrame", modeRow);
+        m_csvBtn    = new QRadioButton("CSV + read_csv", modeRow);
+        m_inlineBtn->setChecked(true);
+        const QString rbStyle = "QRadioButton{color:#D7DAE3;font-size:10px;background:transparent;}";
+        m_inlineBtn->setStyleSheet(rbStyle);
+        m_csvBtn->setStyleSheet(rbStyle);
+        mr->addWidget(lbl);
+        mr->addWidget(m_inlineBtn);
+        mr->addWidget(m_csvBtn);
+        mr->addStretch(1);
+        v->addWidget(modeRow);
+
+        // ── Code view ────────────────────────────────────────────────────────
+        m_edit = new QPlainTextEdit(this);
+        m_edit->setReadOnly(true);
+        m_edit->setLineWrapMode(QPlainTextEdit::NoWrap);
+        QFont mono("Consolas");
+        mono.setStyleHint(QFont::Monospace);
+        mono.setPointSize(10);
+        m_edit->setFont(mono);
+        m_edit->setStyleSheet("QPlainTextEdit{background:#1E1E2E;color:#D4D4D4;border:none;"
+                              "selection-background-color:#264F78;padding:4px;}");
+        new PythonHighlighter(m_edit->document());
+        v->addWidget(m_edit, 1);
+
+        connect(m_inlineBtn, &QRadioButton::toggled, this, [this](bool){ if (onModeChanged) onModeChanged(); });
+        connect(m_copyBtn,   &QToolButton::clicked,  this, [this]{ if (onCopy) onCopy(); });
+        connect(m_closeBtn,  &QToolButton::clicked,  this, [this]{ if (onClose) onClose(); });
+        connect(m_expandBtn, &QToolButton::clicked,  this, [this]{ toggleExpand(); });
+
+        m_bar->installEventFilter(this);
+    }
+
+    void setCode(const QString& code) {
+        if (m_edit->toPlainText() != code) m_edit->setPlainText(code);
+    }
+    [[nodiscard]] QString code() const { return m_edit->toPlainText(); }
+    [[nodiscard]] bool csvMode() const { return m_csvBtn->isChecked(); }
+
+protected:
+    void mousePressEvent(QMouseEvent* e) override { e->accept(); }  // no fall-through
+    void mouseDoubleClickEvent(QMouseEvent* e) override { e->accept(); }
+
+    bool eventFilter(QObject* w, QEvent* e) override {
+        if (w == m_bar) {
+            if (e->type() == QEvent::MouseButtonPress) {
+                m_drag = true;
+                m_press = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
+                m_start = geometry(); raise(); return true;
+            } else if (e->type() == QEvent::MouseMove && m_drag) {
+                const QPoint d = static_cast<QMouseEvent*>(e)->globalPosition().toPoint() - m_press;
+                QRect g = m_start; g.moveTopLeft(m_start.topLeft() + d);
+                if (parentWidget()) {
+                    const QRect pr = parentWidget()->rect();
+                    if (g.left() < 0) g.moveLeft(0);
+                    if (g.top()  < 0) g.moveTop(0);
+                    if (g.right()  > pr.right())  g.moveRight(pr.right());
+                    if (g.bottom() > pr.bottom()) g.moveBottom(pr.bottom());
+                }
+                setGeometry(g); return true;
+            } else if (e->type() == QEvent::MouseButtonRelease && m_drag) {
+                m_drag = false; return true;
+            }
+        }
+        return QFrame::eventFilter(w, e);
+    }
+
+private:
+    void toggleExpand() {
+        if (!parentWidget()) return;
+        if (!m_expanded) {
+            m_normalGeom = geometry();
+            const QRect pr = parentWidget()->rect();
+            setGeometry(pr.adjusted(24, 24, -24, -24));
+            m_expandBtn->setText("Restore");
+            m_expanded = true;
+        } else {
+            setGeometry(m_normalGeom);
+            m_expandBtn->setText("Expand");
+            m_expanded = false;
+        }
+        raise();
+    }
+
+    QWidget*        m_bar       { nullptr };
+    QPlainTextEdit* m_edit      { nullptr };
+    QRadioButton*   m_inlineBtn { nullptr };
+    QRadioButton*   m_csvBtn    { nullptr };
+    QToolButton*    m_expandBtn { nullptr };
+    QToolButton*    m_copyBtn   { nullptr };
+    QToolButton*    m_closeBtn  { nullptr };
+    bool   m_drag     { false };
+    bool   m_expanded { false };
+    QPoint m_press;
+    QRect  m_start;
+    QRect  m_normalGeom;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -645,7 +981,6 @@ CalcModule::CalcModule(QWidget* parent)
     auto repaintOverlays = [this]{ m_selOverlay->update(); m_ants->update(); updateFrozenViews(); repositionFloatingObjects(); };
     connect(m_tableView->horizontalScrollBar(), &QScrollBar::valueChanged, this, repaintOverlays);
     connect(m_tableView->verticalScrollBar(),   &QScrollBar::valueChanged, this, repaintOverlays);
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -845,6 +1180,9 @@ void CalcModule::onSelectionChanged() {
 
     // Reflect the active cell's formatting in the toolbar.
     updateToolbarFromCell();
+
+    // Live-refresh the pandas-code panel for the new selection (if open).
+    updatePandasCode();
 }
 
 void CalcModule::onFormulaBarReturnPressed() {
@@ -1521,7 +1859,8 @@ void CalcModule::buildRibbon() {
 
         // ── Styles ────────────────────────────────────────────────────────────────
         QHBoxLayout* styles = group(pl, "Styles");
-        soonBig(styles, "cond-format",  "Conditional", "Conditional Formatting");
+        act(styles, "cond-format", "Conditional", "Conditional Formatting",
+            [this]{ showConditionalFormatDialog(); });
         soonBig(styles, "format-table", "Format Table", "Format as Table");
         soonBig(styles, "cell-styles",  "Cell Styles");
 
@@ -3373,12 +3712,272 @@ void CalcModule::onGridContextMenu(const QPoint& pos) {
     QAction* delRow = menu.addAction("Delete Row");
     QAction* insCol = menu.addAction("Insert Column");
     QAction* delCol = menu.addAction("Delete Column");
+    menu.addSeparator();
+    QAction* mdCopy  = menu.addAction(calcIcon("table"), "Copy as Markdown Table");
+    QAction* pandas  = menu.addAction(calcIcon("sigma"), "Export as Pandas Code");
+    QAction* condFmt = menu.addAction(calcIcon("fill"),  "Conditional Formatting…");
 
     const QAction* a = menu.exec(m_tableView->viewport()->mapToGlobal(pos));
-    if      (a == insRow) m_model->insertRowAt(row);
-    else if (a == delRow) m_model->deleteRowAt(row);
-    else if (a == insCol) m_model->insertColumnAt(col);
-    else if (a == delCol) m_model->deleteColumnAt(col);
+    if      (a == insRow)  m_model->insertRowAt(row);
+    else if (a == delRow)  m_model->deleteRowAt(row);
+    else if (a == insCol)  m_model->insertColumnAt(col);
+    else if (a == delCol)  m_model->deleteColumnAt(col);
+    else if (a == mdCopy)  copySelectionAsMarkdown();
+    else if (a == pandas)  exportSelectionAsPandas();
+    else if (a == condFmt) showConditionalFormatDialog();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Feature 1 — Copy as Markdown Table
+// ═════════════════════════════════════════════════════════════════════════════
+void CalcModule::copySelectionAsMarkdown() {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+    QGuiApplication::clipboard()->setText(rangeToMarkdown(m_model, r));
+    showToast("Copied as Markdown!");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Feature 3 — Export Selection as Pandas Python Code (live, non-blocking panel)
+// ═════════════════════════════════════════════════════════════════════════════
+void CalcModule::exportSelectionAsPandas() {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+
+    if (!m_pandasPanel) {
+        auto* w = new PandasCodeWidget(this);
+        m_pandasPanel = w;
+        w->onModeChanged = [this]{ updatePandasCode(); };
+        w->onCopy = [this]{
+            auto* p = static_cast<PandasCodeWidget*>(m_pandasPanel);
+            QGuiApplication::clipboard()->setText(p->code());
+            showToast("Pandas code copied!");
+        };
+        w->onClose = [this]{
+            QWidget* p = m_pandasPanel;
+            m_pandasPanel = nullptr;
+            if (p) p->deleteLater();
+        };
+        const int pw = 460, ph = 320;
+        const int x = std::max(8, width()  - pw - 24);
+        const int y = std::max(8, height() - ph - 60);
+        w->setGeometry(x, y, pw, ph);
+    }
+    updatePandasCode();
+    m_pandasPanel->show();
+    m_pandasPanel->raise();
+}
+
+void CalcModule::updatePandasCode() {
+    if (!m_pandasPanel) return;
+    auto* p = static_cast<PandasCodeWidget*>(m_pandasPanel);
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() == 0) return;
+    p->setCode(rangeToPandas(m_model, r, p->csvMode()));
+}
+
+// ── Toast / snackbar ─────────────────────────────────────────────────────────
+void CalcModule::showToast(const QString& message) {
+    if (!m_toast) {
+        m_toast = new QLabel(this);
+        m_toast->setObjectName("calcToast");
+        m_toast->setAlignment(Qt::AlignCenter);
+        m_toast->setAttribute(Qt::WA_TransparentForMouseEvents);
+        m_toast->setStyleSheet(
+            "QLabel#calcToast{background:rgba(32,34,44,235);color:#FFFFFF;"
+            "padding:9px 20px;border-radius:18px;font-size:12px;font-weight:bold;}");
+        m_toast->hide();
+    }
+    m_toast->setText(message);
+    m_toast->adjustSize();
+    m_toast->move((width() - m_toast->width()) / 2,
+                  std::max(8, height() - m_toast->height() - 48));
+    m_toast->raise();
+    m_toast->show();
+    QTimer::singleShot(1900, m_toast, [this]{ if (m_toast) m_toast->hide(); });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Feature 2 — Conditional Formatting with formula rules (add / manage)
+// ═════════════════════════════════════════════════════════════════════════════
+void CalcModule::showConditionalFormatDialog() {
+    if (m_condDialog) {
+        m_condDialog->show();
+        m_condDialog->raise();
+        m_condDialog->activateWindow();
+        return;
+    }
+
+    auto* dlg = new QDialog(this);
+    m_condDialog = dlg;
+    dlg->setWindowTitle("Conditional Formatting");
+    dlg->setModal(false);
+    dlg->resize(520, 420);
+    connect(dlg, &QObject::destroyed, this, [this]{ m_condDialog = nullptr; });
+
+    auto* root = new QVBoxLayout(dlg);
+
+    // ── Existing rules list (Manage Rules) ────────────────────────────────────
+    root->addWidget(new QLabel("Rules (top = highest priority):", dlg));
+    auto* list = new QListWidget(dlg);
+    list->setStyleSheet("QListWidget{border:1px solid #D4D4D4;}");
+    root->addWidget(list, 1);
+
+    // ── Editor form ───────────────────────────────────────────────────────────
+    auto* form = new QFormLayout;
+    auto* rangeEdit   = new QLineEdit(dlg);
+    auto* formulaEdit = new QLineEdit(dlg);
+    formulaEdit->setPlaceholderText("e.g.  =A1<0   or   =$C1=\"Done\"");
+
+    // Colour state lives in shared QColors so the picker lambdas can mutate them.
+    auto fillColor = std::make_shared<QColor>();
+    auto textColor = std::make_shared<QColor>();
+
+    auto* fillBtn = new QToolButton(dlg);  fillBtn->setText("No fill");  fillBtn->setMinimumWidth(120);
+    auto* textBtn = new QToolButton(dlg);  textBtn->setText("Automatic"); textBtn->setMinimumWidth(120);
+    auto* boldChk = new QCheckBox("Bold when rule matches", dlg);
+
+    auto swatch = [](QToolButton* b, const QColor& c, const QString& none) {
+        if (c.isValid()) {
+            b->setText(c.name().toUpper());
+            const bool dark = c.lightness() < 130;
+            b->setStyleSheet(QString("QToolButton{background:%1;color:%2;border:1px solid #999;"
+                                     "padding:3px 8px;}").arg(c.name(), dark ? "#FFF" : "#000"));
+        } else {
+            b->setText(none);
+            b->setStyleSheet("QToolButton{border:1px solid #999;padding:3px 8px;}");
+        }
+    };
+
+    form->addRow("Apply to range:", rangeEdit);
+    form->addRow("Formula rule:",   formulaEdit);
+    form->addRow("Fill colour:",    fillBtn);
+    form->addRow("Text colour:",    textBtn);
+    form->addRow(QString(),         boldChk);
+    root->addLayout(form);
+
+    // ── Action buttons ────────────────────────────────────────────────────────
+    auto* btnRow = new QHBoxLayout;
+    auto* addBtn    = new QPushButton("Add Rule", dlg);
+    auto* updateBtn = new QPushButton("Update", dlg);
+    auto* deleteBtn = new QPushButton("Delete", dlg);
+    auto* closeBtn  = new QPushButton("Close", dlg);
+    addBtn->setDefault(true);
+    btnRow->addWidget(addBtn);
+    btnRow->addWidget(updateBtn);
+    btnRow->addWidget(deleteBtn);
+    btnRow->addStretch(1);
+    btnRow->addWidget(closeBtn);
+    root->addLayout(btnRow);
+
+    // ── Helpers shared by the connections ─────────────────────────────────────
+    auto refresh = [this, list] {
+        list->clear();
+        const auto& rules = m_model->condRules();
+        for (const CondFormatRule& r : rules) {
+            auto* item = new QListWidgetItem(
+                QString("%1   →   %2").arg(mergeToRef(r.range), r.formula));
+            if (r.bgColor.isValid())   item->setBackground(r.bgColor);
+            if (r.textColor.isValid()) item->setForeground(r.textColor);
+            if (r.bold) { QFont f = item->font(); f.setBold(true); item->setFont(f); }
+            list->addItem(item);
+        }
+    };
+
+    // Prefill from the current selection.
+    auto prefill = [this, rangeEdit, formulaEdit] {
+        const QRect r = selectedRect();
+        if (r.width() > 0 && r.height() > 0) {
+            rangeEdit->setText(mergeToRef(r));
+            if (formulaEdit->text().isEmpty())
+                formulaEdit->setText("=" + FormulaEngine::cellAddress(r.left(), r.top()) + ">0");
+        }
+    };
+
+    swatch(fillBtn, *fillColor, "No fill");
+    swatch(textBtn, *textColor, "Automatic");
+    prefill();
+    refresh();
+
+    // Colour pickers (Ctrl/right-click clears back to none).
+    connect(fillBtn, &QToolButton::clicked, this, [=] {
+        const QColor c = QColorDialog::getColor(
+            fillColor->isValid() ? *fillColor : QColor("#FFF2CC"),
+            m_condDialog, "Fill Colour");
+        if (c.isValid()) { *fillColor = c; swatch(fillBtn, c, "No fill"); }
+    });
+    connect(textBtn, &QToolButton::clicked, this, [=] {
+        const QColor c = QColorDialog::getColor(
+            textColor->isValid() ? *textColor : QColor("#E8372A"),
+            m_condDialog, "Text Colour");
+        if (c.isValid()) { *textColor = c; swatch(textBtn, c, "Automatic"); }
+    });
+
+    // Build a rule from the form (returns false if invalid).
+    auto buildRule = [=](CondFormatRule& rule) -> bool {
+        const QRect range = parseRangeRef(rangeEdit->text());
+        if (!range.isValid() || range.width() == 0 || range.height() == 0) {
+            showToast("Enter a valid range, e.g. B1:B10");
+            return false;
+        }
+        QString formula = formulaEdit->text().trimmed();
+        if (formula.isEmpty()) { showToast("Enter a formula rule"); return false; }
+        if (!formula.startsWith('=')) formula.prepend('=');
+        rule.range     = range;
+        rule.formula   = formula;
+        rule.bgColor   = *fillColor;
+        rule.textColor = *textColor;
+        rule.bold      = boldChk->isChecked();
+        return true;
+    };
+
+    connect(addBtn, &QPushButton::clicked, this, [=] {
+        CondFormatRule rule;
+        if (!buildRule(rule)) return;
+        m_model->addCondRule(rule);
+        markDirty();
+        refresh();
+        list->setCurrentRow(m_model->condRules().size() - 1);
+        showToast("Rule added");
+    });
+
+    connect(updateBtn, &QPushButton::clicked, this, [=] {
+        const int i = list->currentRow();
+        if (i < 0) { showToast("Select a rule to update"); return; }
+        CondFormatRule rule;
+        if (!buildRule(rule)) return;
+        m_model->updateCondRule(i, rule);
+        markDirty();
+        refresh();
+        list->setCurrentRow(i);
+    });
+
+    connect(deleteBtn, &QPushButton::clicked, this, [=] {
+        const int i = list->currentRow();
+        if (i < 0) { showToast("Select a rule to delete"); return; }
+        m_model->removeCondRule(i);
+        markDirty();
+        refresh();
+    });
+
+    // Clicking a rule loads it into the editor for editing.
+    connect(list, &QListWidget::currentRowChanged, this, [=](int i) {
+        const auto& rules = m_model->condRules();
+        if (i < 0 || i >= rules.size()) return;
+        const CondFormatRule& r = rules[i];
+        rangeEdit->setText(mergeToRef(r.range));
+        formulaEdit->setText(r.formula);
+        *fillColor = r.bgColor;
+        *textColor = r.textColor;
+        swatch(fillBtn, r.bgColor, "No fill");
+        swatch(textBtn, r.textColor, "Automatic");
+        boldChk->setChecked(r.bold);
+    });
+
+    connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
+
+    dlg->show();
+    dlg->raise();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4143,6 +4742,19 @@ bool CalcModule::saveToPath(const QString& path) {
             }
             sheetObj["charts"] = ca;
         }
+        if (!s->condRules().isEmpty()) {
+            QJsonArray cfa;
+            for (const CondFormatRule& cr : s->condRules()) {
+                QJsonObject o;
+                o["range"]   = mergeToRef(cr.range);
+                o["formula"] = cr.formula;
+                if (cr.bgColor.isValid())   o["bg"] = cr.bgColor.name(QColor::HexArgb);
+                if (cr.textColor.isValid()) o["fg"] = cr.textColor.name(QColor::HexArgb);
+                if (cr.bold)                o["bold"] = true;
+                cfa.append(o);
+            }
+            sheetObj["condfmt"] = cfa;
+        }
         sheetsArr.append(sheetObj);
     }
 
@@ -4263,6 +4875,20 @@ bool CalcModule::loadFromPath(const QString& path) {
                     cs.push_back(s);
                 }
                 m->setCharts(cs);
+            }
+            if (so.contains("condfmt")) {
+                QVector<CondFormatRule> rules;
+                for (const QJsonValue& cv : so["condfmt"].toArray()) {
+                    const QJsonObject o = cv.toObject();
+                    CondFormatRule r;
+                    r.range   = parseRangeRef(o["range"].toString());
+                    r.formula = o["formula"].toString();
+                    if (o.contains("bg")) r.bgColor   = QColor(o["bg"].toString());
+                    if (o.contains("fg")) r.textColor = QColor(o["fg"].toString());
+                    r.bold = o.value("bold").toBool();
+                    if (r.range.isValid() && !r.formula.isEmpty()) rules.push_back(r);
+                }
+                m->setCondRules(rules);
             }
         }
         m_activeSheet = root.value("activeSheet").toInt(0);

@@ -134,6 +134,11 @@ private slots:
     void onColHeaderMenu(const QPoint& pos);
     void onGridContextMenu(const QPoint& pos);
 
+    // ── Data-export & conditional-formatting features ─────────────────────────
+    void copySelectionAsMarkdown();        // selection → GitHub Markdown table
+    void exportSelectionAsPandas();        // selection → live pandas-code panel
+    void showConditionalFormatDialog();    // add/manage conditional-format rules
+
     // ── Find / Replace ───────────────────────────────────────────────────────
     void showFindDialog();
     void showReplaceDialog();
@@ -237,6 +242,12 @@ private:
 
     // Show a transient "coming soon" tooltip for not-yet-implemented features.
     void notImplemented(const QString& feature);
+
+    // Briefly show a toast/snackbar message at the bottom of the module.
+    void showToast(const QString& message);
+
+    // Regenerate the live pandas-code panel from the current selection (if open).
+    void updatePandasCode();
 
     // Sort the used data region by the active column (undoable).
     void sortByColumn(bool ascending);
@@ -396,6 +407,11 @@ private:
     QTableView* m_frozenCorner { nullptr };
     int m_freezeRows { 0 };
     int m_freezeCols { 0 };
+
+    // ── Data-export & conditional-formatting state ────────────────────────────
+    QWidget* m_pandasPanel { nullptr };   // live pandas-code panel (file-local type)
+    QDialog* m_condDialog  { nullptr };   // conditional-formatting manager dialog
+    QLabel*  m_toast       { nullptr };   // transient snackbar label
 
     // ── File state (Sprint 8) ─────────────────────────────────────────────
     QString m_currentPath;

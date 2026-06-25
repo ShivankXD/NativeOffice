@@ -12,6 +12,7 @@ add_library(CalcModule STATIC
     ChartObject.cpp
     ChartObject.h
     ChartSpec.h
+    CondFormat.h
     CalcCommands.cpp
     CalcCommands.h
     Cell.h
