@@ -19,10 +19,12 @@
 #include <QWidget>
 #include <QTextEdit>
 #include <QString>
+#include <QFont>
 
 namespace NativeOffice {
 
-class WriterToolbar;
+class WriterRibbon;
+class WriterStatusBar;
 
 class WriterModule : public QWidget {
     Q_OBJECT
@@ -68,9 +70,19 @@ private:
     void buildUi();
     void applyCanvasStyles();
 
-    WriterToolbar* m_toolbar     { nullptr };
-    QWidget*       m_canvas      { nullptr };
-    QTextEdit*     m_editor      { nullptr };
+    // Sprint 14: status bar wiring
+    void updateStatus();              // recomputes word + page count
+    void applyZoom(int percent);      // status-bar zoom slider
+    void setWebLayout(bool web);      // print/web page-view toggle
+
+    WriterRibbon*    m_ribbon    { nullptr };
+    WriterStatusBar* m_statusBar { nullptr };
+    QWidget*         m_canvas    { nullptr };
+    QTextEdit*       m_editor    { nullptr };
+
+    QFont          m_baseFont;                // body font at 100% zoom
+    int            m_zoom         { 100 };
+    bool           m_webLayout    { false };
 
     QString        m_currentPath;             // empty = untitled
     bool           m_dirty       { false };

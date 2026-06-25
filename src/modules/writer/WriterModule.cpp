@@ -3,7 +3,8 @@
 // Word processor with integrated .noff file I/O and image insertion.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "WriterModule.h"
-#include "WriterToolbar.h"
+#include "WriterRibbon.h"
+#include "WriterStatusBar.h"
 #include "core/theme/ThemeManager.h"
 
 #include <QVBoxLayout>
@@ -24,6 +25,8 @@
 #include <QImage>
 #include <QBuffer>
 #include <QByteArray>
+#include <QRegularExpression>
+#include <QtMath>
 
 namespace NativeOffice {
 
@@ -42,8 +45,8 @@ void WriterModule::buildUi() {
     rootLayout->setContentsMargins(0, 0, 0, 0);
     rootLayout->setSpacing(0);
 
-    // ── Toolbar ───────────────────────────────────────────────────────────
-    m_toolbar = new WriterToolbar(this);
+    // ── Ribbon (WPS/Word-style tabbed toolbar) ────────────────────────────
+    m_ribbon = new WriterRibbon(this);
 
     // ── Canvas (scrollable area behind the paper) ─────────────────────────
     m_canvas = new QWidget(this);
@@ -59,6 +62,7 @@ void WriterModule::buildUi() {
     m_editor->setObjectName("writerPaper");
     m_editor->setAcceptRichText(true);
     m_editor->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    m_editor->setPlaceholderText(tr("Start typing your document..."));
 
     // A4 proportions at 96 dpi: 794 × 1123 px
     m_editor->setFixedWidth(794);
@@ -68,16 +72,15 @@ void WriterModule::buildUi() {
     // Document margins (~2.5 cm)
     m_editor->document()->setDocumentMargin(60.0);
 
-    // Default character format
+    // Body font lives on the document's default font so it scales with zoom;
+    // the default char format only fixes family + colour (no explicit size).
+    m_baseFont = QFont("Segoe UI", 12);
+    m_editor->document()->setDefaultFont(m_baseFont);
+
     QTextCharFormat defaultFmt;
     defaultFmt.setFontFamilies({"Segoe UI", "Inter", "Roboto", "sans-serif"});
-    defaultFmt.setFontPointSize(12);
     defaultFmt.setForeground(QColor("#1C1E26"));
     m_editor->setCurrentCharFormat(defaultFmt);
-
-    QTextCursor cur(m_editor->document());
-    cur.select(QTextCursor::Document);
-    cur.mergeCharFormat(defaultFmt);
 
     // Drop-shadow (paper-on-desk effect)
     auto* shadow = new QGraphicsDropShadowEffect(m_editor);
@@ -97,21 +100,32 @@ void WriterModule::buildUi() {
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
-    rootLayout->addWidget(m_toolbar);
+    // ── Status bar ────────────────────────────────────────────────────────
+    m_statusBar = new WriterStatusBar(this);
+
+    rootLayout->addWidget(m_ribbon);
     rootLayout->addWidget(scroll, 1);
+    rootLayout->addWidget(m_statusBar);
 
-    // ── Wire toolbar → editor ─────────────────────────────────────────────
-    m_toolbar->attachEditor(m_editor);
+    // ── Wire ribbon → editor ──────────────────────────────────────────────
+    m_ribbon->attachEditor(m_editor);
+    connect(m_ribbon, &WriterRibbon::insertImageRequested,
+            this,     &WriterModule::insertImage);
 
-    // Sprint 10: Wire Insert Image toolbar button to our handler
-    connect(m_toolbar, &WriterToolbar::insertImageRequested,
-            this,      &WriterModule::insertImage);
+    // ── Wire status bar ───────────────────────────────────────────────────
+    connect(m_statusBar, &WriterStatusBar::zoomChanged,
+            this, &WriterModule::applyZoom);
+    connect(m_statusBar, &WriterStatusBar::webLayoutToggled,
+            this, &WriterModule::setWebLayout);
 
-    // ── Dirty-state tracking ──────────────────────────────────────────────
+    // ── Dirty-state + live status tracking ────────────────────────────────
     connect(m_editor->document(), &QTextDocument::contentsChanged,
             this, &WriterModule::onContentsChanged);
+    connect(m_editor->document(), &QTextDocument::contentsChanged,
+            this, &WriterModule::updateStatus);
 
     applyCanvasStyles();
+    updateStatus();
     m_editor->setFocus();
 }
 
@@ -243,6 +257,69 @@ QScrollArea#writerScroll > QWidget > QWidget {
     .arg(ThemeManager::cssColor(t.primary))
     .arg(ThemeManager::cssColor(t.secondary))
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprint 14: Status bar — live word/page count, zoom, page-view layout
+// ─────────────────────────────────────────────────────────────────────────────
+void WriterModule::updateStatus() {
+    if (!m_editor || !m_statusBar) return;
+
+    // Word count
+    const QString text = m_editor->document()->toPlainText().trimmed();
+    const int words = text.isEmpty()
+                          ? 0
+                          : static_cast<int>(text.split(QRegularExpression("\\s+"),
+                                                        Qt::SkipEmptyParts).size());
+    m_statusBar->setWordCount(words);
+
+    // Page count — content height divided by a (zoom-scaled) A4 page height.
+    const double z = m_zoom / 100.0;
+    const double pageH = 1123.0 * z;
+    const double docH  = m_editor->document()->size().height();
+    const int pages = qMax(1, static_cast<int>(std::ceil(docH / qMax(1.0, pageH))));
+    m_statusBar->setPageInfo(1, pages);
+}
+
+void WriterModule::applyZoom(int percent) {
+    if (!m_editor) return;
+    m_zoom = percent;
+    const double z = percent / 100.0;
+
+    const bool guard = m_ignoreChange;
+    m_ignoreChange = true;
+
+    QFont f = m_baseFont;
+    f.setPointSizeF(m_baseFont.pointSizeF() * z);
+    m_editor->document()->setDefaultFont(f);
+    m_editor->document()->setDocumentMargin(60.0 * z);
+
+    if (!m_webLayout) {
+        m_editor->setFixedWidth(static_cast<int>(794 * z));
+        m_editor->setMinimumHeight(static_cast<int>(1123 * z));
+    }
+
+    m_ignoreChange = guard;
+    updateStatus();
+}
+
+void WriterModule::setWebLayout(bool web) {
+    if (!m_editor) return;
+    m_webLayout = web;
+    const double z = m_zoom / 100.0;
+
+    if (web) {
+        // Full-width, fluid page — fill the canvas.
+        m_editor->setMinimumWidth(0);
+        m_editor->setMaximumWidth(QWIDGETSIZE_MAX);
+        m_editor->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    } else {
+        // Paged A4 view.
+        m_editor->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+        m_editor->setFixedWidth(static_cast<int>(794 * z));
+        m_editor->setMinimumHeight(static_cast<int>(1123 * z));
+    }
+    updateStatus();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

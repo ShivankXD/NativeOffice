@@ -1,8 +1,10 @@
 add_library(WriterModule STATIC
     WriterModule.cpp
     WriterModule.h
-    WriterToolbar.cpp
-    WriterToolbar.h
+    WriterRibbon.cpp
+    WriterRibbon.h
+    WriterStatusBar.cpp
+    WriterStatusBar.h
 )
 
 target_include_directories(WriterModule PUBLIC
