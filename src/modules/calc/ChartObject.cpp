@@ -12,6 +12,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QResizeEvent>
+#include <QContextMenuEvent>
 #include <QPainter>
 #include <QVector>
 #include <QStringList>
@@ -60,62 +61,36 @@ ChartObject::ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget
 {
     setObjectName("chartObject");
     setFrameShape(QFrame::NoFrame);
+    setAutoFillBackground(true);
+    // Solid object that swallows clicks (so they don't fall through to the grid).
+    setAttribute(Qt::WA_NoMousePropagation);
+    setCursor(Qt::SizeAllCursor);   // drag the body to move it (Excel-style)
     setStyleSheet(
-        "QFrame#chartObject{background:#FFFFFF;border:1px solid #C2C7CE;border-radius:5px;}");
+        "QFrame#chartObject{background:#FFFFFF;border:1px solid #C2C7CE;}");
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(1, 1, 1, 1);
     v->setSpacing(0);
 
-    // ── Title bar (drag handle) ───────────────────────────────────────────────
-    m_bar = new QWidget(this);
-    m_bar->setObjectName("chartBar");
-    m_bar->setFixedHeight(24);
-    m_bar->setCursor(Qt::SizeAllCursor);
-    m_bar->setStyleSheet(
-        "QWidget#chartBar{background:#F3F4F6;border-top-left-radius:4px;"
-        "border-top-right-radius:4px;border-bottom:1px solid #E3E6EA;}"
-        "QToolButton{border:none;background:transparent;color:#5A5F66;padding:2px;}"
-        "QToolButton:hover{background:#E2E8E4;border-radius:3px;}");
-    auto* bl = new QHBoxLayout(m_bar);
-    bl->setContentsMargins(8, 0, 4, 0);
-    bl->setSpacing(2);
-    m_titleBar = new QLabel("Chart", m_bar);
-    m_titleBar->setStyleSheet("color:#3A3D42;font:600 11px 'Segoe UI';background:transparent;");
-    m_typeBtn = new QToolButton(m_bar);
-    m_typeBtn->setIcon(calcIcon("chart"));
-    m_typeBtn->setIconSize(QSize(15, 15));
-    m_typeBtn->setToolTip("Change chart type");
-    m_typeBtn->setPopupMode(QToolButton::InstantPopup);
-    m_typeBtn->setFocusPolicy(Qt::NoFocus);
-    {
-        auto* menu = new QMenu(m_typeBtn);
-        const ChartType types[] = { ChartType::Column, ChartType::Bar, ChartType::Line,
-                                    ChartType::Area, ChartType::Pie, ChartType::Scatter };
-        for (ChartType t : types) {
-            connect(menu->addAction(chartTypeName(t)), &QAction::triggered, this, [this, t]{
-                setChartType(t);
-                emit geometryEdited();
-            });
-        }
-        m_typeBtn->setMenu(menu);
-    }
-    m_closeBtn = new QToolButton(m_bar);
-    m_closeBtn->setText("✕");
-    m_closeBtn->setToolTip("Delete chart");
-    m_closeBtn->setFocusPolicy(Qt::NoFocus);
-    connect(m_closeBtn, &QToolButton::clicked, this, [this]{ emit closed(this); });
-    bl->addWidget(m_titleBar, 1);
-    bl->addWidget(m_typeBtn);
-    bl->addWidget(m_closeBtn);
-
-    // ── Chart view ────────────────────────────────────────────────────────────
+    // ── Chart view (fills the object; transparent to mouse so the body drags) ──
     m_view = new QChartView(this);
     m_view->setRenderHint(QPainter::Antialiasing);
-    m_view->setStyleSheet("background:transparent;border:none;");
-
-    v->addWidget(m_bar);
+    m_view->setStyleSheet("background:#FFFFFF;border:none;");
+    m_view->setAttribute(Qt::WA_TransparentForMouseEvents);
     v->addWidget(m_view, 1);
+
+    // ── Small delete button, top-right corner ──────────────────────────────────
+    m_closeBtn = new QToolButton(this);
+    m_closeBtn->setText("\xE2\x9C\x95");
+    m_closeBtn->setCursor(Qt::ArrowCursor);
+    m_closeBtn->setFixedSize(16, 16);
+    m_closeBtn->setToolTip("Delete chart");
+    m_closeBtn->setFocusPolicy(Qt::NoFocus);
+    m_closeBtn->setStyleSheet(
+        "QToolButton{border:none;background:rgba(255,255,255,210);color:#8A8A8A;"
+        "font-size:11px;border-radius:2px;}"
+        "QToolButton:hover{color:#E8372A;background:#FDECEA;}");
+    connect(m_closeBtn, &QToolButton::clicked, this, [this]{ emit closed(this); });
 
     // ── Resize grip (bottom-right) ────────────────────────────────────────────
     m_grip = new QWidget(this);
@@ -124,12 +99,16 @@ ChartObject::ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget
     m_grip->setStyleSheet("background:transparent;");
 
     setGeometry(spec.geom.isValid() ? spec.geom : QRect(40, 40, 420, 280));
-
-    m_bar->installEventFilter(this);
-    m_titleBar->installEventFilter(this);
     m_grip->installEventFilter(this);
-
+    setSelected(false);        // bare chart until clicked (Excel/WPS style)
     rebuild();
+}
+
+void ChartObject::setSelected(bool on) {
+    setStyleSheet(QString("QFrame#chartObject{background:#FFFFFF;border:1px %1;}")
+                      .arg(on ? "solid #1A73E8" : "solid transparent"));
+    if (m_closeBtn) m_closeBtn->setVisible(on);
+    if (m_grip)     m_grip->setVisible(on);
 }
 
 ChartSpec ChartObject::spec() const {
@@ -142,51 +121,69 @@ ChartSpec ChartObject::spec() const {
 
 void ChartObject::resizeEvent(QResizeEvent* e) {
     QFrame::resizeEvent(e);
+    if (m_closeBtn) { m_closeBtn->move(width() - 18, 2); m_closeBtn->raise(); }
     if (m_grip) {
         m_grip->move(width() - m_grip->width(), height() - m_grip->height());
         m_grip->raise();
     }
 }
 
+// Drag the body to move (clicks never fall through to the grid).
 void ChartObject::mousePressEvent(QMouseEvent* e) {
-    emit selected(this);
-    raise();
-    QFrame::mousePressEvent(e);
+    if (e->button() == Qt::LeftButton) {
+        setSelected(true);
+        emit selected(this);      // module deselects the others
+        m_dragging  = true;
+        m_pressPos  = e->globalPosition().toPoint();
+        m_startGeom = geometry();
+        raise();
+    }
+    e->accept();
 }
 
-// ── Drag (title bar) + resize (grip) via event filters ─────────────────────────
-bool ChartObject::eventFilter(QObject* w, QEvent* e) {
-    if (w == m_bar || w == m_titleBar) {
-        if (e->type() == QEvent::MouseButtonPress) {
-            auto* me = static_cast<QMouseEvent*>(e);
-            if (me->button() == Qt::LeftButton) {
-                m_dragging  = true;
-                m_pressPos  = me->globalPosition().toPoint();
-                m_startGeom = geometry();
-                emit selected(this);
-                raise();
-                return true;
-            }
-        } else if (e->type() == QEvent::MouseMove && m_dragging) {
-            auto* me = static_cast<QMouseEvent*>(e);
-            const QPoint d = me->globalPosition().toPoint() - m_pressPos;
-            QRect g = m_startGeom;
-            g.moveTopLeft(m_startGeom.topLeft() + d);
-            if (parentWidget()) {
-                const QRect pr = parentWidget()->rect();
-                if (g.left() < 0) g.moveLeft(0);
-                if (g.top()  < 0) g.moveTop(0);
-                if (g.right()  > pr.right())  g.moveRight(pr.right());
-                if (g.bottom() > pr.bottom()) g.moveBottom(pr.bottom());
-            }
-            setGeometry(g);
-            return true;
-        } else if (e->type() == QEvent::MouseButtonRelease && m_dragging) {
-            m_dragging = false;
-            emit geometryEdited();
-            return true;
+void ChartObject::mouseMoveEvent(QMouseEvent* e) {
+    if (m_dragging) {
+        const QPoint d = e->globalPosition().toPoint() - m_pressPos;
+        QRect g = m_startGeom;
+        g.moveTopLeft(m_startGeom.topLeft() + d);
+        if (parentWidget()) {
+            const QRect pr = parentWidget()->rect();
+            if (g.left() < 0) g.moveLeft(0);
+            if (g.top()  < 0) g.moveTop(0);
+            if (g.right()  > pr.right())  g.moveRight(pr.right());
+            if (g.bottom() > pr.bottom()) g.moveBottom(pr.bottom());
         }
+        setGeometry(g);
     }
+    e->accept();
+}
+
+void ChartObject::mouseReleaseEvent(QMouseEvent* e) {
+    if (m_dragging) { m_dragging = false; emit geometryEdited(); }
+    e->accept();
+}
+
+void ChartObject::mouseDoubleClickEvent(QMouseEvent* e) {
+    e->accept();          // don't let a double-click edit the cell underneath
+}
+
+// Right-click → change chart type / delete (replaces the old title-bar buttons).
+void ChartObject::contextMenuEvent(QContextMenuEvent* e) {
+    QMenu menu(this);
+    const ChartType types[] = { ChartType::Column, ChartType::Bar, ChartType::Line,
+                                ChartType::Area, ChartType::Pie, ChartType::Scatter };
+    for (ChartType t : types)
+        connect(menu.addAction(chartTypeName(t)), &QAction::triggered, this, [this, t]{
+            setChartType(t); emit geometryEdited();
+        });
+    menu.addSeparator();
+    connect(menu.addAction("Delete Chart"), &QAction::triggered, this, [this]{ emit closed(this); });
+    menu.exec(e->globalPos());
+    e->accept();
+}
+
+// ── Resize via the bottom-right grip ───────────────────────────────────────────
+bool ChartObject::eventFilter(QObject* w, QEvent* e) {
     if (w == m_grip) {
         if (e->type() == QEvent::MouseButtonPress) {
             auto* me = static_cast<QMouseEvent*>(e);
@@ -260,6 +257,7 @@ void ChartObject::rebuild() {
     auto* chart = new QChart();
     chart->setAnimationOptions(QChart::SeriesAnimations);
     chart->setBackgroundRoundness(0);
+    chart->setBackgroundBrush(QBrush(Qt::white));   // opaque — cover the cells
     chart->setMargins(QMargins(4, 2, 4, 2));
     chart->legend()->setVisible(series.size() > 1 || m_type == ChartType::Pie);
     chart->legend()->setAlignment(Qt::AlignBottom);
@@ -268,7 +266,6 @@ void ChartObject::rebuild() {
     chart->setTitle(cornerTitle.isEmpty()
                         ? QString("%1 Chart").arg(chartTypeName(m_type))
                         : cornerTitle);
-    m_titleBar->setText(chart->title());
 
     switch (m_type) {
     case ChartType::Column:

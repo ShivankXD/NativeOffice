@@ -37,6 +37,9 @@ public:
 
     void setChartType(ChartType t) { m_type = t; rebuild(); }
 
+    // Excel-style: chrome (border + handles + delete) only shows when selected.
+    void setSelected(bool on);
+
 signals:
     void closed(ChartObject* self);
     void geometryEdited();          // emitted after a drag/resize finishes
@@ -45,6 +48,10 @@ signals:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void mousePressEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
+    void mouseDoubleClickEvent(QMouseEvent* e) override;
+    void contextMenuEvent(QContextMenuEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
 
 private:
@@ -52,10 +59,7 @@ private:
     ChartType         m_type  { ChartType::Column };
     QRect             m_range;
 
-    QWidget*     m_bar      { nullptr };
-    QLabel*      m_titleBar { nullptr };
     QToolButton* m_closeBtn { nullptr };
-    QToolButton* m_typeBtn  { nullptr };
     QWidget*     m_grip     { nullptr };
     QChartView*  m_view     { nullptr };
 

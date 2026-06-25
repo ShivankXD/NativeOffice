@@ -229,60 +229,89 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 class FloatingItem : public QFrame {
 public:
-    std::function<void()> onMoved;          // fired after a drag / resize finishes
+    std::function<void()> onMoved;              // fired after a drag / resize finishes
+    std::function<void(QWidget*)> onSelected;   // fired when clicked (module deselects others)
+
+    void setSelected(bool on) {
+        setStyleSheet(QString("QFrame#floatItem{background:#FFFFFF;border:1px %1;}")
+                          .arg(on ? "solid #1A73E8" : "solid transparent"));
+        if (m_close)    m_close->setVisible(on);
+        if (m_moveGrip) m_moveGrip->setVisible(on);
+        if (m_grip)     m_grip->setVisible(on);
+    }
 
     FloatingItem(QWidget* content, const QRect& geom, QWidget* parent)
         : QFrame(parent)
     {
         setObjectName("floatItem");
+        setAutoFillBackground(true);
+        setAttribute(Qt::WA_NoMousePropagation);   // swallow clicks, no fall-through
+        setCursor(Qt::SizeAllCursor);              // drag the body to move
         setStyleSheet("QFrame#floatItem{background:#FFFFFF;border:1px solid #B6BBC2;}");
         auto* v = new QVBoxLayout(this);
-        v->setContentsMargins(1, 16, 1, 1);
+        v->setContentsMargins(1, 1, 1, 1);
         v->setSpacing(0);
 
-        m_bar = new QWidget(this);
-        m_bar->setObjectName("floatBar");
-        m_bar->setCursor(Qt::SizeAllCursor);
-        m_bar->setStyleSheet("QWidget#floatBar{background:#F3F4F6;}");
+        if (content) { content->setParent(this); v->addWidget(content); }
+
+        // Small delete button, top-right corner.
         m_close = new QToolButton(this);
-        m_close->setText("✕");
-        m_close->setStyleSheet("QToolButton{border:none;background:transparent;color:#888;font-size:10px;}");
+        m_close->setText("\xE2\x9C\x95");
+        m_close->setCursor(Qt::ArrowCursor);
+        m_close->setFixedSize(16, 16);
+        m_close->setStyleSheet(
+            "QToolButton{border:none;background:rgba(255,255,255,210);color:#8A8A8A;"
+            "font-size:11px;border-radius:2px;} QToolButton:hover{color:#E8372A;background:#FDECEA;}");
         connect(m_close, &QToolButton::clicked, this, [this]{ deleteLater(); });
 
-        if (content) { content->setParent(this); v->addWidget(content); }
+        // Top-left move handle (lets even an editable text box be dragged).
+        m_moveGrip = new QWidget(this);
+        m_moveGrip->setFixedSize(14, 14);
+        m_moveGrip->setCursor(Qt::SizeAllCursor);
+        m_moveGrip->setStyleSheet("background:rgba(182,187,194,160);border-radius:2px;");
 
         m_grip = new QWidget(this);
         m_grip->setFixedSize(14, 14);
         m_grip->setCursor(Qt::SizeFDiagCursor);
         m_grip->setStyleSheet("background:transparent;");
 
-        setMinimumSize(80, 60);
+        setMinimumSize(60, 44);
         setGeometry(geom);
-        m_bar->installEventFilter(this);
+        m_moveGrip->installEventFilter(this);
         m_grip->installEventFilter(this);
+        setSelected(false);        // bare object until clicked (Excel/WPS style)
     }
 protected:
     void resizeEvent(QResizeEvent*) override {
-        if (m_bar)   m_bar->setGeometry(0, 0, width(), 15);
-        if (m_close) m_close->move(width() - 16, 0);
-        if (m_grip)  { m_grip->move(width() - 14, height() - 14); m_grip->raise(); }
+        if (m_close)    m_close->move(width() - 18, 2);
+        if (m_moveGrip) m_moveGrip->move(2, 2);
+        if (m_grip)     { m_grip->move(width() - 14, height() - 14); m_grip->raise(); }
+        if (m_close)    m_close->raise();
     }
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton) {
+            setSelected(true); if (onSelected) onSelected(this);
+            m_drag = true; m_press = e->globalPosition().toPoint(); m_start = geometry(); raise();
+        }
+        e->accept();
+    }
+    void mouseMoveEvent(QMouseEvent* e) override {
+        if (m_drag) { moveBy(e->globalPosition().toPoint()); }
+        e->accept();
+    }
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (m_drag) { m_drag = false; if (onMoved) onMoved(); }
+        e->accept();
+    }
+    void mouseDoubleClickEvent(QMouseEvent* e) override { e->accept(); }
     bool eventFilter(QObject* w, QEvent* e) override {
-        if (w == m_bar) {
+        if (w == m_moveGrip) {
             if (e->type() == QEvent::MouseButtonPress) {
+                setSelected(true); if (onSelected) onSelected(this);
                 m_drag = true; m_press = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
                 m_start = geometry(); raise(); return true;
             } else if (e->type() == QEvent::MouseMove && m_drag) {
-                const QPoint d = static_cast<QMouseEvent*>(e)->globalPosition().toPoint() - m_press;
-                QRect g = m_start; g.moveTopLeft(m_start.topLeft() + d);
-                if (parentWidget()) {
-                    const QRect pr = parentWidget()->rect();
-                    if (g.left() < 0) g.moveLeft(0);
-                    if (g.top()  < 0) g.moveTop(0);
-                    if (g.right()  > pr.right())  g.moveRight(pr.right());
-                    if (g.bottom() > pr.bottom()) g.moveBottom(pr.bottom());
-                }
-                setGeometry(g); return true;
+                moveBy(static_cast<QMouseEvent*>(e)->globalPosition().toPoint()); return true;
             } else if (e->type() == QEvent::MouseButtonRelease && m_drag) {
                 m_drag = false; if (onMoved) onMoved(); return true;
             }
@@ -293,7 +322,7 @@ protected:
                 m_start = geometry(); return true;
             } else if (e->type() == QEvent::MouseMove && m_resize) {
                 const QPoint d = static_cast<QMouseEvent*>(e)->globalPosition().toPoint() - m_press;
-                resize(std::max(80, m_start.width() + d.x()), std::max(60, m_start.height() + d.y()));
+                resize(std::max(60, m_start.width() + d.x()), std::max(44, m_start.height() + d.y()));
                 return true;
             } else if (e->type() == QEvent::MouseButtonRelease && m_resize) {
                 m_resize = false; if (onMoved) onMoved(); return true;
@@ -302,9 +331,20 @@ protected:
         return QFrame::eventFilter(w, e);
     }
 private:
-    QWidget*     m_bar   { nullptr };
-    QToolButton* m_close { nullptr };
-    QWidget*     m_grip  { nullptr };
+    void moveBy(const QPoint& globalPos) {
+        QRect g = m_start; g.moveTopLeft(m_start.topLeft() + (globalPos - m_press));
+        if (parentWidget()) {
+            const QRect pr = parentWidget()->rect();
+            if (g.left() < 0) g.moveLeft(0);
+            if (g.top()  < 0) g.moveTop(0);
+            if (g.right()  > pr.right())  g.moveRight(pr.right());
+            if (g.bottom() > pr.bottom()) g.moveBottom(pr.bottom());
+        }
+        setGeometry(g);
+    }
+    QToolButton* m_close    { nullptr };
+    QWidget*     m_moveGrip { nullptr };
+    QWidget*     m_grip     { nullptr };
     bool   m_drag   { false };
     bool   m_resize { false };
     QPoint m_press;
@@ -406,11 +446,13 @@ public:
                                      : CellFormat{};
 
         // ── Background ───────────────────────────────────────────────────────
+        // Always fill (white by default) so the view's own current-cell focus
+        // artifact (a stray blue caret/line) never shows through plain cells.
+        QColor bg = QColor("#FFFFFF");
         const QVariant bgv = idx.data(Qt::BackgroundRole);
-        if (bgv.canConvert<QColor>()) {
-            const QColor bg = bgv.value<QColor>();
-            if (bg.isValid()) p->fillRect(opt.rect, bg);
-        }
+        if (bgv.canConvert<QColor>() && bgv.value<QColor>().isValid())
+            bg = bgv.value<QColor>();
+        p->fillRect(opt.rect, bg);
         if (opt.state & QStyle::State_Selected)
             p->fillRect(opt.rect, QColor(16, 124, 65, 28));   // green selection tint
 
@@ -507,16 +549,17 @@ public:
         QWidget* ed = QStyledItemDelegate::createEditor(parent, opt, idx);
         if (auto* le = qobject_cast<QLineEdit*>(ed)) {
             le->setFrame(false);
-            // Caret colour follows QPalette::Text — force it dark, not blue.
+            le->setStyleSheet(
+                "QLineEdit{border:1px solid #107C41;background:#FFFFFF;"
+                "color:#1C1E26;padding:0 2px;margin:0;}");
+            // Caret colour follows QPalette::Text — set AFTER the stylesheet so it
+            // isn't reset back to the system accent (the stray blue caret).
             QPalette pal = le->palette();
             pal.setColor(QPalette::Text,            QColor("#1C1E26"));
             pal.setColor(QPalette::Base,            QColor("#FFFFFF"));
             pal.setColor(QPalette::Highlight,       QColor("#107C41"));
             pal.setColor(QPalette::HighlightedText, QColor("#FFFFFF"));
             le->setPalette(pal);
-            le->setStyleSheet(
-                "QLineEdit{border:1px solid #107C41;background:#FFFFFF;"
-                "color:#1C1E26;padding:0 2px;margin:0;}");
         }
         return ed;
     }
@@ -1933,6 +1976,7 @@ void CalcModule::buildRibbon() {
     addToggleSc(QKeySequence("Ctrl+B"), m_boldBtn);
     addToggleSc(QKeySequence("Ctrl+I"), m_italicBtn);
     addToggleSc(QKeySequence("Ctrl+U"), m_underlineBtn);
+
 }
 
 // Insert =FN(range) into the active cell, auto-detecting a contiguous numeric
@@ -1985,6 +2029,7 @@ ChartObject* CalcModule::createChartObject(const ChartSpec& spec) {
         syncChartSpecs();
         markDirty();
     });
+    connect(obj, &ChartObject::selected, this, [this](ChartObject* c){ selectFloatingObject(c); });
     m_chartObjs.push_back(obj);
     anchorWidget(obj);              // anchor to the cell it sits over
     return obj;
@@ -2003,7 +2048,8 @@ void CalcModule::insertChart(ChartType type) {
     spec.geom = QRect(36 + 18 * m_chartObjs.size() % 120,
                       28 + 18 * m_chartObjs.size() % 120, w, 290);
 
-    createChartObject(spec);
+    ChartObject* obj = createChartObject(spec);
+    selectFloatingObject(obj);     // newly inserted object starts selected
     syncChartSpecs();
     markDirty();
 }
@@ -2242,6 +2288,12 @@ void CalcModule::repositionFloatingObjects() {
     }
 }
 
+void CalcModule::selectFloatingObject(QWidget* obj) {
+    for (ChartObject* c : m_chartObjs) c->setSelected(c == obj);
+    for (QWidget* w : m_floatingItems)
+        static_cast<FloatingItem*>(w)->setSelected(w == obj);
+}
+
 // ── Insert ───────────────────────────────────────────────────────────────────
 void CalcModule::insertImagePixmap(const QPixmap& src) {
     if (src.isNull()) return;
@@ -2250,13 +2302,16 @@ void CalcModule::insertImagePixmap(const QPixmap& src) {
     lbl->setPixmap(pm);
     lbl->setScaledContents(true);
     lbl->setStyleSheet("background:#FFFFFF;");
-    const QRect g(40, 30, pm.width() + 2, pm.height() + 17);
+    lbl->setAttribute(Qt::WA_TransparentForMouseEvents);   // body drags the object
+    const QRect g(40, 30, pm.width() + 4, pm.height() + 4);
     auto* item = new FloatingItem(lbl, g, m_tableView->viewport());
     item->show(); item->raise();
     m_floatingItems.push_back(item);
     anchorWidget(item);
     item->onMoved = [this, item]{ anchorWidget(item); };
+    item->onSelected = [this](QWidget* o){ selectFloatingObject(o); };
     connect(item, &QObject::destroyed, this, [this](QObject* o){ m_objAnchors.remove(static_cast<QWidget*>(o)); });
+    selectFloatingObject(item);
     markDirty();
 }
 
@@ -2278,7 +2333,9 @@ void CalcModule::insertTextBoxObject() {
     m_floatingItems.push_back(item);
     anchorWidget(item);
     item->onMoved = [this, item]{ anchorWidget(item); };
+    item->onSelected = [this](QWidget* o){ selectFloatingObject(o); };
     connect(item, &QObject::destroyed, this, [this](QObject* o){ m_objAnchors.remove(static_cast<QWidget*>(o)); });
+    selectFloatingObject(item);
     edit->setFocus();
     markDirty();
 }
@@ -3657,6 +3714,7 @@ bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
         case QEvent::MouseButtonPress: {
             auto* me = static_cast<QMouseEvent*>(event);
             if (me->button() == Qt::LeftButton) {
+                selectFloatingObject(nullptr);         // clicking the grid deselects objects
                 const QRect sel = selectedRect();
                 const QRect br = m_tableView->visualRect(
                     m_model->index(sel.bottom(), sel.right()));

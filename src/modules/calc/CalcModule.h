@@ -377,6 +377,7 @@ private:
     void anchorWidget(QWidget* w);             // record the cell under w's top-left
     void repositionFloatingObjects();          // move anchored objects on scroll/resize
     void insertImagePixmap(const QPixmap& pm); // create a floating image from a pixmap
+    void selectFloatingObject(QWidget* obj);   // select obj, deselect every other object
 
     // ── AutoFilter: column → set of allowed display values ─────────────────────
     QHash<int, QSet<QString>> m_columnFilters;
