@@ -58,6 +58,16 @@ signals:
     // Forwarded to WriterModule (which owns the embed pipeline).
     void insertImageRequested();
 
+    // Page-level operations handled by WriterModule (owns page geometry/zoom).
+    void zoomInRequested();
+    void zoomOutRequested();
+    void zoomResetRequested();
+    void pageMarginsRequested(double px);
+    void orientationRequested(bool landscape);
+    void pageSizeRequested(double portraitW, double portraitH);
+    void pageColorRequested(const QColor& color);
+    void webLayoutRequested(bool web);
+
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;
 
@@ -65,6 +75,11 @@ private:
     // ── tab construction ────────────────────────────────────────────────────
     QWidget* buildHomeTab();
     QWidget* buildInsertTab();
+    QWidget* buildPageLayoutTab();
+    QWidget* buildReferencesTab();
+    QWidget* buildReviewTab();
+    QWidget* buildViewTab();
+    QWidget* buildToolsTab();
     QWidget* buildPlaceholderTab(const QString& tabName);
 
     // ── small builders (ported from the Impress ribbon visual language) ─────
@@ -117,6 +132,38 @@ private:
     void insertHeaderFooter(bool header);
     void insertEquation(const QString& text);
     void insertChart(int kind);
+
+    // ── References / Review / Tools actions ─────────────────────────────────
+    void changeParagraphIndent(int side, double deltaPx);  // side: 0 left, 1 right
+    void changeParagraphSpacing(bool before, double deltaPx);
+    void insertTableOfContents();
+    void insertFootnote();
+    void insertCitation(const QString& text);
+    void insertBibliography();
+    void insertCaption(const QString& kind);
+    void insertComment();
+    void showWordCountDialog();
+    void showSpellingDialog();
+
+    // Sprint 16 — denser tab feature set
+    void setTextDirection(bool rtl);
+    void applyPageBorders(int kind);          // 0 none, 1 box, 2 shadow
+    void insertEndnote();
+    void insertTableOfFigures();
+    void insertCrossReference();
+    void markIndexEntry();
+    void insertIndex();
+    void deleteComments(bool all);
+    void gotoComment(bool next);
+    void acceptAllChanges();
+    void setReadOnly(bool on);
+    void toggleFullScreen();
+    void exportToPdf();
+    void exportToPicture();
+    void exportToText();
+
+    QToolButton* makeRowBtn(const QIcon& icon, const QString& text, const QString& tip,
+                            bool checkable = false);
 
     // find & replace
     void openFindReplace();

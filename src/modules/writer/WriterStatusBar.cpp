@@ -169,4 +169,11 @@ void WriterStatusBar::setZoomPercent(int percent) {
     m_zoomLabel->setText(QString::number(percent) + "%");
 }
 
+void WriterStatusBar::setWebLayoutActive(bool web) {
+    const QSignalBlocker b1(m_btnPrint);
+    const QSignalBlocker b2(m_btnWeb);
+    m_btnPrint->setChecked(!web);
+    m_btnWeb->setChecked(web);
+}
+
 } // namespace NativeOffice

@@ -5,6 +5,8 @@ add_library(WriterModule STATIC
     WriterRibbon.h
     WriterStatusBar.cpp
     WriterStatusBar.h
+    PagedTextEdit.cpp
+    PagedTextEdit.h
 )
 
 target_include_directories(WriterModule PUBLIC

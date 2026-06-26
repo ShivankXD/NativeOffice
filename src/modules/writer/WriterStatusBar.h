@@ -26,6 +26,7 @@ public:
     void setPageInfo(int current, int total);
     void setWordCount(int words);
     void setZoomPercent(int percent);   // updates slider/label without re-emitting
+    void setWebLayoutActive(bool web);  // sync print/web toggle without re-emitting
 
 signals:
     void zoomChanged(int percent);

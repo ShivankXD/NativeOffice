@@ -23,10 +23,13 @@
 
 class QTimer;
 
+class QScrollArea;
+
 namespace NativeOffice {
 
 class WriterRibbon;
 class WriterStatusBar;
+class PagedTextEdit;
 
 class WriterModule : public QWidget {
     Q_OBJECT
@@ -83,16 +86,31 @@ private:
     void setWebLayout(bool web);      // print/web page-view toggle
     void zoomBy(int deltaPercent);    // Ctrl+scroll zoom step
 
+    // Sprint 15: Page Layout (driven by ribbon signals)
+    void setPageMargin(double px);
+    void setOrientation(bool landscape);
+    void setPageSize(double portraitW, double portraitH);
+    void setPageColor(const QColor& color);
+
     WriterRibbon*    m_ribbon    { nullptr };
     WriterStatusBar* m_statusBar { nullptr };
     QWidget*         m_canvas    { nullptr };
-    QTextEdit*       m_editor    { nullptr };
+    QScrollArea*     m_scroll    { nullptr };
+    QTextEdit*       m_editor    { nullptr };   // == m_paper (QTextEdit API surface)
+    PagedTextEdit*   m_paper     { nullptr };   // same object, paged-specific calls
     QTimer*          m_statusTimer { nullptr };  // debounce for updateStatus
 
     QFont          m_baseFont;                // body font at 100% zoom
     int            m_zoom         { 100 };
     bool           m_webLayout    { false };
     bool           m_applyingZoom { false };  // re-entrancy guard for applyZoom
+
+    // Page geometry at 100% zoom (portrait base dims; landscape swaps them).
+    double         m_basePageW   { 794.0 };   // A4 width  @96dpi
+    double         m_basePageH   { 1123.0 };  // A4 height @96dpi
+    double         m_pageMargin  { 60.0 };
+    bool           m_landscape   { false };
+    QColor         m_pageColor   { "#FFFFFF" };
 
     QString        m_currentPath;             // empty = untitled
     bool           m_dirty       { false };
