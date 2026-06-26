@@ -64,6 +64,7 @@ protected:
 private:
     // ── tab construction ────────────────────────────────────────────────────
     QWidget* buildHomeTab();
+    QWidget* buildInsertTab();
     QWidget* buildPlaceholderTab(const QString& tabName);
 
     // ── small builders (ported from the Impress ribbon visual language) ─────
@@ -97,6 +98,25 @@ private:
 
     // format painter
     void toggleFormatPainter(bool on);
+
+    // ── Insert-tab actions (operate directly on the editor) ─────────────────
+    void insertImageData(const QImage& img);   // embed a QImage as base64 PNG
+    void insertTableSized(int rows, int cols);
+    void insertPageBreak();
+    void insertHorizontalRule();
+    void insertHyperlink();
+    void insertBookmark();
+    void insertPageNumberField();
+    void insertTextBox();
+    void insertWordArt();
+    void insertDropCap();
+    void insertDateTimeText(const QString& formatted);
+    void insertSymbolText(const QString& sym);
+    void insertShapeImage(int kind);
+    void insertCoverPage();
+    void insertHeaderFooter(bool header);
+    void insertEquation(const QString& text);
+    void insertChart(int kind);
 
     // find & replace
     void openFindReplace();

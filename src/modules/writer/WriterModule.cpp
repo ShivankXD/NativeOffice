@@ -27,6 +27,9 @@
 #include <QByteArray>
 #include <QRegularExpression>
 #include <QtMath>
+#include <QWheelEvent>
+#include <QEvent>
+#include <QTimer>
 
 namespace NativeOffice {
 
@@ -100,8 +103,19 @@ void WriterModule::buildUi() {
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
+    // Ctrl+scroll over the page (or the surrounding canvas) zooms in/out.
+    m_editor->viewport()->installEventFilter(this);
+    scroll->viewport()->installEventFilter(this);
+
     // ── Status bar ────────────────────────────────────────────────────────
     m_statusBar = new WriterStatusBar(this);
+
+    // Word/page count is recomputed off a debounce timer so that fast typing
+    // and zooming don't force a full document relayout on every event.
+    m_statusTimer = new QTimer(this);
+    m_statusTimer->setSingleShot(true);
+    m_statusTimer->setInterval(220);
+    connect(m_statusTimer, &QTimer::timeout, this, &WriterModule::updateStatus);
 
     rootLayout->addWidget(m_ribbon);
     rootLayout->addWidget(scroll, 1);
@@ -122,7 +136,7 @@ void WriterModule::buildUi() {
     connect(m_editor->document(), &QTextDocument::contentsChanged,
             this, &WriterModule::onContentsChanged);
     connect(m_editor->document(), &QTextDocument::contentsChanged,
-            this, &WriterModule::updateStatus);
+            this, &WriterModule::scheduleStatusUpdate);
 
     applyCanvasStyles();
     updateStatus();
@@ -262,6 +276,10 @@ QScrollArea#writerScroll > QWidget > QWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // Sprint 14: Status bar — live word/page count, zoom, page-view layout
 // ─────────────────────────────────────────────────────────────────────────────
+void WriterModule::scheduleStatusUpdate() {
+    if (m_statusTimer) m_statusTimer->start();   // (re)start the debounce window
+}
+
 void WriterModule::updateStatus() {
     if (!m_editor || !m_statusBar) return;
 
@@ -282,7 +300,8 @@ void WriterModule::updateStatus() {
 }
 
 void WriterModule::applyZoom(int percent) {
-    if (!m_editor) return;
+    if (!m_editor || m_applyingZoom) return;   // ignore re-entrant calls
+    m_applyingZoom = true;
     m_zoom = percent;
     const double z = percent / 100.0;
 
@@ -300,7 +319,26 @@ void WriterModule::applyZoom(int percent) {
     }
 
     m_ignoreChange = guard;
-    updateStatus();
+    m_applyingZoom = false;
+    scheduleStatusUpdate();   // debounced — avoids forcing layout per wheel tick
+}
+
+bool WriterModule::eventFilter(QObject* obj, QEvent* ev) {
+    if (ev->type() == QEvent::Wheel) {
+        auto* we = static_cast<QWheelEvent*>(ev);
+        if (we->modifiers() & Qt::ControlModifier) {
+            zoomBy(we->angleDelta().y() > 0 ? +10 : -10);
+            return true;   // consume so the editor doesn't also scroll/zoom
+        }
+    }
+    return QWidget::eventFilter(obj, ev);
+}
+
+void WriterModule::zoomBy(int deltaPercent) {
+    const int nz = qBound(75, m_zoom + deltaPercent, 200);
+    if (nz == m_zoom) return;
+    applyZoom(nz);
+    if (m_statusBar) m_statusBar->setZoomPercent(nz);  // keep the slider in sync
 }
 
 void WriterModule::setWebLayout(bool web) {
@@ -319,7 +357,7 @@ void WriterModule::setWebLayout(bool web) {
         m_editor->setFixedWidth(static_cast<int>(794 * z));
         m_editor->setMinimumHeight(static_cast<int>(1123 * z));
     }
-    updateStatus();
+    scheduleStatusUpdate();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

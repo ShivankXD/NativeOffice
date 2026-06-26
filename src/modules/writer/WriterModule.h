@@ -21,6 +21,8 @@
 #include <QString>
 #include <QFont>
 
+class QTimer;
+
 namespace NativeOffice {
 
 class WriterRibbon;
@@ -60,6 +62,10 @@ signals:
     // Emitted after a successful save/load with the new path
     void filePathChanged(const QString& newPath);
 
+protected:
+    // Ctrl+scroll over the canvas zooms the page (Sprint 14).
+    bool eventFilter(QObject* obj, QEvent* ev) override;
+
 private slots:
     void onContentsChanged();
 
@@ -71,18 +77,22 @@ private:
     void applyCanvasStyles();
 
     // Sprint 14: status bar wiring
-    void updateStatus();              // recomputes word + page count
+    void updateStatus();              // recomputes word + page count (debounced)
+    void scheduleStatusUpdate();      // coalesces rapid recompute requests
     void applyZoom(int percent);      // status-bar zoom slider
     void setWebLayout(bool web);      // print/web page-view toggle
+    void zoomBy(int deltaPercent);    // Ctrl+scroll zoom step
 
     WriterRibbon*    m_ribbon    { nullptr };
     WriterStatusBar* m_statusBar { nullptr };
     QWidget*         m_canvas    { nullptr };
     QTextEdit*       m_editor    { nullptr };
+    QTimer*          m_statusTimer { nullptr };  // debounce for updateStatus
 
     QFont          m_baseFont;                // body font at 100% zoom
     int            m_zoom         { 100 };
     bool           m_webLayout    { false };
+    bool           m_applyingZoom { false };  // re-entrancy guard for applyZoom
 
     QString        m_currentPath;             // empty = untitled
     bool           m_dirty       { false };
