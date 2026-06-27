@@ -835,7 +835,7 @@ int main(int argc, char* argv[]) {
     startWindow.setMinimumSize(1024, 680);
 
     const QScreen* screen = QApplication::primaryScreen();
-    startWindow.resize(1280, 800);
+    startWindow.resize(1480, 900);
     startWindow.move(screen->availableGeometry().center()
                      - startWindow.rect().center());
 

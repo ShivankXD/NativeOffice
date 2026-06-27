@@ -1,31 +1,29 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
 // StartScreen.h
-// The unified first screen of NativeOffice, modeled after modern office suite
-// welcome experiences (WPS Office / Microsoft Office). Composes:
-//   • SidebarWidget       – left navigation panel
-//   • TemplateBarWidget   – top quick-create tiles
-//   • RecentFilesWidget   – central recent-document list
+// The NativeOffice home dashboard — a modern dark-themed launcher (logo + search
+// bar, left navigation, create cards, quick actions, recent files, a
+// "Templates for You" gallery, and activity/sync panels).
+//
+// Emits three signals the app wires to AppController:
+//   • newDocumentRequested(type) – create a blank doc in Writer/Calc/Impress
+//   • fileOpenRequested(path)     – open an existing file
+//   • settingsRequested()         – open settings
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "core/application/AppController.h"
 
 #include <QWidget>
-#include <QHBoxLayout>
-#include <QVBoxLayout>
+
+class QVBoxLayout;
 
 namespace NativeOffice {
-
-class SidebarWidget;
-class TemplateBarWidget;
-class RecentFilesWidget;
 
 class StartScreen : public QWidget {
     Q_OBJECT
 
 public:
-    explicit StartScreen(AppController* controller,
-                         QWidget*       parent = nullptr);
+    explicit StartScreen(AppController* controller, QWidget* parent = nullptr);
 
 signals:
     void newDocumentRequested(DocumentType type);
@@ -33,18 +31,20 @@ signals:
     void settingsRequested();
 
 private:
-    void buildUi();
-    void connectSignals();
+    void     buildUi();
+    QWidget* buildSidebar();
+    QWidget* buildTopBar();
+    QWidget* buildCenterColumn();
+    QWidget* buildCreateCards();
+    QWidget* buildQuickActions();
+    QWidget* buildRecentPanel();
+    QWidget* buildTemplatesPanel();
+    QWidget* buildRightColumn();
 
-    AppController*    m_controller   { nullptr };
+    void openFileDialog();
+    void showTemplatesDialog(int initialCategory = 0);  // 0 Word, 1 Sheet, 2 Slides
 
-    QHBoxLayout*      m_rootLayout   { nullptr };
-
-    SidebarWidget*    m_sidebar      { nullptr };
-    QWidget*          m_contentArea  { nullptr };
-    QVBoxLayout*      m_contentLayout{ nullptr };
-    TemplateBarWidget* m_templateBar { nullptr };
-    RecentFilesWidget* m_recentFiles { nullptr };
+    AppController* m_controller { nullptr };
 };
 
 } // namespace NativeOffice

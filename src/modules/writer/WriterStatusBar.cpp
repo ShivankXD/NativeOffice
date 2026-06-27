@@ -16,6 +16,10 @@ WriterStatusBar::WriterStatusBar(QWidget* parent)
 {
     setObjectName("writerStatusBar");
     setFixedHeight(28);
+    // A bare QWidget ignores its own background-color stylesheet unless this is
+    // set — otherwise the bar falls through to the (possibly dark) system
+    // palette and renders black. This keeps the strip reliably white.
+    setAttribute(Qt::WA_StyledBackground, true);
 
     auto* layout = new QHBoxLayout(this);
     layout->setContentsMargins(14, 0, 14, 0);
@@ -98,8 +102,8 @@ WriterStatusBar::WriterStatusBar(QWidget* parent)
 
     setStyleSheet(R"(
 QWidget#writerStatusBar {
-    background-color: #F3F4F6;
-    border-top: 1px solid #D7DAE0;
+    background-color: #FFFFFF;
+    border-top: 1px solid #E1E3E8;
 }
 QLabel#statusLabel {
     color: #5A6071;
