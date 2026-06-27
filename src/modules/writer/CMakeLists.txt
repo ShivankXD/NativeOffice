@@ -21,6 +21,8 @@ add_library(WriterModule STATIC
     WriterRuler.h
     AutoCorrect.cpp
     AutoCorrect.h
+    WriterEquation.cpp
+    WriterEquation.h
 )
 
 target_include_directories(WriterModule PUBLIC

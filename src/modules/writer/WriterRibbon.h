@@ -210,6 +210,15 @@ private:
     void showTemplateGallery();
     void applyTemplate(int id);
 
+    // Tier 4 — equation editor, mail merge, document compare
+    void showEquationEditor();
+    void insertEquationImage(const QString& expr);
+    void showMailMerge();
+    void insertMergeField(const QString& field);
+    void mergeToDocument();
+    void showCompareDialog();
+    void compareWithFile(const QString& path);
+
     QToolButton* makeRowBtn(const QIcon& icon, const QString& text, const QString& tip,
                             bool checkable = false);
 
@@ -275,6 +284,10 @@ private:
     void              highlightAllMatches();   // live "highlight all"
 
     bool m_syncing { false };
+
+    // Mail-merge data source (headers + records).
+    QStringList         m_mergeHeaders;
+    QList<QStringList>  m_mergeRows;
 };
 
 } // namespace NativeOffice

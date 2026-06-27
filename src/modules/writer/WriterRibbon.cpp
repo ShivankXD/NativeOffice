@@ -6,8 +6,10 @@
 #include "WriterTableOps.h"
 #include "WriterListOps.h"
 #include "WriterStyles.h"
+#include "WriterEquation.h"
 #include "PagedTextEdit.h"
 #include "DocxIo.h"
+#include <QTextDocumentFragment>
 #include "core/theme/ThemeManager.h"
 #include <QApplication>
 
@@ -257,6 +259,21 @@ QIcon templateIcon() { return paintIcon([](QPainter& p) {
     p.drawLine(QPointF(13, 12), QPointF(27, 12));
     p.drawLine(QPointF(13, 17), QPointF(27, 17));
     p.drawLine(QPointF(13, 22), QPointF(23, 22));
+}); }
+
+QIcon mailMergeIcon() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(7, 11, 26, 18));               // envelope
+    p.drawLine(QPointF(7, 11), QPointF(20, 21));
+    p.drawLine(QPointF(33, 11), QPointF(20, 21));
+}); }
+
+QIcon compareIcon() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(5, 8, 13, 24));                // left page
+    p.drawRect(QRectF(22, 8, 13, 24));               // right page
+    p.setPen(QPen(QColor("#16A34A"), 2.0));
+    p.drawLine(QPointF(24, 15), QPointF(32, 15));
+    p.setPen(QPen(QColor("#C0271C"), 2.0));
+    p.drawLine(QPointF(8, 22), QPointF(15, 22));
 }); }
 
 QIcon lineSpacingIcon() { return paintIcon([](QPainter& p) {
@@ -1831,6 +1848,8 @@ QWidget* WriterRibbon::buildInsertTab() {
             { "Square root",       "√x" },
             { "Integral",          "∫ f(x) dx" },
         };
+        m->addAction(equationIcon(), "Equation Editor…", this, &WriterRibbon::showEquationEditor);
+        m->addSeparator();
         for (const auto& e : eqs) {
             const QString text = QString::fromUtf8(e.text);
             m->addAction(equationIcon(), e.label, this, [this, text] { insertEquation(text); });
@@ -2467,6 +2486,12 @@ QWidget* WriterRibbon::buildReferencesTab() {
     connect(btnMark,  &QToolButton::clicked, this, &WriterRibbon::markIndexEntry);
     connect(btnIndex, &QToolButton::clicked, this, &WriterRibbon::insertIndex);
     layout->addWidget(makeGroup("Index", { btnMark, btnIndex }));
+    layout->addWidget(makeSeparator());
+
+    // ── Mail Merge ──────────────────────────────────────────────────────────
+    auto* btnMerge = makeBigBtn(mailMergeIcon(), "Mail\nMerge", "Merge a CSV data source into the document");
+    connect(btnMerge, &QToolButton::clicked, this, &WriterRibbon::showMailMerge);
+    layout->addWidget(makeGroup("Mailings", { btnMerge }));
     layout->addStretch();
     scroll->setWidget(tab);
     return scroll;
@@ -2531,6 +2556,12 @@ QWidget* WriterRibbon::buildReviewTab() {
     auto* tkl = new QVBoxLayout(trkCol); tkl->setContentsMargins(0,0,0,0); tkl->setSpacing(2);
     tkl->addWidget(rAccept); tkl->addWidget(rReject);
     layout->addWidget(makeGroup("Tracking", { btnTrack, trkCol }));
+    layout->addWidget(makeSeparator());
+
+    // ── Compare ─────────────────────────────────────────────────────────────
+    auto* btnCompare = makeBigBtn(compareIcon(), "Compare", "Compare with another document");
+    connect(btnCompare, &QToolButton::clicked, this, &WriterRibbon::showCompareDialog);
+    layout->addWidget(makeGroup("Compare", { btnCompare }));
     layout->addWidget(makeSeparator());
 
     // ── Protect ─────────────────────────────────────────────────────────────
@@ -3441,6 +3472,294 @@ void WriterRibbon::applyTemplate(int id) {
     QTextCursor home = m_editor->textCursor();
     home.movePosition(QTextCursor::Start);
     m_editor->setTextCursor(home);
+    m_editor->setFocus();
+}
+
+// ── Equation editor (Tier 4) ─────────────────────────────────────────────────
+void WriterRibbon::showEquationEditor() {
+    if (!m_editor) return;
+    QDialog dlg(window());
+    dlg.setWindowTitle("Equation Editor");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    dlg.resize(560, 380);
+    auto* root = new QVBoxLayout(&dlg);
+
+    auto* preview = new QLabel(&dlg);
+    preview->setAlignment(Qt::AlignCenter);
+    preview->setMinimumHeight(90);
+    preview->setStyleSheet("background:#FFFFFF;border:1px solid #C6CAD3;border-radius:4px;");
+    root->addWidget(preview);
+
+    auto* input = new QLineEdit(&dlg);
+    input->setText("x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}");
+    root->addWidget(input);
+    root->addWidget(new QLabel("Use ^ _ for scripts, \\frac{}{}, \\sqrt{}, and the buttons below.", &dlg));
+
+    auto* grid = new QGridLayout();
+    struct Sym { const char* l; const char* ins; };
+    const Sym syms[] = {
+        {"x²","^{2}"},{"xₙ","_{n}"},{"√","\\sqrt{}"},{"a/b","\\frac{}{}"},
+        {"π","\\pi"},{"∑","\\sum"},{"∫","\\int"},{"∞","\\infty"},{"∂","\\partial"},
+        {"α","\\alpha"},{"β","\\beta"},{"θ","\\theta"},{"λ","\\lambda"},{"Δ","\\Delta"},
+        {"≤","\\leq"},{"≥","\\geq"},{"≠","\\neq"},{"±","\\pm"},{"×","\\times"},{"→","\\to"},
+    };
+    int col = 0, r = 0;
+    for (const Sym& sm : syms) {
+        auto* b = new QPushButton(QString::fromUtf8(sm.l), &dlg);
+        b->setFixedSize(46, 28);
+        const QString ins = QString::fromUtf8(sm.ins);
+        connect(b, &QPushButton::clicked, &dlg, [input, ins]{ input->insert(ins); input->setFocus(); });
+        grid->addWidget(b, r, col);
+        if (++col == 10) { col = 0; ++r; }
+    }
+    root->addLayout(grid);
+
+    auto updatePreview = [preview, input]{
+        const QImage img = EquationRenderer::render(input->text(), 30, QColor("#1C1E26"));
+        preview->setPixmap(QPixmap::fromImage(img));
+    };
+    connect(input, &QLineEdit::textChanged, &dlg, updatePreview);
+    updatePreview();
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    bb->button(QDialogButtonBox::Ok)->setText("Insert");
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    root->addWidget(bb);
+
+    if (dlg.exec() == QDialog::Accepted) insertEquationImage(input->text());
+}
+
+void WriterRibbon::insertEquationImage(const QString& expr) {
+    if (!m_editor || expr.trimmed().isEmpty()) return;
+    const QImage img = EquationRenderer::render(expr, 34, QColor("#1C1E26"));
+    insertImageData(img);   // embeds as inline base64 PNG, so it persists
+}
+
+// ── Mail merge (Tier 4) ──────────────────────────────────────────────────────
+namespace {
+// Minimal CSV row splitter (handles "quoted, fields").
+QStringList splitCsvLine(const QString& line) {
+    QStringList out; QString cur; bool inQ = false;
+    for (int i = 0; i < line.size(); ++i) {
+        const QChar c = line.at(i);
+        if (inQ) {
+            if (c == '"') { if (i + 1 < line.size() && line.at(i + 1) == '"') { cur += '"'; ++i; } else inQ = false; }
+            else cur += c;
+        } else {
+            if (c == '"') inQ = true;
+            else if (c == ',') { out << cur; cur.clear(); }
+            else cur += c;
+        }
+    }
+    out << cur;
+    return out;
+}
+} // namespace
+
+void WriterRibbon::insertMergeField(const QString& field) {
+    if (!m_editor || field.isEmpty()) return;
+    m_editor->textCursor().insertText(QString::fromUtf8("«") + field + QString::fromUtf8("»"));
+    m_editor->setFocus();
+}
+
+void WriterRibbon::mergeToDocument() {
+    if (!m_editor) return;
+    if (m_mergeRows.isEmpty()) {
+        QMessageBox::information(window(), "Mail Merge", "Load a CSV data source first.");
+        return;
+    }
+    if (QMessageBox::question(window(), "Mail Merge",
+            QString("Generate %1 merged record(s)? This replaces the current document.")
+                .arg(m_mergeRows.size())) != QMessageBox::Yes)
+        return;
+
+    std::unique_ptr<QTextDocument> tmpl(m_editor->document()->clone());
+    m_editor->clear();
+    QTextCursor out(m_editor->document());
+    out.beginEditBlock();
+
+    for (int rec = 0; rec < m_mergeRows.size(); ++rec) {
+        std::unique_ptr<QTextDocument> doc(tmpl->clone());
+        const QStringList& row = m_mergeRows[rec];
+        for (int f = 0; f < m_mergeHeaders.size(); ++f) {
+            const QString token = QString::fromUtf8("«") + m_mergeHeaders[f] + QString::fromUtf8("»");
+            const QString value = (f < row.size()) ? row[f] : QString();
+            QTextCursor fc(doc.get());
+            for (;;) {
+                fc = doc->find(token, fc);
+                if (fc.isNull()) break;
+                fc.insertText(value);
+            }
+        }
+        if (rec > 0) {
+            QTextBlockFormat pb; pb.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
+            out.insertBlock(pb);
+        }
+        out.insertFragment(QTextDocumentFragment(doc.get()));
+    }
+    out.endEditBlock();
+    m_editor->moveCursor(QTextCursor::Start);
+    m_editor->setFocus();
+}
+
+void WriterRibbon::showMailMerge() {
+    if (!m_editor) return;
+    auto* dlg = new QDialog(window());
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle("Mail Merge");
+    dlg->setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    dlg->resize(320, 380);
+    auto* root = new QVBoxLayout(dlg);
+
+    auto* status = new QLabel(dlg);
+    auto* fields = new QListWidget(dlg);
+    auto refresh = [this, status, fields]{
+        fields->clear();
+        for (const QString& h : m_mergeHeaders) fields->addItem(h);
+        status->setText(m_mergeRows.isEmpty()
+            ? "No data source loaded."
+            : QString("%1 record(s), %2 field(s).").arg(m_mergeRows.size()).arg(m_mergeHeaders.size()));
+    };
+
+    auto* btnLoad = new QPushButton("Load Data Source (CSV)…", dlg);
+    connect(btnLoad, &QPushButton::clicked, dlg, [this, refresh]{
+        const QString path = QFileDialog::getOpenFileName(window(), "Load CSV", QDir::homePath(),
+                                                          "CSV Files (*.csv);;All Files (*)");
+        if (path.isEmpty()) return;
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+        QTextStream in(&f); in.setEncoding(QStringConverter::Utf8);
+        m_mergeHeaders.clear(); m_mergeRows.clear();
+        bool first = true;
+        while (!in.atEnd()) {
+            const QString line = in.readLine();
+            if (line.trimmed().isEmpty()) continue;
+            const QStringList cells = splitCsvLine(line);
+            if (first) { for (const QString& c : cells) m_mergeHeaders << c.trimmed(); first = false; }
+            else m_mergeRows << cells;
+        }
+        f.close();
+        refresh();
+    });
+    root->addWidget(btnLoad);
+    root->addWidget(status);
+    root->addWidget(new QLabel("Fields (click into the document, then Insert):", dlg));
+    root->addWidget(fields, 1);
+
+    auto* btnInsert = new QPushButton("Insert Field", dlg);
+    connect(btnInsert, &QPushButton::clicked, dlg, [this, fields]{
+        if (fields->currentItem()) insertMergeField(fields->currentItem()->text());
+    });
+    connect(fields, &QListWidget::itemDoubleClicked, dlg, [this](QListWidgetItem* it){
+        if (it) insertMergeField(it->text());
+    });
+    root->addWidget(btnInsert);
+
+    auto* btnMerge = new QPushButton("Merge to New Document", dlg);
+    connect(btnMerge, &QPushButton::clicked, dlg, [this]{ mergeToDocument(); });
+    root->addWidget(btnMerge);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+    connect(bb, &QDialogButtonBox::rejected, dlg, &QDialog::close);
+    root->addWidget(bb);
+
+    refresh();
+    dlg->show();   // modeless so the user can position the cursor in the document
+}
+
+// ── Document compare (Tier 4) ────────────────────────────────────────────────
+namespace {
+QString plainTextFromFile(const QString& path) {
+    QTextDocument doc;
+    if (path.endsWith(".docx", Qt::CaseInsensitive)) {
+        DocxIo::importDocx(path, &doc);
+        return doc.toPlainText();
+    }
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+    QTextStream in(&f); in.setEncoding(QStringConverter::Utf8);
+    QString content = in.readAll();
+    f.close();
+    content.remove("<!-- NativeOffice Writer Document (.noff) -->\n");
+    if (content.contains("<html", Qt::CaseInsensitive) || content.contains("<p", Qt::CaseInsensitive))
+        doc.setHtml(content);
+    else
+        doc.setPlainText(content);
+    return doc.toPlainText();
+}
+
+QStringList tokenize(const QString& s) {
+    QStringList toks;
+    static const QRegularExpression re("(\\s+|\\S+)");
+    auto it = re.globalMatch(s);
+    while (it.hasNext()) toks << it.next().captured(1);
+    return toks;
+}
+} // namespace
+
+void WriterRibbon::showCompareDialog() {
+    if (!m_editor) return;
+    const QString path = QFileDialog::getOpenFileName(window(), "Compare With…", QDir::homePath(),
+        "Documents (*.noff *.txt *.html *.docx);;All Files (*)");
+    if (path.isEmpty()) return;
+    compareWithFile(path);
+}
+
+void WriterRibbon::compareWithFile(const QString& path) {
+    if (!m_editor) return;
+    const QStringList a = tokenize(m_editor->document()->toPlainText());   // original (mine)
+    const QStringList b = tokenize(plainTextFromFile(path));               // revised (other)
+
+    if (qint64(a.size()) * b.size() > 9'000'000) {
+        QMessageBox::warning(window(), "Compare",
+            "The documents are too large to compare word-by-word.");
+        return;
+    }
+
+    // LCS over token sequences.
+    const int n = a.size(), m = b.size();
+    QVector<QVector<int>> dp(n + 1, QVector<int>(m + 1, 0));
+    for (int i = n - 1; i >= 0; --i)
+        for (int j = m - 1; j >= 0; --j)
+            dp[i][j] = (a[i] == b[j]) ? dp[i + 1][j + 1] + 1
+                                      : qMax(dp[i + 1][j], dp[i][j + 1]);
+
+    if (QMessageBox::question(window(), "Compare Documents",
+            "Show differences in this document?\nDeletions are red strikethrough, "
+            "insertions are green underline.") != QMessageBox::Yes)
+        return;
+
+    QTextCharFormat eq;  eq.setForeground(QColor("#1C1E26"));
+    QTextCharFormat del; del.setForeground(QColor("#C0271C")); del.setFontStrikeOut(true);
+    QTextCharFormat ins; ins.setForeground(QColor("#16A34A")); ins.setFontUnderline(true);
+
+    m_editor->clear();
+    QTextCursor cur(m_editor->document());
+    cur.beginEditBlock();
+    auto put = [&cur](const QString& tok, const QTextCharFormat& fmt) {
+        if (tok == "\n") { cur.insertBlock(); return; }
+        if (tok.contains('\n')) {                 // whitespace run with newlines
+            const QStringList parts = tok.split('\n');
+            for (int k = 0; k < parts.size(); ++k) {
+                if (k) cur.insertBlock();
+                if (!parts[k].isEmpty()) cur.insertText(parts[k], fmt);
+            }
+            return;
+        }
+        cur.insertText(tok, fmt);
+    };
+
+    int i = 0, j = 0;
+    while (i < n && j < m) {
+        if (a[i] == b[j]) { put(a[i], eq); ++i; ++j; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { put(a[i], del); ++i; }
+        else { put(b[j], ins); ++j; }
+    }
+    while (i < n) put(a[i++], del);
+    while (j < m) put(b[j++], ins);
+    cur.endEditBlock();
+    m_editor->moveCursor(QTextCursor::Start);
     m_editor->setFocus();
 }
 
