@@ -22,9 +22,12 @@
 #include <QWidget>
 #include <QColor>
 #include <QList>
+#include <QHash>
+#include <QString>
 #include <QPointer>
 
 class QIcon;
+class QPrinter;
 class QTextEdit;
 class QToolButton;
 class QComboBox;
@@ -34,8 +37,13 @@ class QTextCharFormat;
 class QDialog;
 class QLineEdit;
 class QCheckBox;
+class QLabel;
+
+class QGridLayout;
 
 namespace NativeOffice {
+
+class WriterStyleManager;
 
 // Built-in paragraph styles (SECTION 3).
 enum class WriterStyle {
@@ -54,6 +62,14 @@ public:
     // Sync all checked/active states to the cursor's current format.
     void syncToCurrentFormat();
 
+    // ── Style persistence (called by WriterModule on save/load) ──────────────
+    // JSON describing the custom + modified-built-in styles (empty if none).
+    [[nodiscard]] QString styleDefsJson() const;
+    // JSON mapping non-default paragraphs (by block index) to their style name.
+    [[nodiscard]] QString blockAssignmentsJson() const;
+    // Restore styles + per-paragraph tags after a document is loaded.
+    void applyPersistedStyles(const QString& defsJson, const QString& blocksJson);
+
 signals:
     // Forwarded to WriterModule (which owns the embed pipeline).
     void insertImageRequested();
@@ -67,6 +83,7 @@ signals:
     void pageSizeRequested(double portraitW, double portraitH);
     void pageColorRequested(const QColor& color);
     void webLayoutRequested(bool web);
+    void rulerToggled(bool show);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;
@@ -80,6 +97,8 @@ private:
     QWidget* buildReviewTab();
     QWidget* buildViewTab();
     QWidget* buildToolsTab();
+    QWidget* buildTableTab();
+    void     refreshTableTab();          // show/hide the contextual Table tab
     QWidget* buildPlaceholderTab(const QString& tabName);
 
     // ── small builders (ported from the Impress ribbon visual language) ─────
@@ -111,6 +130,24 @@ private:
     void applyParagraphStyle(WriterStyle s);
     void pasteAsPlainText();
 
+    // ── Named styles (Tier 2 #8) ────────────────────────────────────────────
+    void applyStyleByName(const QString& name);
+    void rebuildStyleGallery();
+    void rebuildMoreStylesMenu();
+    void openStyleEditor(const QString& editName);   // empty → create new
+    void updateStyleFromSelection(const QString& name);
+    void renameStyleInteractive(const QString& name);
+    void deleteStyleInteractive(const QString& name);
+    void showStyleContextMenu(const QString& name, const QPoint& globalPos);
+    void manageStyles();
+
+    // ── Multi-level lists (Tier 2 #9) ───────────────────────────────────────
+    void applyMultilevelList(bool numbered);
+    void changeListLevel(int delta);
+    void restartNumbering();
+    void continueNumbering();
+    void customizeList();
+
     // format painter
     void toggleFormatPainter(bool on);
 
@@ -130,6 +167,7 @@ private:
     void insertShapeImage(int kind);
     void insertCoverPage();
     void insertHeaderFooter(bool header);
+    void openHeaderFooterDialog();
     void insertEquation(const QString& text);
     void insertChart(int kind);
 
@@ -144,6 +182,7 @@ private:
     void insertComment();
     void showWordCountDialog();
     void showSpellingDialog();
+    void showAutoCorrectOptions();
 
     // Sprint 16 — denser tab feature set
     void setTextDirection(bool rtl);
@@ -161,6 +200,15 @@ private:
     void exportToPdf();
     void exportToPicture();
     void exportToText();
+    void exportToWord();
+    void importFromWord();
+
+    // Tier 4 — printing & templates
+    void printDocument();
+    void printPreview();
+    void renderToPrinter(QPrinter* printer);
+    void showTemplateGallery();
+    void applyTemplate(int id);
 
     QToolButton* makeRowBtn(const QIcon& icon, const QString& text, const QString& tip,
                             bool checkable = false);
@@ -204,6 +252,13 @@ private:
 
     // Styles gallery
     QButtonGroup* m_styleGroup { nullptr };
+    WriterStyleManager* m_styles { nullptr };
+    QWidget*      m_styleGrid    { nullptr };   // container repopulated on change
+    QToolButton*  m_moreStylesBtn { nullptr };
+    QHash<QString, QToolButton*> m_styleButtons;   // style name → gallery chip
+
+    // Contextual "Table" tab (shown only when the cursor is in a table)
+    QToolButton* m_tableTabBtn { nullptr };
 
     // Format painter state
     bool             m_painterActive { false };
@@ -214,6 +269,10 @@ private:
     QLineEdit*        m_findEdit    { nullptr };
     QLineEdit*        m_replaceEdit { nullptr };
     QCheckBox*        m_matchCase   { nullptr };
+    QCheckBox*        m_wholeWord   { nullptr };
+    QCheckBox*        m_useRegex    { nullptr };
+    QLabel*           m_findCount   { nullptr };
+    void              highlightAllMatches();   // live "highlight all"
 
     bool m_syncing { false };
 };

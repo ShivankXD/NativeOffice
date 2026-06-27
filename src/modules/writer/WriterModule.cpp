@@ -6,10 +6,18 @@
 #include "WriterRibbon.h"
 #include "WriterStatusBar.h"
 #include "PagedTextEdit.h"
+#include "WriterRuler.h"
 #include "core/theme/ThemeManager.h"
 
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QScrollArea>
+#include <QScrollBar>
+#include <QResizeEvent>
+#include <QStandardPaths>
+#include <QMessageBox>
+#include <QDir>
+#include <QApplication>
 #include <QTextDocument>
 #include <QTextCursor>
 #include <QTextCharFormat>
@@ -106,6 +114,19 @@ void WriterModule::buildUi() {
         m_scroll->ensureVisible(inCanvas.x(), inCanvas.y(), 40, 90);
     });
 
+    // ── Rulers (Tier 4) ───────────────────────────────────────────────────
+    m_hRuler = new WriterRuler(Qt::Horizontal, this);
+    m_vRuler = new WriterRuler(Qt::Vertical, this);
+    m_hRuler->setEditor(m_editor);
+    m_vRuler->setEditor(m_editor);
+    connect(m_hRuler, &WriterRuler::marginChangeRequested, this, &WriterModule::setPageMargin);
+    connect(m_vRuler, &WriterRuler::marginChangeRequested, this, &WriterModule::setPageMargin);
+    // Re-align the rulers with the page whenever the view scrolls.
+    connect(m_scroll->horizontalScrollBar(), &QScrollBar::valueChanged,
+            this, [this]{ updateRulerGeometry(); });
+    connect(m_scroll->verticalScrollBar(), &QScrollBar::valueChanged,
+            this, [this]{ updateRulerGeometry(); });
+
     // ── Status bar ────────────────────────────────────────────────────────
     m_statusBar = new WriterStatusBar(this);
 
@@ -116,8 +137,26 @@ void WriterModule::buildUi() {
     m_statusTimer->setInterval(220);
     connect(m_statusTimer, &QTimer::timeout, this, &WriterModule::updateStatus);
 
+    // Autosave: snapshot unsaved changes to a recovery file every 20s. A clean
+    // app exit deletes it; a crash leaves it for recovery on next launch.
+    m_autosaveTimer = new QTimer(this);
+    m_autosaveTimer->setInterval(20000);
+    connect(m_autosaveTimer, &QTimer::timeout, this, &WriterModule::writeRecovery);
+    m_autosaveTimer->start();
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [this]{ QFile::remove(recoveryFilePath()); });
+
     rootLayout->addWidget(m_ribbon);
-    rootLayout->addWidget(m_scroll, 1);
+    rootLayout->addWidget(m_hRuler);
+
+    // The vertical ruler sits to the left of the scrolling page area.
+    auto* midRow = new QWidget(this);
+    auto* midLayout = new QHBoxLayout(midRow);
+    midLayout->setContentsMargins(0, 0, 0, 0);
+    midLayout->setSpacing(0);
+    midLayout->addWidget(m_vRuler);
+    midLayout->addWidget(m_scroll, 1);
+
+    rootLayout->addWidget(midRow, 1);
     rootLayout->addWidget(m_statusBar);
 
     // ── Wire ribbon → editor ──────────────────────────────────────────────
@@ -138,12 +177,24 @@ void WriterModule::buildUi() {
     connect(m_ribbon, &WriterRibbon::webLayoutRequested,   this, [this](bool web){
         setWebLayout(web); if (m_statusBar) m_statusBar->setWebLayoutActive(web);
     });
+    connect(m_ribbon, &WriterRibbon::rulerToggled, this, &WriterModule::setRulersVisible);
 
     // ── Wire status bar ───────────────────────────────────────────────────
     connect(m_statusBar, &WriterStatusBar::zoomChanged,
             this, &WriterModule::applyZoom);
     connect(m_statusBar, &WriterStatusBar::webLayoutToggled,
             this, &WriterModule::setWebLayout);
+    connect(m_statusBar, &WriterStatusBar::spellCheckToggled, this, [this](bool on){
+        if (m_paper) m_paper->setSpellCheckEnabled(on);
+    });
+    // Spell check on by default; sync the editor to the pill's initial state.
+    if (m_paper) m_paper->setSpellCheckEnabled(true);
+    m_statusBar->setSpellCheckActive(true);
+
+    // Keep the {file} header/footer field in sync with the document name.
+    connect(this, &WriterModule::filePathChanged, this, [this](const QString& p) {
+        if (m_paper) m_paper->setDocName(QFileInfo(p).fileName());
+    });
 
     // ── Dirty-state + live status tracking ────────────────────────────────
     connect(m_editor->document(), &QTextDocument::contentsChanged,
@@ -154,6 +205,13 @@ void WriterModule::buildUi() {
     applyCanvasStyles();
     updateStatus();
     m_editor->setFocus();
+
+    // Align the rulers once the initial layout has settled.
+    QTimer::singleShot(0, this, [this]{ updateRulerGeometry(); });
+
+    // For an untitled session, offer crash recovery once shown (loadFromPath
+    // handles the case where a file is opened).
+    QTimer::singleShot(500, this, [this]{ if (m_currentPath.isEmpty()) checkCrashRecovery(); });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +239,25 @@ QString WriterModule::titleString() const {
 // ─────────────────────────────────────────────────────────────────────────────
 // File I/O (.noff format = UTF-8 HTML)
 // ─────────────────────────────────────────────────────────────────────────────
+// Serialises the document to the full .noff string (header + style sidecar + HTML).
+// Shared by saveToPath() and the autosave/recovery snapshot.
+QString WriterModule::buildNoffString() const {
+    QString out = "<!-- NativeOffice Writer Document (.noff) -->\n";
+
+    // Persist named styles + per-paragraph style tags as base64 in HTML comments
+    // (ignored by setHtml on load), which is what fixes the style round-trip.
+    if (m_ribbon) {
+        const QString defs   = m_ribbon->styleDefsJson();
+        const QString blocks = m_ribbon->blockAssignmentsJson();
+        if (!defs.isEmpty())
+            out += "<!--NOFF-STYLEDEFS " + QString::fromLatin1(defs.toUtf8().toBase64()) + " -->\n";
+        if (!blocks.isEmpty())
+            out += "<!--NOFF-BLOCKSTYLES " + QString::fromLatin1(blocks.toUtf8().toBase64()) + " -->\n";
+    }
+    out += m_editor->toHtml();
+    return out;
+}
+
 bool WriterModule::saveToPath(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
@@ -188,17 +265,100 @@ bool WriterModule::saveToPath(const QString& path) {
 
     QTextStream out(&f);
     out.setEncoding(QStringConverter::Utf8);
-
-    // Write the .noff header comment so the file is self-describing
-    out << "<!-- NativeOffice Writer Document (.noff) -->\n";
-    out << m_editor->toHtml();
-
+    out << buildNoffString();
     f.close();
 
     m_currentPath = path;
     m_dirty       = false;
     emit filePathChanged(path);
+
+    // A clean save supersedes any crash-recovery snapshot for this document.
+    QFile::remove(recoveryFilePath());
     return true;
+}
+
+// ── Autosave + crash recovery ────────────────────────────────────────────────
+QString WriterModule::recoveryFilePath() const {
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (dir.isEmpty()) dir = QDir::tempPath();
+    dir += "/recovery";
+    QDir().mkpath(dir);
+    const QString key = m_currentPath.isEmpty()
+                            ? QStringLiteral("untitled")
+                            : QString::number(qHash(m_currentPath), 16);
+    return dir + "/" + key + ".noff";
+}
+
+void WriterModule::writeRecovery() {
+    if (!m_editor || !m_dirty) return;          // nothing unsaved → no snapshot
+    if (m_editor->document()->isEmpty()) return;
+    QFile f(recoveryFilePath());
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) return;
+    QTextStream out(&f);
+    out.setEncoding(QStringConverter::Utf8);
+    out << buildNoffString();
+    f.close();
+}
+
+void WriterModule::checkCrashRecovery() {
+    const QString rp = recoveryFilePath();
+    if (!QFileInfo::exists(rp)) return;          // clean previous session
+
+    const QString name = m_currentPath.isEmpty()
+                             ? QStringLiteral("an untitled document")
+                             : QFileInfo(m_currentPath).fileName();
+    const auto choice = QMessageBox::question(
+        this, tr("Recover Unsaved Changes"),
+        tr("NativeOffice found unsaved changes for %1 from a previous session "
+           "that didn't close normally.\n\nRecover them?").arg(name),
+        QMessageBox::Yes | QMessageBox::No);
+
+    if (choice == QMessageBox::Yes) {
+        QFile f(rp);
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&f);
+            in.setEncoding(QStringConverter::Utf8);
+            const QString content = in.readAll();
+            f.close();
+            const QString keep = m_currentPath;      // recovery keeps the bound path
+            loadNoffString(content);
+            m_currentPath = keep;
+            m_dirty = true;                          // recovered = still unsaved
+            emit documentModified();
+        }
+    } else {
+        QFile::remove(rp);
+    }
+}
+
+// Parse a .noff string (strip header, pull style sidecar, set HTML, re-tag).
+void WriterModule::loadNoffString(QString content) {
+    content.remove("<!-- NativeOffice Writer Document (.noff) -->\n");
+
+    QString styleDefs, blockStyles;
+    auto extract = [&content](const QString& tag) -> QString {
+        const QRegularExpression re("<!--" + tag + " ([A-Za-z0-9+/=]+) -->\\n?");
+        const QRegularExpressionMatch m = re.match(content);
+        if (!m.hasMatch()) return QString();
+        const QString b64 = m.captured(1);
+        content.remove(m.capturedStart(), m.capturedLength());
+        return QString::fromUtf8(QByteArray::fromBase64(b64.toLatin1()));
+    };
+    styleDefs   = extract("NOFF-STYLEDEFS");
+    blockStyles = extract("NOFF-BLOCKSTYLES");
+
+    m_ignoreChange = true;
+    m_editor->setHtml(content);
+    m_editor->moveCursor(QTextCursor::Start);
+    if (m_ribbon) m_ribbon->applyPersistedStyles(styleDefs, blockStyles);
+    m_ignoreChange = false;
+
+    // Show the top of the document once layout settles.
+    QTimer::singleShot(0, this, [this] {
+        if (m_scroll && m_scroll->verticalScrollBar())
+            m_scroll->verticalScrollBar()->setValue(0);
+        updateRulerGeometry();
+    });
 }
 
 bool WriterModule::loadFromPath(const QString& path) {
@@ -208,26 +368,17 @@ bool WriterModule::loadFromPath(const QString& path) {
 
     QTextStream in(&f);
     in.setEncoding(QStringConverter::Utf8);
-    QString content = in.readAll();
+    const QString content = in.readAll();
     f.close();
 
-    // Strip the .noff header comment if present
-    content.remove("<!-- NativeOffice Writer Document (.noff) -->\n");
-
-    m_ignoreChange = true;
-    m_editor->setHtml(content);
-    m_editor->moveCursor(QTextCursor::Start);
-    m_ignoreChange = false;
-
-    // Show the top of the document once layout settles.
-    QTimer::singleShot(0, this, [this] {
-        if (m_scroll && m_scroll->verticalScrollBar())
-            m_scroll->verticalScrollBar()->setValue(0);
-    });
+    loadNoffString(content);
 
     m_currentPath = path;
     m_dirty       = false;
     emit filePathChanged(path);
+
+    // After binding the file, offer to restore a leftover crash-recovery snapshot.
+    QTimer::singleShot(400, this, [this]{ checkCrashRecovery(); });
     return true;
 }
 
@@ -275,7 +426,7 @@ QTextEdit#writerPaper {
     border-radius: 2px;
     padding: 0;
     selection-background-color: %2;
-    selection-color: #FFFFFF;
+    selection-color: #1C1E26;
     font-family: "Segoe UI", "Inter", "Roboto", sans-serif;
     font-size: 12pt;
     line-height: 1.6;
@@ -289,7 +440,7 @@ QScrollArea#writerScroll > QWidget > QWidget {
 }
 )")
     .arg(ThemeManager::cssColor(t.primary))
-    .arg(ThemeManager::cssColor(t.secondary))
+    .arg(QStringLiteral("#ADD2F5"))      // traditional light-blue text selection
     .arg(m_pageColor.name())
     );
 }
@@ -340,6 +491,7 @@ void WriterModule::applyZoom(int percent) {
 
     m_ignoreChange = guard;
     m_applyingZoom = false;
+    updateRulerGeometry();
     scheduleStatusUpdate();   // debounced — avoids forcing layout per wheel tick
 }
 
@@ -366,6 +518,37 @@ void WriterModule::setPageColor(const QColor& color) {
     m_pageColor = color.isValid() ? color : QColor("#FFFFFF");
     if (m_paper) m_paper->setPaperColor(m_pageColor);
     applyCanvasStyles();
+}
+
+void WriterModule::resizeEvent(QResizeEvent* ev) {
+    QWidget::resizeEvent(ev);
+    updateRulerGeometry();
+}
+
+void WriterModule::updateRulerGeometry() {
+    if (!m_hRuler || !m_vRuler || !m_editor || !m_scroll) return;
+    if (!m_rulersVisible) return;
+    const double z = m_zoom / 100.0;
+    const int marginPx = qRound(m_pageMargin * z);
+
+    const int pageW = m_editor->width();
+    const int hOriginX = m_editor->mapTo(m_hRuler, QPoint(0, 0)).x();
+    m_hRuler->setPageGeometry(hOriginX, pageW, marginPx, z);
+
+    // The editor is many pages tall; the vertical ruler shows the first page's
+    // scale/margins from the document top (which scrolls with the content). The
+    // ruler shares the scroll viewport's top edge, so the page's y within the
+    // viewport is exactly its y on the ruler.
+    const int vOriginY = m_editor->mapTo(m_scroll->viewport(), QPoint(0, 0)).y();
+    const int pageH = qRound((m_landscape ? m_basePageW : m_basePageH) * z);
+    m_vRuler->setPageGeometry(vOriginY, pageH, marginPx, z);
+}
+
+void WriterModule::setRulersVisible(bool on) {
+    m_rulersVisible = on;
+    if (m_hRuler) m_hRuler->setVisible(on);
+    if (m_vRuler) m_vRuler->setVisible(on);
+    if (on) updateRulerGeometry();
 }
 
 bool WriterModule::eventFilter(QObject* obj, QEvent* ev) {
@@ -407,6 +590,7 @@ void WriterModule::setWebLayout(bool web) {
             m_paper->setPageMetrics(effW, effH, m_pageMargin * z);
         }
     }
+    updateRulerGeometry();
     scheduleStatusUpdate();
 }
 

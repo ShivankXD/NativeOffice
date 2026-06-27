@@ -13,8 +13,14 @@
 
 #include <QTextEdit>
 #include <QColor>
+#include <QRect>
+#include "AutoCorrect.h"
+
+class QTextImageFormat;
 
 namespace NativeOffice {
+
+class SpellHighlighter;
 
 class PagedTextEdit : public QTextEdit {
     Q_OBJECT
@@ -34,12 +40,52 @@ public:
 
     [[nodiscard]] int  pageCountValue() const;
 
+    // ── Headers & footers (drawn per page in the margins) ───────────────────
+    // Each is 3 zones: left, center, right. Fields {n} {N} {date} {file} expand.
+    void setHeaderFooter(const QStringList& header, const QStringList& footer,
+                         bool differentFirstPage);
+    [[nodiscard]] QStringList headerZones() const { return { m_header[0], m_header[1], m_header[2] }; }
+    [[nodiscard]] QStringList footerZones() const { return { m_footer[0], m_footer[1], m_footer[2] }; }
+    [[nodiscard]] bool differentFirstPage() const { return m_diffFirst; }
+    void setDocName(const QString& n);
+
+    // ── Spell check ─────────────────────────────────────────────────────────
+    void setSpellCheckEnabled(bool on);
+    [[nodiscard]] bool spellCheckEnabled() const;
+
+    // ── AutoCorrect ─────────────────────────────────────────────────────────
+    void setAutoCorrectEnabled(bool on) { m_autoCorrectEnabled = on; }
+    [[nodiscard]] bool autoCorrectEnabled() const { return m_autoCorrectEnabled; }
+    void setAutoCorrectSettings(const AutoCorrectSettings& s) { m_autoCorrect = s; }
+    [[nodiscard]] AutoCorrectSettings autoCorrectSettings() const { return m_autoCorrect; }
+
+signals:
+    void imageSelectionChanged(bool hasImage);
+
 protected:
     void paintEvent(QPaintEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
+    void contextMenuEvent(QContextMenuEvent* e) override;
+    void keyPressEvent(QKeyEvent* e) override;
+    void mousePressEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
+
+public:
+    // Image actions (used by the context menu and could be wired to a ribbon).
+    bool hasImageSelected() const { return m_imagePos >= 0; }
+    void setImageWidth(int px);                 // aspect-locked
+    void scaleImage(double factor);             // relative
+    void alignImage(Qt::Alignment a);           // paragraph alignment
+    void deleteSelectedImage();
 
 private:
     void syncHeight();
+    QTextImageFormat selectedImageFormat() const;
+    QRect  selectedImageRect() const;           // viewport coords
+    int    handleAt(const QPoint& p) const;      // -1 none, 0..7 handles
+    void   selectImageAt(const QPoint& vpPos);   // pick image under a click
+    void   applyImageSize(int w, int h);
 
     double m_pageW   { 794.0 };
     double m_pageH   { 1123.0 };
@@ -47,6 +93,29 @@ private:
     bool   m_paged   { true };
     QColor m_paper   { "#FFFFFF" };
     QColor m_desk    { "#E8E9ED" };
+
+    // Header / footer (3 zones each: left, center, right)
+    QString m_header[3] { QString(), QString(), QString() };
+    QString m_footer[3] { QString(), QStringLiteral("Page {n} of {N}"), QString() };
+    bool    m_diffFirst { false };
+    QString m_docName;
+    QString expandFields(const QString& s, int pageNum, int total) const;
+
+    // ── Spell check ───────────────────────────────────────────────────────────
+    SpellHighlighter* m_spell { nullptr };
+
+    // ── AutoCorrect ───────────────────────────────────────────────────────────
+    bool               m_autoCorrectEnabled { true };
+    AutoCorrectSettings m_autoCorrect;
+    void applyAutoCorrectAtCursor();   // corrects the word just before the cursor
+
+    // ── Image selection / resize ────────────────────────────────────────────
+    int    m_imagePos    { -1 };     // position of the selected image char, or -1
+    bool   m_resizing    { false };
+    int    m_resizeHandle{ -1 };     // 0..7 while resizing
+    QRect  m_resizeStart;            // image rect at drag start
+    QPoint m_dragOrigin;             // mouse pos at drag start
+    double m_imgAspect   { 1.0 };    // w/h at drag start
 };
 
 } // namespace NativeOffice

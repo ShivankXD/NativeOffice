@@ -34,14 +34,17 @@ WriterStatusBar::WriterStatusBar(QWidget* parent)
     m_spellPill->setCheckable(true);
     m_spellPill->setChecked(true);
     m_spellPill->setCursor(Qt::PointingHandCursor);
-    m_spellPill->setToolTip("Toggle AI Spell Check (display only)");
+    m_spellPill->setToolTip("Toggle spell check (red squiggles under misspellings)");
     auto syncPill = [this] {
         m_spellPill->setText(m_spellPill->isChecked()
-                                 ? "  ●  AI Spell Check"
-                                 : "  ○  AI Spell Check");
+                                 ? "  ●  Spell Check"
+                                 : "  ○  Spell Check");
     };
     syncPill();
-    connect(m_spellPill, &QToolButton::toggled, this, [syncPill](bool){ syncPill(); });
+    connect(m_spellPill, &QToolButton::toggled, this, [this, syncPill](bool on){
+        syncPill();
+        emit spellCheckToggled(on);
+    });
 
     layout->addWidget(m_pageLabel);
     layout->addWidget(m_wordLabel);
@@ -167,6 +170,12 @@ void WriterStatusBar::setZoomPercent(int percent) {
     const QSignalBlocker blocker(m_zoomSlider);
     m_zoomSlider->setValue(percent);
     m_zoomLabel->setText(QString::number(percent) + "%");
+}
+
+void WriterStatusBar::setSpellCheckActive(bool on) {
+    const QSignalBlocker b(m_spellPill);
+    m_spellPill->setChecked(on);
+    m_spellPill->setText(on ? "  ●  Spell Check" : "  ○  Spell Check");
 }
 
 void WriterStatusBar::setWebLayoutActive(bool web) {

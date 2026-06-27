@@ -30,6 +30,7 @@ namespace NativeOffice {
 class WriterRibbon;
 class WriterStatusBar;
 class PagedTextEdit;
+class WriterRuler;
 
 class WriterModule : public QWidget {
     Q_OBJECT
@@ -65,9 +66,14 @@ signals:
     // Emitted after a successful save/load with the new path
     void filePathChanged(const QString& newPath);
 
+public slots:
+    // Sprint 23: rulers
+    void setRulersVisible(bool on);
+
 protected:
     // Ctrl+scroll over the canvas zooms the page (Sprint 14).
     bool eventFilter(QObject* obj, QEvent* ev) override;
+    void resizeEvent(QResizeEvent* ev) override;
 
 private slots:
     void onContentsChanged();
@@ -92,13 +98,26 @@ private:
     void setPageSize(double portraitW, double portraitH);
     void setPageColor(const QColor& color);
 
+    void updateRulerGeometry();       // keep rulers aligned with the page
+
+    // Sprint 24: autosave + crash recovery
+    QString buildNoffString() const;  // header + style sidecar + HTML
+    void    loadNoffString(QString content);  // parse sidecar + set HTML
+    QString recoveryFilePath() const; // per-document recovery file location
+    void    writeRecovery();          // timed snapshot of unsaved changes
+    void    checkCrashRecovery();     // offer to restore a leftover recovery file
+
     WriterRibbon*    m_ribbon    { nullptr };
+    WriterRuler*     m_hRuler    { nullptr };
+    WriterRuler*     m_vRuler    { nullptr };
+    bool             m_rulersVisible { true };
     WriterStatusBar* m_statusBar { nullptr };
     QWidget*         m_canvas    { nullptr };
     QScrollArea*     m_scroll    { nullptr };
     QTextEdit*       m_editor    { nullptr };   // == m_paper (QTextEdit API surface)
     PagedTextEdit*   m_paper     { nullptr };   // same object, paged-specific calls
     QTimer*          m_statusTimer { nullptr };  // debounce for updateStatus
+    QTimer*          m_autosaveTimer { nullptr }; // periodic crash-recovery snapshot
 
     QFont          m_baseFont;                // body font at 100% zoom
     int            m_zoom         { 100 };

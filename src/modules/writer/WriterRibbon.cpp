@@ -3,7 +3,13 @@
 // WPS/Word-style tabbed ribbon implementation for NativeOffice Writer.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "WriterRibbon.h"
+#include "WriterTableOps.h"
+#include "WriterListOps.h"
+#include "WriterStyles.h"
+#include "PagedTextEdit.h"
+#include "DocxIo.h"
 #include "core/theme/ThemeManager.h"
+#include <QApplication>
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -51,6 +57,10 @@
 #include <QPdfWriter>
 #include <QPageSize>
 #include <QPageLayout>
+#include <QPrinter>
+#include <QPrintDialog>
+#include <QPrintPreviewDialog>
+#include <memory>
 #include <QDateTime>
 #include <QImage>
 #include <QBuffer>
@@ -64,6 +74,10 @@
 #include <QtMath>
 #include <QStyledItemDelegate>
 #include <QListView>
+#include <QListWidget>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QPolygonF>
 #include <QPainterPath>
 #include <QEvent>
@@ -74,9 +88,6 @@
 #include <functional>
 
 namespace NativeOffice {
-
-// Custom block-format property: which named style a paragraph carries.
-static constexpr int kStyleProp = QTextFormat::UserProperty + 11;
 
 namespace {
 
@@ -219,6 +230,33 @@ QIcon marksIcon() { return paintIcon([](QPainter& p) {
     QFont f("Segoe UI", 22, QFont::Bold); p.setFont(f);
     p.setPen(kIconColor);
     p.drawText(QRectF(0, 0, 40, 40), Qt::AlignCenter, QString::fromUtf8("¶"));
+}); }
+
+QIcon rulerIcon() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(6, 14, 28, 12));
+    for (int x : { 11, 16, 21, 26, 31 }) p.drawLine(QPointF(x, 14), QPointF(x, x % 10 == 6 ? 22 : 19));
+}); }
+
+QIcon autoCorrectIcon() { return paintIcon([](QPainter& p) {
+    QFont f("Segoe UI", 16, QFont::Bold); p.setFont(f);
+    p.drawText(QRectF(2, 4, 26, 32), Qt::AlignCenter, "A");
+    p.setPen(QPen(QColor("#1AA463"), 3.0));
+    p.drawLine(QPointF(24, 26), QPointF(29, 31)); p.drawLine(QPointF(29, 31), QPointF(36, 20));
+}); }
+
+QIcon printIcon() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(8, 16, 24, 12));               // printer body
+    p.drawRect(QRectF(12, 7, 16, 9));                // paper in
+    p.drawRect(QRectF(12, 24, 16, 9));               // paper out
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    p.drawEllipse(QPointF(28, 20), 1.4, 1.4);
+}); }
+
+QIcon templateIcon() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(9, 6, 22, 28));                // page
+    p.drawLine(QPointF(13, 12), QPointF(27, 12));
+    p.drawLine(QPointF(13, 17), QPointF(27, 17));
+    p.drawLine(QPointF(13, 22), QPointF(23, 22));
 }); }
 
 QIcon lineSpacingIcon() { return paintIcon([](QPainter& p) {
@@ -855,6 +893,14 @@ QIcon exportPdfIcon() { return paintIcon([](QPainter& p) {
     p.drawText(QRectF(7, 20, 26, 11), Qt::AlignCenter, "PDF");
 }); }
 
+QIcon wordIcon() { return paintIcon([](QPainter& p) {
+    p.drawRoundedRect(QRectF(9, 6, 22, 28), 2, 2);
+    p.setBrush(QColor("#2563EB")); p.setPen(Qt::NoPen);
+    p.drawRect(QRectF(7, 20, 26, 11));
+    QFont f("Segoe UI", 7, QFont::Bold); p.setFont(f); p.setPen(Qt::white);
+    p.drawText(QRectF(7, 20, 26, 11), Qt::AlignCenter, "W");
+}); }
+
 QIcon exportPicIcon() { return paintIcon([](QPainter& p) {
     p.drawRoundedRect(QRectF(6, 9, 28, 22), 2, 2);
     p.setBrush(QColor("#16A34A")); p.setPen(Qt::NoPen);
@@ -874,63 +920,119 @@ QIcon extractTextIcon() { return paintIcon([](QPainter& p) {
     QPolygonF a; a << QPointF(30, 27) << QPointF(30, 35) << QPointF(35, 31); p.drawPolygon(a);
 }); }
 
-// Resolve the visual attributes of a built-in paragraph style.
-void styleFormats(WriterStyle s, QTextCharFormat& cf, QTextBlockFormat& bf) {
-    cf.setFontFamilies({"Segoe UI", "Inter", "Roboto", "sans-serif"});
-    cf.setFontItalic(false);
-    cf.setFontWeight(QFont::Normal);
-    cf.setForeground(QColor("#1C1E26"));
-    cf.setFontPointSize(12);
-
-    bf.setTopMargin(0);
-    bf.setBottomMargin(6);
-    bf.setLeftMargin(0);
-    bf.setIndent(0);
-    bf.setAlignment(Qt::AlignLeft | Qt::AlignAbsolute);
-
-    switch (s) {
-    case WriterStyle::Normal:    break;
-    case WriterStyle::NoSpacing: bf.setBottomMargin(0); break;
-    case WriterStyle::Heading1:
-        cf.setFontPointSize(24); cf.setFontWeight(QFont::Bold);
-        bf.setTopMargin(14); bf.setBottomMargin(6); break;
-    case WriterStyle::Heading2:
-        cf.setFontPointSize(18); cf.setFontWeight(QFont::Bold);
-        cf.setForeground(QColor("#2C3140"));
-        bf.setTopMargin(12); bf.setBottomMargin(4); break;
-    case WriterStyle::Heading3:
-        cf.setFontPointSize(14); cf.setFontWeight(QFont::Bold);
-        cf.setForeground(QColor("#3A4054"));
-        bf.setTopMargin(10); bf.setBottomMargin(3); break;
-    case WriterStyle::Title:
-        cf.setFontPointSize(32); cf.setFontWeight(QFont::Light);
-        bf.setAlignment(Qt::AlignHCenter);
-        bf.setTopMargin(6); bf.setBottomMargin(4); break;
-    case WriterStyle::Subtitle:
-        cf.setFontPointSize(16); cf.setFontItalic(true);
-        cf.setForeground(QColor("#6B7280"));
-        bf.setAlignment(Qt::AlignHCenter);
-        bf.setBottomMargin(10); break;
-    case WriterStyle::Quote:
-        cf.setFontPointSize(13); cf.setFontItalic(true);
-        cf.setForeground(QColor("#4B5563"));
-        bf.setLeftMargin(34); bf.setIndent(0);
-        bf.setBackground(QColor("#F3F4F6"));
-        bf.setTopMargin(6); bf.setBottomMargin(6); break;
-    }
+// ── Table editing icons ──────────────────────────────────────────────────────
+QIcon tblGrid() { // shared base grid
+    return paintIcon([](QPainter& p) {
+        p.drawRect(QRectF(7, 9, 26, 22));
+        p.drawLine(QPointF(7, 17), QPointF(33, 17));
+        p.drawLine(QPointF(7, 25), QPointF(33, 25));
+        p.drawLine(QPointF(16, 9), QPointF(16, 31));
+        p.drawLine(QPointF(25, 9), QPointF(25, 31));
+    });
 }
 
-struct StyleDef { WriterStyle id; const char* name; };
-const StyleDef kStyles[] = {
-    { WriterStyle::Normal,    "Normal" },
-    { WriterStyle::NoSpacing, "No Spacing" },
-    { WriterStyle::Heading1,  "Heading 1" },
-    { WriterStyle::Heading2,  "Heading 2" },
-    { WriterStyle::Heading3,  "Heading 3" },
-    { WriterStyle::Title,     "Title" },
-    { WriterStyle::Subtitle,  "Subtitle" },
-    { WriterStyle::Quote,     "Quote" },
-};
+QIcon tblInsRow(bool below) { return paintIcon([below](QPainter& p) {
+    p.drawRect(QRectF(7, 12, 26, 16));
+    p.drawLine(QPointF(7, 20), QPointF(33, 20));
+    p.drawLine(QPointF(16, 12), QPointF(16, 28));
+    p.drawLine(QPointF(25, 12), QPointF(25, 28));
+    p.setPen(QPen(QColor("#16A34A"), 2.2, Qt::SolidLine, Qt::RoundCap));
+    const double y = below ? 33 : 7;
+    p.drawLine(QPointF(17, y), QPointF(23, y));
+    p.drawLine(QPointF(20, y - 3), QPointF(20, y + 3));
+}); }
+
+QIcon tblInsCol(bool right) { return paintIcon([right](QPainter& p) {
+    p.drawRect(QRectF(12, 9, 16, 22));
+    p.drawLine(QPointF(20, 9), QPointF(20, 31));
+    p.drawLine(QPointF(12, 17), QPointF(28, 17));
+    p.drawLine(QPointF(12, 25), QPointF(28, 25));
+    p.setPen(QPen(QColor("#16A34A"), 2.2, Qt::SolidLine, Qt::RoundCap));
+    const double x = right ? 33 : 7;
+    p.drawLine(QPointF(x, 17), QPointF(x, 23));
+    p.drawLine(QPointF(x - 3, 20), QPointF(x + 3, 20));
+}); }
+
+QIcon tblDelete() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(7, 9, 26, 22));
+    p.drawLine(QPointF(7, 20), QPointF(33, 20));
+    p.drawLine(QPointF(20, 9), QPointF(20, 31));
+    p.setPen(QPen(QColor("#E8372A"), 2.4, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(QPointF(13, 13), QPointF(27, 27));
+    p.drawLine(QPointF(27, 13), QPointF(13, 27));
+}); }
+
+QIcon tblMerge() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(7, 10, 26, 20));
+    p.setPen(QPen(kIconColor, 1.4, Qt::DashLine));
+    p.drawLine(QPointF(20, 10), QPointF(20, 30));
+    p.setPen(QPen(kIconColor, 2.0, Qt::SolidLine, Qt::RoundCap));
+    p.setBrush(kIconColor);
+    QPolygonF l; l << QPointF(17, 17) << QPointF(17, 23) << QPointF(12, 20); p.drawPolygon(l);
+    QPolygonF r; r << QPointF(23, 17) << QPointF(23, 23) << QPointF(28, 20); p.drawPolygon(r);
+}); }
+
+QIcon tblSplit() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(7, 10, 26, 20));
+    p.drawLine(QPointF(20, 10), QPointF(20, 30));
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    QPolygonF l; l << QPointF(15, 17) << QPointF(15, 23) << QPointF(10, 20); p.drawPolygon(l);
+    QPolygonF r; r << QPointF(25, 17) << QPointF(25, 23) << QPointF(30, 20); p.drawPolygon(r);
+}); }
+
+QIcon tblShade() { return paintIcon([](QPainter& p) {
+    p.setBrush(QColor(58,63,75,50)); p.setPen(QPen(kIconColor, 1.6));
+    p.drawRect(QRectF(7, 9, 13, 11));
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(QRectF(20, 9, 13, 11));
+    p.drawRect(QRectF(7, 20, 13, 11));
+    p.drawRect(QRectF(20, 20, 13, 11));
+}); }
+
+QIcon tblBorders() { return paintIcon([](QPainter& p) {
+    QPen thick(kIconColor); thick.setWidthF(2.4); p.setPen(thick);
+    p.drawRect(QRectF(7, 9, 26, 22));
+    QPen thin(kIconColor); thin.setWidthF(1.0); p.setPen(thin);
+    p.drawLine(QPointF(7, 20), QPointF(33, 20));
+    p.drawLine(QPointF(20, 9), QPointF(20, 31));
+}); }
+
+QIcon tblHeader() { return paintIcon([](QPainter& p) {
+    p.setBrush(QColor("#2C3140")); p.setPen(QPen(kIconColor, 1.4));
+    p.drawRect(QRectF(7, 9, 26, 7));
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(QRectF(7, 16, 26, 15));
+    p.drawLine(QPointF(7, 23), QPointF(33, 23));
+    p.drawLine(QPointF(20, 16), QPointF(20, 31));
+}); }
+
+QIcon tblStyle(int variant) { return paintIcon([variant](QPainter& p) {
+    p.setPen(QPen(kIconColor, 1.4));
+    if (variant == 0) {            // grid
+        p.drawRect(QRectF(7, 9, 26, 22));
+        for (int y : {16, 23}) p.drawLine(QPointF(7, y), QPointF(33, y));
+        for (int x : {16, 25}) p.drawLine(QPointF(x, 9), QPointF(x, 31));
+    } else if (variant == 1) {     // header
+        p.setBrush(QColor("#2C3140")); p.drawRect(QRectF(7, 9, 26, 7));
+        p.setBrush(Qt::NoBrush); p.drawRect(QRectF(7, 16, 26, 15));
+        p.drawLine(QPointF(7, 23), QPointF(33, 23));
+    } else {                        // banded
+        p.drawRect(QRectF(7, 9, 26, 22));
+        p.setBrush(QColor("#E5E7EB")); p.setPen(Qt::NoPen);
+        p.drawRect(QRectF(8, 16, 24, 7));
+        p.setPen(QPen(kIconColor, 1.4)); p.setBrush(Qt::NoBrush);
+        for (int y : {16, 23}) p.drawLine(QPointF(7, y), QPointF(33, y));
+    }
+}); }
+
+QIcon tblAlign(int mode) { return paintIcon([mode](QPainter& p) {
+    p.drawRect(QRectF(7, 9, 26, 22));
+    p.setPen(QPen(kIconColor, 1.8, Qt::SolidLine, Qt::RoundCap));
+    int x0 = 11, x1 = 22;
+    if (mode == 1) { x0 = 14; x1 = 26; }
+    else if (mode == 2) { x0 = 18; x1 = 29; }
+    for (int y : {15, 20, 25}) p.drawLine(QPointF(x0, y), QPointF(x1, y));
+}); }
 
 } // namespace
 
@@ -941,6 +1043,8 @@ WriterRibbon::WriterRibbon(QWidget* parent)
     : QWidget(parent)
 {
     setObjectName("writerRibbon");
+
+    m_styles = new WriterStyleManager();
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -958,7 +1062,7 @@ WriterRibbon::WriterRibbon(QWidget* parent)
     m_tabGroup->setExclusive(true);
 
     const QStringList tabNames = {
-        "Home", "Insert", "Page Layout", "References", "Review", "View", "Tools"
+        "Home", "Insert", "Page Layout", "References", "Review", "View", "Tools", "Table"
     };
     for (int i = 0; i < tabNames.size(); ++i) {
         auto* btn = makeTabButton(tabNames[i]);
@@ -968,6 +1072,13 @@ WriterRibbon::WriterRibbon(QWidget* parent)
     }
     tabLayout->addStretch();
     m_tabGroup->button(0)->setChecked(true);
+
+    // The "Table" tab is contextual — hidden until the cursor is inside a table.
+    m_tableTabBtn = qobject_cast<QToolButton*>(m_tabGroup->button(7));
+    if (m_tableTabBtn) {
+        m_tableTabBtn->setObjectName("ribbonTableTabBtn");
+        m_tableTabBtn->setVisible(false);
+    }
 
     // ── Stacked content ─────────────────────────────────────────────────────
     m_stack = new QStackedWidget(this);
@@ -980,6 +1091,7 @@ WriterRibbon::WriterRibbon(QWidget* parent)
     m_stack->addWidget(buildReviewTab());      // 4 — Review
     m_stack->addWidget(buildViewTab());        // 5 — View
     m_stack->addWidget(buildToolsTab());       // 6 — Tools
+    m_stack->addWidget(buildTableTab());       // 7 — Table (contextual)
 
     connect(m_tabGroup, &QButtonGroup::idClicked, this, [this](int id) {
         m_stack->setCurrentIndex(id);
@@ -1021,6 +1133,10 @@ void WriterRibbon::attachEditor(QTextEdit* editor) {
     // Ctrl+F → Find & Replace (QTextEdit has no default binding for it).
     auto* find = new QShortcut(QKeySequence::Find, m_editor);
     connect(find, &QShortcut::activated, this, &WriterRibbon::openFindReplace);
+
+    // Ctrl+P → Print.
+    auto* print = new QShortcut(QKeySequence::Print, m_editor);
+    connect(print, &QShortcut::activated, this, &WriterRibbon::printDocument);
 
     syncToCurrentFormat();
 }
@@ -1305,6 +1421,9 @@ QWidget* WriterRibbon::buildHomeTab() {
         m->addAction(listStyleIcon(QTextListFormat::ListDisc),   "Disc",   this, [this] { applyBullets(QTextListFormat::ListDisc); });
         m->addAction(listStyleIcon(QTextListFormat::ListCircle), "Circle", this, [this] { applyBullets(QTextListFormat::ListCircle); });
         m->addAction(listStyleIcon(QTextListFormat::ListSquare), "Square", this, [this] { applyBullets(QTextListFormat::ListSquare); });
+        m->addSeparator();
+        m->addAction("Multilevel List (•  ◦  ▪)", this, [this] { applyMultilevelList(false); });
+        m->addAction("Define New Bullet…", this, [this] { customizeList(); });
         btnBullets->setMenu(m);
     }
 
@@ -1318,6 +1437,11 @@ QWidget* WriterRibbon::buildHomeTab() {
         m->addAction(listStyleIcon(QTextListFormat::ListUpperAlpha), "A. B. C.",   this, [this] { applyNumbering(QTextListFormat::ListUpperAlpha); });
         m->addAction(listStyleIcon(QTextListFormat::ListLowerRoman), "i. ii. iii.", this, [this] { applyNumbering(QTextListFormat::ListLowerRoman); });
         m->addAction(listStyleIcon(QTextListFormat::ListUpperRoman), "I. II. III.", this, [this] { applyNumbering(QTextListFormat::ListUpperRoman); });
+        m->addSeparator();
+        m->addAction("Multilevel List (1.  a.  i.)", this, [this] { applyMultilevelList(true); });
+        m->addAction("Restart Numbering at 1",  this, [this] { restartNumbering(); });
+        m->addAction("Continue Previous List",  this, [this] { continueNumbering(); });
+        m->addAction("Define Number Format…",   this, [this] { customizeList(); });
         btnNumber->setMenu(m);
     }
 
@@ -1431,61 +1555,31 @@ QWidget* WriterRibbon::buildHomeTab() {
     layout->addWidget(makeSeparator());
 
     // ══ GROUP 4 — Styles ═══════════════════════════════════════════════════
+    // The gallery is data-driven: chips are (re)built from the style manager, so
+    // user-created styles appear and deleted ones disappear. Right-click a chip
+    // to modify / update / rename / delete it.
     m_styleGroup = new QButtonGroup(this);
     m_styleGroup->setExclusive(true);
-    auto* styleGrid = new QWidget(tab);
-    auto* sgl = new QGridLayout(styleGrid);
+    m_styleGrid  = new QWidget(tab);
+    auto* sgl = new QGridLayout(m_styleGrid);
     sgl->setContentsMargins(0, 0, 0, 0); sgl->setSpacing(3);
-    int si = 0;
-    for (const auto& sd : kStyles) {
-        auto* b = new QToolButton(styleGrid);
-        b->setObjectName("ribbonStyleBtn");
-        b->setText(sd.name);
-        b->setCheckable(true);
-        b->setCursor(Qt::PointingHandCursor);
-        b->setFixedSize(92, 28);
-        b->setToolTip(QString("Apply the %1 style").arg(sd.name));
-        // Give each chip a hint of its own look.
-        QFont f("Segoe UI", 9);
-        switch (sd.id) {
-        case WriterStyle::Heading1: f.setPointSize(11); f.setBold(true); break;
-        case WriterStyle::Heading2: f.setPointSize(10); f.setBold(true); break;
-        case WriterStyle::Heading3: f.setBold(true); break;
-        case WriterStyle::Title:    f.setPointSize(11); break;
-        case WriterStyle::Subtitle: f.setItalic(true); break;
-        case WriterStyle::Quote:    f.setItalic(true); break;
-        default: break;
-        }
-        b->setFont(f);
-        const WriterStyle id = sd.id;
-        m_styleGroup->addButton(b, static_cast<int>(id));
-        connect(b, &QToolButton::clicked, this, [this, id] { applyParagraphStyle(id); });
-        sgl->addWidget(b, si / 4, si % 4);
-        ++si;
-    }
-    m_styleGroup->button(static_cast<int>(WriterStyle::Normal))->setChecked(true);
 
-    auto* btnMoreStyles = makeIconBtn(paintIcon([](QPainter& p) {
+    m_moreStylesBtn = makeIconBtn(paintIcon([](QPainter& p) {
         p.setBrush(kIconColor); p.setPen(Qt::NoPen);
         for (int x : {12, 20, 28}) p.drawEllipse(QPointF(x, 28), 2.0, 2.0);
         p.setPen(QPen(kIconColor, 2.2)); p.setBrush(Qt::NoBrush);
         p.drawText(QRectF(6, 6, 28, 16), Qt::AlignCenter, "AA");
-    }), "More styles");
-    btnMoreStyles->setPopupMode(QToolButton::InstantPopup);
-    {
-        auto* m = new QMenu(btnMoreStyles);
-        for (const auto& sd : kStyles) {
-            const WriterStyle id = sd.id;
-            m->addAction(sd.name, this, [this, id] { applyParagraphStyle(id); });
-        }
-        btnMoreStyles->setMenu(m);
-    }
+    }), "More styles · New style · Manage…");
+    m_moreStylesBtn->setPopupMode(QToolButton::InstantPopup);
+
+    rebuildStyleGallery();
+    rebuildMoreStylesMenu();
 
     auto* stylesRow = new QWidget(tab);
     auto* srl = new QHBoxLayout(stylesRow);
     srl->setContentsMargins(0, 0, 0, 0); srl->setSpacing(4);
-    srl->addWidget(styleGrid);
-    srl->addWidget(btnMoreStyles);
+    srl->addWidget(m_styleGrid);
+    srl->addWidget(m_moreStylesBtn);
 
     layout->addWidget(makeGroup("Styles", { stylesRow }));
     layout->addWidget(makeSeparator());
@@ -1530,15 +1624,17 @@ QWidget* WriterRibbon::buildInsertTab() {
     layout->setSpacing(0);
 
     // ══ Pages ══════════════════════════════════════════════════════════════
+    auto* btnTemplate  = makeBigBtn(templateIcon(),     "Templates",    "Start from a template");
     auto* btnCover     = makeBigBtn(coverPageIcon(),    "Cover\nPage",  "Insert a formatted cover page");
     auto* btnPageBreak = makeBigBtn(insPageBreakIcon(), "Page\nBreak",  "Insert a page break");
     auto* btnBlankPage = makeBigBtn(insBlankPageIcon(), "Blank\nPage",  "Insert a blank page");
+    connect(btnTemplate,  &QToolButton::clicked, this, &WriterRibbon::showTemplateGallery);
     connect(btnCover,     &QToolButton::clicked, this, &WriterRibbon::insertCoverPage);
     connect(btnPageBreak, &QToolButton::clicked, this, &WriterRibbon::insertPageBreak);
     connect(btnBlankPage, &QToolButton::clicked, this, [this] {
         insertPageBreak(); insertPageBreak();   // a blank page = two breaks around an empty one
     });
-    layout->addWidget(makeGroup("Pages", { btnCover, btnPageBreak, btnBlankPage }));
+    layout->addWidget(makeGroup("Pages", { btnTemplate, btnCover, btnPageBreak, btnBlankPage }));
     layout->addWidget(makeSeparator());
 
     // ══ Tables ═════════════════════════════════════════════════════════════
@@ -1773,7 +1869,15 @@ void WriterRibbon::insertTableSized(int rows, int cols) {
     tf.setWidth(QTextLength(QTextLength::PercentageLength, 100));
     QTextCursor cur = m_editor->textCursor();
     cur.insertTable(rows, cols, tf);
+    m_editor->setTextCursor(cur);     // place the editor cursor inside the new table
     m_editor->setFocus();
+
+    // Reveal the contextual Table tab and switch to it so the tools are found.
+    refreshTableTab();
+    if (m_tableTabBtn && m_tableTabBtn->isVisible() && m_stack) {
+        m_tableTabBtn->setChecked(true);
+        m_stack->setCurrentIndex(7);
+    }
 }
 
 void WriterRibbon::insertPageBreak() {
@@ -1838,14 +1942,13 @@ void WriterRibbon::insertBookmark() {
 }
 
 void WriterRibbon::insertPageNumberField() {
-    if (!m_editor) return;
-    // Estimate the current page from the cursor's vertical position.
-    const QTextCursor cur = m_editor->textCursor();
-    const QRect r = m_editor->cursorRect(cur);
-    const double pageH = 1123.0;   // A4 px height @100%
-    const int page = qMax(1, static_cast<int>(r.top() / pageH) + 1);
-    m_editor->textCursor().insertText(QString::number(page));
-    m_editor->setFocus();
+    // Quick action: put an auto-updating page number in the footer centre.
+    auto* paper = qobject_cast<PagedTextEdit*>(m_editor);
+    if (!paper) return;
+    QStringList f = paper->footerZones();
+    f[1] = "Page {n} of {N}";
+    paper->setHeaderFooter(paper->headerZones(), f, paper->differentFirstPage());
+    if (m_editor) m_editor->setFocus();
 }
 
 void WriterRibbon::insertTextBox() {
@@ -1980,24 +2083,60 @@ void WriterRibbon::insertCoverPage() {
     m_editor->setFocus();
 }
 
-void WriterRibbon::insertHeaderFooter(bool header) {
-    if (!m_editor) return;
-    QTextCursor cur = m_editor->textCursor();
-    cur.beginEditBlock();
-    cur.movePosition(header ? QTextCursor::Start : QTextCursor::End);
+void WriterRibbon::insertHeaderFooter(bool /*header*/) {
+    openHeaderFooterDialog();
+}
 
-    QTextCharFormat cf;
-    cf.setForeground(QColor("#6B7280"));
-    cf.setFontPointSize(10);
-    QTextBlockFormat bf;
-    bf.setAlignment(Qt::AlignHCenter);
-    if (header) bf.setBottomMargin(12); else bf.setTopMargin(12);
+void WriterRibbon::openHeaderFooterDialog() {
+    auto* paper = qobject_cast<PagedTextEdit*>(m_editor);
+    if (!paper) return;
 
-    cur.insertBlock(bf, cf);
-    cur.insertText(header ? "Header" : "Footer", cf);
-    // separating rule
-    cur.insertHtml("<hr/>");
-    cur.endEditBlock();
+    QDialog dlg(window());
+    dlg.setWindowTitle("Header and Footer");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* form = new QFormLayout(&dlg);
+
+    const QStringList hz = paper->headerZones();
+    const QStringList fz = paper->footerZones();
+    QLineEdit* hEd[3]; QLineEdit* fEd[3];
+    const char* labels[3] = { "Left:", "Center:", "Right:" };
+
+    auto* hHdr = new QLabel("<b>Header</b>", &dlg); form->addRow(hHdr);
+    for (int i = 0; i < 3; ++i) { hEd[i] = new QLineEdit(hz.value(i), &dlg); form->addRow(labels[i], hEd[i]); }
+    auto* fHdr = new QLabel("<b>Footer</b>", &dlg); form->addRow(fHdr);
+    for (int i = 0; i < 3; ++i) { fEd[i] = new QLineEdit(fz.value(i), &dlg); form->addRow(labels[i], fEd[i]); }
+
+    // Field-insert buttons (NoFocus so the target line edit keeps focus).
+    auto* fieldRow = new QHBoxLayout();
+    fieldRow->addWidget(new QLabel("Insert field:", &dlg));
+    struct Fld { const char* label; const char* code; };
+    for (const Fld& fl : { Fld{"Page #","{n}"}, Fld{"Total Pages","{N}"},
+                           Fld{"Date","{date}"}, Fld{"File Name","{file}"} }) {
+        auto* b = new QPushButton(fl.label, &dlg);
+        b->setFocusPolicy(Qt::NoFocus);
+        const QString code = fl.code;
+        connect(b, &QPushButton::clicked, &dlg, [code]{
+            if (auto* le = qobject_cast<QLineEdit*>(QApplication::focusWidget())) le->insert(code);
+        });
+        fieldRow->addWidget(b);
+    }
+    fieldRow->addStretch();
+    form->addRow(fieldRow);
+
+    auto* diff = new QCheckBox("Different first page (no header/footer on page 1)", &dlg);
+    diff->setChecked(paper->differentFirstPage());
+    form->addRow(diff);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() == QDialog::Accepted) {
+        paper->setHeaderFooter({ hEd[0]->text(), hEd[1]->text(), hEd[2]->text() },
+                               { fEd[0]->text(), fEd[1]->text(), fEd[2]->text() },
+                               diff->isChecked());
+    }
     m_editor->setFocus();
 }
 
@@ -2450,7 +2589,10 @@ QWidget* WriterRibbon::buildViewTab() {
         m->addAction(eyeProtectIcon(), "Light Grey",  this, [this] { emit pageColorRequested(QColor("#ECECEC")); });
         btnEye->setMenu(m);
     }
-    layout->addWidget(makeGroup("Show", { btnMarksView, btnEye }));
+    auto* btnRuler = makeBigBtn(rulerIcon(), "Ruler", "Show or hide the rulers", true);
+    btnRuler->setChecked(true);
+    connect(btnRuler, &QToolButton::toggled, this, [this](bool on) { emit rulerToggled(on); });
+    layout->addWidget(makeGroup("Show", { btnMarksView, btnEye, btnRuler }));
     layout->addWidget(makeSeparator());
 
     // ── Zoom ────────────────────────────────────────────────────────────────
@@ -2482,6 +2624,22 @@ QWidget* WriterRibbon::buildToolsTab() {
     auto* layout = new QHBoxLayout(tab);
     layout->setContentsMargins(8, 4, 8, 2); layout->setSpacing(0);
 
+    // ── Word documents ──────────────────────────────────────────────────────
+    auto* btnOpenW = makeBigBtn(wordIcon(), "Open\nWord", "Open a Microsoft Word .docx file");
+    auto* btnSaveW = makeBigBtn(wordIcon(), "Save as\nWord", "Save this document as a Word .docx file");
+    connect(btnOpenW, &QToolButton::clicked, this, &WriterRibbon::importFromWord);
+    connect(btnSaveW, &QToolButton::clicked, this, &WriterRibbon::exportToWord);
+    layout->addWidget(makeGroup("Word (.docx)", { btnOpenW, btnSaveW }));
+    layout->addWidget(makeSeparator());
+
+    // ── Print ─────────────────────────────────────────────────────────────────
+    auto* btnPrint   = makeBigBtn(printIcon(), "Print", "Print the document (Ctrl+P)");
+    auto* btnPreview = makeBigBtn(printIcon(), "Print\nPreview", "Preview before printing");
+    connect(btnPrint,   &QToolButton::clicked, this, &WriterRibbon::printDocument);
+    connect(btnPreview, &QToolButton::clicked, this, &WriterRibbon::printPreview);
+    layout->addWidget(makeGroup("Print", { btnPrint, btnPreview }));
+    layout->addWidget(makeSeparator());
+
     // ── Export ──────────────────────────────────────────────────────────────
     auto* btnPdf  = makeBigBtn(exportPdfIcon(), "Export to\nPDF", "Export the document as a PDF");
     auto* btnPic  = makeBigBtn(exportPicIcon(), "Export to\nPicture", "Export the document as a PNG image");
@@ -2495,9 +2653,11 @@ QWidget* WriterRibbon::buildToolsTab() {
     // ── Proofing ────────────────────────────────────────────────────────────
     auto* btnStats = makeBigBtn(statsIcon(), "Word\nCount", "Document statistics");
     auto* btnSpell = makeBigBtn(spellingIcon(), "Spell\nCheck", "Check spelling and grammar");
+    auto* btnAuto  = makeBigBtn(autoCorrectIcon(), "AutoCorrect\nOptions", "Configure as-you-type corrections");
     connect(btnStats, &QToolButton::clicked, this, &WriterRibbon::showWordCountDialog);
     connect(btnSpell, &QToolButton::clicked, this, &WriterRibbon::showSpellingDialog);
-    layout->addWidget(makeGroup("Proofing", { btnStats, btnSpell }));
+    connect(btnAuto,  &QToolButton::clicked, this, &WriterRibbon::showAutoCorrectOptions);
+    layout->addWidget(makeGroup("Proofing", { btnStats, btnSpell, btnAuto }));
     layout->addWidget(makeSeparator());
 
     auto* btnFind  = makeBigBtn(findIcon(), "Find &\nReplace", "Find and replace (Ctrl+F)");
@@ -2539,6 +2699,124 @@ QWidget* WriterRibbon::buildToolsTab() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Table tab — contextual; shown only when the cursor is inside a table.
+// All actions route through TableOps (shared with the right-click menu).
+// ─────────────────────────────────────────────────────────────────────────────
+QWidget* WriterRibbon::buildTableTab() {
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName("ribbonScroll");
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    auto* tab = new QWidget(scroll);
+    auto* layout = new QHBoxLayout(tab);
+    layout->setContentsMargins(8, 4, 8, 2); layout->setSpacing(0);
+
+    // ── Rows & Columns ──────────────────────────────────────────────────────
+    auto* bRowA = makeBigBtn(tblInsRow(false), "Insert\nAbove", "Insert a row above");
+    auto* bRowB = makeBigBtn(tblInsRow(true),  "Insert\nBelow", "Insert a row below");
+    auto* bColL = makeBigBtn(tblInsCol(false), "Insert\nLeft",  "Insert a column to the left");
+    auto* bColR = makeBigBtn(tblInsCol(true),  "Insert\nRight", "Insert a column to the right");
+    connect(bRowA, &QToolButton::clicked, this, [this]{ TableOps::insertRow(m_editor, false);  m_editor->setFocus(); });
+    connect(bRowB, &QToolButton::clicked, this, [this]{ TableOps::insertRow(m_editor, true);   m_editor->setFocus(); });
+    connect(bColL, &QToolButton::clicked, this, [this]{ TableOps::insertColumn(m_editor, false); m_editor->setFocus(); });
+    connect(bColR, &QToolButton::clicked, this, [this]{ TableOps::insertColumn(m_editor, true);  m_editor->setFocus(); });
+
+    auto* bDelete = makeBigBtn(tblDelete(), "Delete", "Delete rows, columns or the table");
+    bDelete->setPopupMode(QToolButton::InstantPopup);
+    {
+        auto* m = new QMenu(bDelete);
+        m->addAction(tblDelete(), "Delete Row",    this, [this]{ TableOps::deleteRow(m_editor); m_editor->setFocus(); });
+        m->addAction(tblDelete(), "Delete Column", this, [this]{ TableOps::deleteColumn(m_editor); m_editor->setFocus(); });
+        m->addSeparator();
+        m->addAction(tblDelete(), "Delete Table",  this, [this]{ TableOps::deleteTable(m_editor); refreshTableTab(); });
+        bDelete->setMenu(m);
+    }
+    layout->addWidget(makeGroup("Rows & Columns", { bRowA, bRowB, bColL, bColR, bDelete }));
+    layout->addWidget(makeSeparator());
+
+    // ── Merge ───────────────────────────────────────────────────────────────
+    auto* bMerge = makeBigBtn(tblMerge(), "Merge\nCells", "Merge the selected cells");
+    auto* bSplit = makeBigBtn(tblSplit(), "Split\nCell",  "Split a merged cell");
+    connect(bMerge, &QToolButton::clicked, this, [this]{ TableOps::mergeCells(m_editor); m_editor->setFocus(); });
+    connect(bSplit, &QToolButton::clicked, this, [this]{ TableOps::splitCell(m_editor);  m_editor->setFocus(); });
+    layout->addWidget(makeGroup("Merge", { bMerge, bSplit }));
+    layout->addWidget(makeSeparator());
+
+    // ── Cell ────────────────────────────────────────────────────────────────
+    auto* bShade = makeBigBtn(tblShade(), "Shading", "Cell background colour");
+    bShade->setPopupMode(QToolButton::InstantPopup);
+    {
+        auto* menu = new QMenu(bShade);
+        auto* grid = new QWidget(menu);
+        auto* gl = new QGridLayout(grid);
+        gl->setContentsMargins(8, 8, 8, 8); gl->setSpacing(4);
+        const char* pal[] = { "#FFFFFF","#F1F3F7","#E5E7EB","#FEF3C7","#DCFCE7","#DBEAFE",
+                               "#FCE7F3","#2C3140","#E8372A","#16A34A","#2563EB","#EA580C" };
+        int i = 0;
+        for (const char* hex : pal) {
+            auto* sw = new QToolButton(grid);
+            sw->setFixedSize(22, 22); sw->setCursor(Qt::PointingHandCursor); sw->setToolTip(hex);
+            sw->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #C6CAD3;border-radius:3px;}"
+                                      "QToolButton:hover{border:2px solid #E8372A;}").arg(hex));
+            const QColor c(hex);
+            connect(sw, &QToolButton::clicked, this, [this, c, menu]{ TableOps::setCellShading(m_editor, c); menu->hide(); m_editor->setFocus(); });
+            gl->addWidget(sw, i / 6, i % 6); ++i;
+        }
+        auto* wa = new QWidgetAction(menu); wa->setDefaultWidget(grid);
+        menu->addAction(wa);
+        menu->addAction(tblShade(), "No Shading", this, [this]{ TableOps::setCellShading(m_editor, Qt::transparent); m_editor->setFocus(); });
+        bShade->setMenu(menu);
+    }
+
+    auto* bBorders = makeBigBtn(tblBorders(), "Borders", "Cell borders");
+    bBorders->setPopupMode(QToolButton::InstantPopup);
+    {
+        auto* m = new QMenu(bBorders);
+        m->addAction(tblBorders(), "All Borders", this, [this]{ TableOps::setCellBorders(m_editor, 1); m_editor->setFocus(); });
+        m->addAction(tblBorders(), "No Borders",  this, [this]{ TableOps::setCellBorders(m_editor, 0); m_editor->setFocus(); });
+        bBorders->setMenu(m);
+    }
+
+    auto* bAlign = makeBigBtn(tblAlign(0), "Align", "Cell content alignment");
+    bAlign->setPopupMode(QToolButton::InstantPopup);
+    {
+        auto* m = new QMenu(bAlign);
+        m->addAction(tblAlign(0), "Left",   this, [this]{ TableOps::setCellAlignment(m_editor, Qt::AlignLeft);    m_editor->setFocus(); });
+        m->addAction(tblAlign(1), "Center", this, [this]{ TableOps::setCellAlignment(m_editor, Qt::AlignHCenter); m_editor->setFocus(); });
+        m->addAction(tblAlign(2), "Right",  this, [this]{ TableOps::setCellAlignment(m_editor, Qt::AlignRight);   m_editor->setFocus(); });
+        bAlign->setMenu(m);
+    }
+    layout->addWidget(makeGroup("Cell", { bShade, bBorders, bAlign }));
+    layout->addWidget(makeSeparator());
+
+    // ── Table Styles ────────────────────────────────────────────────────────
+    auto* bHeader = makeBigBtn(tblHeader(), "Header\nRow", "Toggle a styled header row", true);
+    connect(bHeader, &QToolButton::toggled, this, [this](bool on){ TableOps::setHeaderRow(m_editor, on); m_editor->setFocus(); });
+
+    auto* bStGrid   = makeBigBtn(tblStyle(0), "Grid",   "Plain grid");
+    auto* bStHeader = makeBigBtn(tblStyle(1), "Header", "Shaded header row");
+    auto* bStBand   = makeBigBtn(tblStyle(2), "Banded", "Banded rows");
+    connect(bStGrid,   &QToolButton::clicked, this, [this]{ TableOps::applyTableStyle(m_editor, 0); m_editor->setFocus(); });
+    connect(bStHeader, &QToolButton::clicked, this, [this]{ TableOps::applyTableStyle(m_editor, 1); m_editor->setFocus(); });
+    connect(bStBand,   &QToolButton::clicked, this, [this]{ TableOps::applyTableStyle(m_editor, 3); m_editor->setFocus(); });
+    layout->addWidget(makeGroup("Table Styles", { bHeader, bStGrid, bStHeader, bStBand }));
+    layout->addStretch();
+    scroll->setWidget(tab);
+    return scroll;
+}
+
+void WriterRibbon::refreshTableTab() {
+    const bool inTbl = m_editor && m_editor->textCursor().currentTable() != nullptr;
+    if (m_tableTabBtn) m_tableTabBtn->setVisible(inTbl);
+    if (!inTbl && m_stack && m_stack->currentIndex() == 7) {
+        if (auto* b = m_tabGroup->button(0)) b->setChecked(true);
+        m_stack->setCurrentIndex(0);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // References / Review / Tools actions
 // ─────────────────────────────────────────────────────────────────────────────
 void WriterRibbon::changeParagraphIndent(int side, double deltaPx) {
@@ -2570,13 +2848,17 @@ void WriterRibbon::insertTableOfContents() {
     QList<Entry> entries;
     for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
         const QTextBlockFormat bf = b.blockFormat();
-        if (!bf.hasProperty(kStyleProp)) continue;
-        const int sid = bf.intProperty(kStyleProp);
-        int level = 0;
-        if (sid == static_cast<int>(WriterStyle::Heading1)) level = 1;
-        else if (sid == static_cast<int>(WriterStyle::Heading2)) level = 2;
-        else if (sid == static_cast<int>(WriterStyle::Heading3)) level = 3;
-        if (level > 0 && !b.text().trimmed().isEmpty())
+        // Prefer the heading level (round-trips natively via HTML <h1>..<h3>);
+        // fall back to the style-name tag from the manager.
+        int level = bf.headingLevel();
+        if (level < 1 || level > 3) {
+            const QString nm = bf.stringProperty(kStyleNameProp);
+            if (const WriterStyleDef* d = m_styles ? m_styles->find(nm) : nullptr)
+                level = (d->headingLevel >= 1 && d->headingLevel <= 3) ? d->headingLevel : 0;
+            else
+                level = 0;
+        }
+        if (level >= 1 && level <= 3 && !b.text().trimmed().isEmpty())
             entries.append({ b.text().trimmed(), level });
     }
 
@@ -2743,6 +3025,58 @@ void WriterRibbon::showSpellingDialog() {
     box.setStyleSheet(ThemeManager::inputDialogStyleSheet());
     box.setText("Spelling and grammar check complete.\nNo issues were found.");
     box.exec();
+}
+
+void WriterRibbon::showAutoCorrectOptions() {
+    auto* paper = qobject_cast<PagedTextEdit*>(m_editor);
+    if (!paper) return;
+    AutoCorrectSettings s = paper->autoCorrectSettings();
+
+    QDialog dlg(window());
+    dlg.setWindowTitle("AutoCorrect Options");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* root = new QVBoxLayout(&dlg);
+
+    auto* master = new QCheckBox("Enable AutoCorrect while typing", &dlg);
+    master->setChecked(paper->autoCorrectEnabled());
+    root->addWidget(master);
+
+    auto* line = new QFrame(&dlg); line->setFrameShape(QFrame::HLine);
+    root->addWidget(line);
+
+    auto* cQuotes = new QCheckBox("Straight quotes with smart quotes (“ ”)", &dlg);
+    auto* cCaps   = new QCheckBox("Capitalize first letter of sentences", &dlg);
+    auto* cTwo    = new QCheckBox("Correct TWo INitial CApitals", &dlg);
+    auto* cTypos  = new QCheckBox("Replace common typos (teh → the)", &dlg);
+    auto* cDash   = new QCheckBox("Replace -- with em dash (—)", &dlg);
+    cQuotes->setChecked(s.smartQuotes);
+    cCaps->setChecked(s.capitalizeSentences);
+    cTwo->setChecked(s.twoInitialCaps);
+    cTypos->setChecked(s.replaceTypos);
+    cDash->setChecked(s.smartDashes);
+    for (QCheckBox* cb : { cQuotes, cCaps, cTwo, cTypos, cDash }) root->addWidget(cb);
+
+    auto syncEnabled = [=]{
+        for (QCheckBox* cb : { cQuotes, cCaps, cTwo, cTypos, cDash })
+            cb->setEnabled(master->isChecked());
+    };
+    syncEnabled();
+    connect(master, &QCheckBox::toggled, &dlg, syncEnabled);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    root->addWidget(bb);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    s.smartQuotes         = cQuotes->isChecked();
+    s.capitalizeSentences = cCaps->isChecked();
+    s.twoInitialCaps      = cTwo->isChecked();
+    s.replaceTypos        = cTypos->isChecked();
+    s.smartDashes         = cDash->isChecked();
+    paper->setAutoCorrectSettings(s);
+    paper->setAutoCorrectEnabled(master->isChecked());
+    m_editor->setFocus();
 }
 
 void WriterRibbon::setTextDirection(bool rtl) {
@@ -2957,6 +3291,159 @@ void WriterRibbon::exportToPdf() {
     QMessageBox::information(window(), "Export to PDF", "Exported to:\n" + path);
 }
 
+// ── Printing (Tier 4) ────────────────────────────────────────────────────────
+void WriterRibbon::renderToPrinter(QPrinter* printer) {
+    if (m_editor) m_editor->document()->print(printer);
+}
+
+void WriterRibbon::printDocument() {
+    if (!m_editor) return;
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setPageSize(QPageSize(QPageSize::A4));
+    printer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout::Millimeter);
+    QPrintDialog dlg(&printer, window());
+    dlg.setWindowTitle("Print");
+    if (dlg.exec() == QDialog::Accepted) renderToPrinter(&printer);
+}
+
+void WriterRibbon::printPreview() {
+    if (!m_editor) return;
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setPageSize(QPageSize(QPageSize::A4));
+    printer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout::Millimeter);
+    QPrintPreviewDialog preview(&printer, window());
+    preview.setWindowTitle("Print Preview");
+    preview.resize(900, 700);
+    connect(&preview, &QPrintPreviewDialog::paintRequested, this, &WriterRibbon::renderToPrinter);
+    preview.exec();
+}
+
+// ── Templates (Tier 4) ───────────────────────────────────────────────────────
+void WriterRibbon::showTemplateGallery() {
+    QDialog dlg(window());
+    dlg.setWindowTitle("New from Template");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    dlg.resize(360, 340);
+    auto* root = new QVBoxLayout(&dlg);
+    root->addWidget(new QLabel("Choose a template to start from:", &dlg));
+
+    auto* listw = new QListWidget(&dlg);
+    const char* names[] = { "Blank Document", "Letter", "Report", "Resume / CV", "Meeting Notes" };
+    for (const char* n : names) listw->addItem(n);
+    listw->setCurrentRow(0);
+    root->addWidget(listw, 1);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    bb->button(QDialogButtonBox::Ok)->setText("Create");
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(listw, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+    root->addWidget(bb);
+
+    if (dlg.exec() == QDialog::Accepted) applyTemplate(listw->currentRow());
+}
+
+void WriterRibbon::applyTemplate(int id) {
+    if (!m_editor) return;
+    if (!m_editor->document()->toPlainText().trimmed().isEmpty()) {
+        if (QMessageBox::question(window(), "New from Template",
+                "This replaces the current document content. Continue?")
+            != QMessageBox::Yes) return;
+    }
+
+    m_editor->clear();
+    QTextCursor cur = m_editor->textCursor();
+    cur.movePosition(QTextCursor::Start);
+    cur.beginEditBlock();
+
+    bool first = true;
+    auto add = [&](const QString& text, const QString& style) {
+        if (!first) cur.insertBlock();
+        first = false;
+        // A block inserted right after a bullet would inherit the list — drop it
+        // so headings/body that follow a bullet group aren't bulleted too.
+        if (QTextList* lst = cur.currentList()) lst->remove(cur.block());
+        QTextBlockFormat plain = cur.blockFormat();
+        plain.setObjectIndex(-1); plain.setIndent(0);
+        cur.setBlockFormat(plain);
+        cur.insertText(text);
+        m_editor->setTextCursor(cur);
+        applyStyleByName(style);
+        cur = m_editor->textCursor();
+    };
+    auto bullet = [&](const QString& text) {
+        add(text, "Normal");
+        ListOps::applyList(m_editor, QTextListFormat::ListDisc);
+        cur = m_editor->textCursor();
+    };
+
+    const QString today = QDateTime::currentDateTime().toString("MMMM d, yyyy");
+
+    switch (id) {
+    case 1: // Letter
+        add("[Your Name]", "Normal");
+        add("[Street Address]", "Normal");
+        add("[City, State ZIP]", "Normal");
+        add("", "Normal");
+        add(today, "Normal");
+        add("", "Normal");
+        add("[Recipient Name]", "Normal");
+        add("[Company / Address]", "Normal");
+        add("", "Normal");
+        add("Dear [Recipient],", "Normal");
+        add("", "Normal");
+        add("Write the body of your letter here. Keep it concise and to the point.", "Normal");
+        add("", "Normal");
+        add("Sincerely,", "Normal");
+        add("[Your Name]", "Normal");
+        break;
+    case 2: // Report
+        add("Report Title", "Title");
+        add("Subtitle or Department", "Subtitle");
+        add("Introduction", "Heading 1");
+        add("Summarize the purpose and scope of this report.", "Normal");
+        add("Background", "Heading 1");
+        add("Provide relevant context and prior work.", "Normal");
+        add("Findings", "Heading 1");
+        add("Present your findings here.", "Normal");
+        add("Conclusion", "Heading 1");
+        add("State conclusions and recommendations.", "Normal");
+        break;
+    case 3: // Resume / CV
+        add("Your Name", "Title");
+        add("email@example.com  ·  (555) 123-4567  ·  City, State", "Subtitle");
+        add("Experience", "Heading 1");
+        add("Job Title — Company (20XX–Present)", "Heading 3");
+        bullet("Key accomplishment or responsibility.");
+        bullet("Another accomplishment with measurable impact.");
+        add("Education", "Heading 1");
+        add("Degree — University (20XX)", "Heading 3");
+        add("Skills", "Heading 1");
+        add("Skill A, Skill B, Skill C, Skill D", "Normal");
+        break;
+    case 4: // Meeting Notes
+        add("Meeting Notes", "Title");
+        add(today + "  ·  Attendees: ", "Subtitle");
+        add("Agenda", "Heading 1");
+        bullet("First agenda item");
+        bullet("Second agenda item");
+        add("Discussion", "Heading 1");
+        add("Capture the discussion here.", "Normal");
+        add("Action Items", "Heading 1");
+        bullet("Owner — task — due date");
+        break;
+    default: // Blank
+        add("", "Normal");
+        break;
+    }
+
+    cur.endEditBlock();
+    QTextCursor home = m_editor->textCursor();
+    home.movePosition(QTextCursor::Start);
+    m_editor->setTextCursor(home);
+    m_editor->setFocus();
+}
+
 void WriterRibbon::exportToPicture() {
     if (!m_editor) return;
     const QString path = QFileDialog::getSaveFileName(window(), "Export to Picture",
@@ -2985,6 +3472,27 @@ void WriterRibbon::exportToText() {
         f.close();
         QMessageBox::information(window(), "Extract Text", "Saved to:\n" + path);
     }
+}
+
+void WriterRibbon::exportToWord() {
+    if (!m_editor) return;
+    const QString path = QFileDialog::getSaveFileName(window(), "Save as Word Document",
+                            QDir::homePath() + "/Document.docx", "Word Document (*.docx)");
+    if (path.isEmpty()) return;
+    if (DocxIo::exportDocx(m_editor->document(), path))
+        QMessageBox::information(window(), "Save as Word", "Saved to:\n" + path);
+    else
+        QMessageBox::warning(window(), "Save as Word", "Could not write the .docx file.");
+}
+
+void WriterRibbon::importFromWord() {
+    if (!m_editor) return;
+    const QString path = QFileDialog::getOpenFileName(window(), "Open Word Document",
+                            QDir::homePath(), "Word Document (*.docx)");
+    if (path.isEmpty()) return;
+    if (!DocxIo::importDocx(path, m_editor->document()))
+        QMessageBox::warning(window(), "Open Word", "Could not read the .docx file.");
+    m_editor->setFocus();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3114,29 +3622,88 @@ void WriterRibbon::toggleVerticalAlign(int align) {
 }
 
 void WriterRibbon::applyBullets(int style) {
-    if (!m_editor) return;
-    QTextCursor cur = m_editor->textCursor();
-    QTextListFormat lf;
-    lf.setStyle(static_cast<QTextListFormat::Style>(style));
-    cur.createList(lf);
-    m_editor->setFocus();
+    ListOps::applyList(m_editor, static_cast<QTextListFormat::Style>(style));
 }
 
 void WriterRibbon::applyNumbering(int style) {
-    if (!m_editor) return;
-    QTextCursor cur = m_editor->textCursor();
-    QTextListFormat lf;
-    lf.setStyle(static_cast<QTextListFormat::Style>(style));
-    cur.createList(lf);
-    m_editor->setFocus();
+    ListOps::applyList(m_editor, static_cast<QTextListFormat::Style>(style));
 }
 
 void WriterRibbon::changeIndent(int delta) {
     if (!m_editor) return;
     QTextCursor cur = m_editor->textCursor();
+    // Inside a list, indent buttons promote/demote the item between levels.
+    if (cur.currentList()) { ListOps::changeLevel(m_editor, delta); return; }
     QTextBlockFormat bf = cur.blockFormat();
     bf.setIndent(qMax(0, bf.indent() + delta));
     cur.mergeBlockFormat(bf);
+    m_editor->setFocus();
+}
+
+// ── Multi-level list operations (Tier 2 #9) ──────────────────────────────────
+void WriterRibbon::applyMultilevelList(bool numbered) {
+    if (!m_editor) return;
+    ListOps::applyList(m_editor, ListOps::markerForLevel(numbered, 1));
+}
+
+void WriterRibbon::changeListLevel(int delta) { ListOps::changeLevel(m_editor, delta); }
+void WriterRibbon::restartNumbering()         { ListOps::restartNumbering(m_editor); }
+void WriterRibbon::continueNumbering()        { ListOps::continueNumbering(m_editor); }
+
+void WriterRibbon::customizeList() {
+    if (!m_editor) return;
+    QDialog dlg(this);
+    dlg.setWindowTitle("Define List Format");
+    auto* form = new QFormLayout(&dlg);
+
+    auto* typeCombo = new QComboBox(&dlg);
+    typeCombo->addItems({ "Bullet", "Numbered" });
+    auto* styleCombo = new QComboBox(&dlg);
+    form->addRow("Type:", typeCombo);
+    form->addRow("Format:", styleCombo);
+
+    // Each entry carries {style, prefix, suffix} encoded in user data.
+    auto fillStyles = [&](int type) {
+        styleCombo->clear();
+        if (type == 0) {
+            styleCombo->addItem("•  Disc",   QVariantList{ int(QTextListFormat::ListDisc), "", "" });
+            styleCombo->addItem("◦  Circle", QVariantList{ int(QTextListFormat::ListCircle), "", "" });
+            styleCombo->addItem("▪  Square", QVariantList{ int(QTextListFormat::ListSquare), "", "" });
+        } else {
+            styleCombo->addItem("1.  2.  3.",  QVariantList{ int(QTextListFormat::ListDecimal),    "", "." });
+            styleCombo->addItem("1)  2)  3)",  QVariantList{ int(QTextListFormat::ListDecimal),    "", ")" });
+            styleCombo->addItem("(1) (2) (3)", QVariantList{ int(QTextListFormat::ListDecimal),    "(", ")" });
+            styleCombo->addItem("a.  b.  c.",  QVariantList{ int(QTextListFormat::ListLowerAlpha), "", "." });
+            styleCombo->addItem("A.  B.  C.",  QVariantList{ int(QTextListFormat::ListUpperAlpha), "", "." });
+            styleCombo->addItem("i.  ii. iii.",QVariantList{ int(QTextListFormat::ListLowerRoman), "", "." });
+            styleCombo->addItem("I.  II. III.",QVariantList{ int(QTextListFormat::ListUpperRoman), "", "." });
+        }
+    };
+    fillStyles(0);
+    connect(typeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dlg, fillStyles);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QVariantList v = styleCombo->currentData().toList();
+    if (v.size() < 3) return;
+    const auto style = static_cast<QTextListFormat::Style>(v[0].toInt());
+    const QString prefix = v[1].toString(), suffix = v[2].toString();
+
+    // Re-style the existing list if the cursor is in one; otherwise create it.
+    QTextCursor cur = m_editor->textCursor();
+    if (QTextList* list = cur.currentList()) {
+        QTextListFormat lf = list->format();
+        lf.setStyle(style);
+        lf.setNumberPrefix(prefix);
+        lf.setNumberSuffix(suffix);
+        list->setFormat(lf);
+    } else {
+        ListOps::applyList(m_editor, style, prefix, suffix);
+    }
     m_editor->setFocus();
 }
 
@@ -3224,27 +3791,407 @@ void WriterRibbon::applyBorder(int kind) {
 }
 
 void WriterRibbon::applyParagraphStyle(WriterStyle s) {
-    if (!m_editor) return;
-    QTextCharFormat cf;
-    QTextBlockFormat bf;
-    styleFormats(s, cf, bf);
-    bf.setProperty(kStyleProp, static_cast<int>(s));
+    // Built-in enum → manager name, so the legacy enum entry points still work.
+    static const char* names[] = {
+        "Normal", "No Spacing", "Heading 1", "Heading 2", "Heading 3",
+        "Title", "Subtitle", "Quote" };
+    applyStyleByName(QString::fromLatin1(names[static_cast<int>(s)]));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Named styles (Tier 2 #8)
+// ─────────────────────────────────────────────────────────────────────────────
+void WriterRibbon::applyStyleByName(const QString& name) {
+    if (!m_editor || !m_styles) return;
+    const WriterStyleDef* d = m_styles->find(name);
+    if (!d) return;
 
     QTextCursor cur = m_editor->textCursor();
     cur.beginEditBlock();
-    QTextCursor range = cur;
-    if (!range.hasSelection()) {
-        range.movePosition(QTextCursor::StartOfBlock);
-        range.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
-    }
-    // Clear any quote/shading background unless this style sets one.
-    if (s != WriterStyle::Quote) bf.clearBackground();
-    range.mergeBlockFormat(bf);
-    range.mergeCharFormat(cf);
-    cur.endEditBlock();
 
-    m_editor->setCurrentCharFormat(cf);
+    if (d->isCharacter) {
+        // Character style: format the selection (or the word under the cursor).
+        QTextCursor range = cur;
+        if (!range.hasSelection()) range.select(QTextCursor::WordUnderCursor);
+        range.mergeCharFormat(d->charFormat());
+        m_editor->mergeCurrentCharFormat(d->charFormat());
+    } else {
+        QTextCharFormat  cf = d->charFormat();
+        QTextBlockFormat bf = d->blockFormat();
+        bf.setProperty(kStyleNameProp, name);
+        // Explicit background so switching off a shaded style (e.g. Quote) clears it.
+        if (!d->hasBackground) bf.setBackground(QBrush(Qt::transparent));
+
+        QTextCursor range = cur;
+        if (!range.hasSelection()) {
+            range.movePosition(QTextCursor::StartOfBlock);
+            range.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+        }
+        range.mergeBlockFormat(bf);
+        range.mergeCharFormat(cf);
+        m_editor->setCurrentCharFormat(cf);
+    }
+
+    cur.endEditBlock();
     m_editor->setFocus();
+    syncToCurrentFormat();
+}
+
+void WriterRibbon::rebuildStyleGallery() {
+    if (!m_styleGrid || !m_styles) return;
+    auto* sgl = qobject_cast<QGridLayout*>(m_styleGrid->layout());
+    if (!sgl) return;
+
+    // Clear existing chips.
+    for (QToolButton* b : m_styleButtons) { if (b) { m_styleGroup->removeButton(b); b->deleteLater(); } }
+    m_styleButtons.clear();
+
+    int si = 0;
+    for (const WriterStyleDef& sd : m_styles->styles()) {
+        auto* b = new QToolButton(m_styleGrid);
+        b->setObjectName("ribbonStyleBtn");
+        b->setText(sd.name);
+        b->setCheckable(true);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setFixedSize(92, 28);
+        b->setContextMenuPolicy(Qt::CustomContextMenu);
+        b->setToolTip(QString("Apply '%1'  ·  right-click to edit").arg(sd.name));
+
+        QFont f("Segoe UI", 9);
+        if (sd.headingLevel == 1) { f.setPointSize(11); f.setBold(true); }
+        else if (sd.headingLevel == 2) { f.setPointSize(10); f.setBold(true); }
+        else if (sd.headingLevel == 3) f.setBold(true);
+        else { f.setBold(sd.bold); f.setItalic(sd.italic); }
+        b->setFont(f);
+
+        const QString nm = sd.name;
+        connect(b, &QToolButton::clicked, this, [this, nm] { applyStyleByName(nm); });
+        connect(b, &QToolButton::customContextMenuRequested, this,
+                [this, b, nm](const QPoint& p) { showStyleContextMenu(nm, b->mapToGlobal(p)); });
+
+        m_styleGroup->addButton(b);
+        sgl->addWidget(b, si / 4, si % 4);
+        m_styleButtons.insert(nm, b);
+        ++si;
+    }
+    if (auto* nb = m_styleButtons.value("Normal")) nb->setChecked(true);
+    rebuildMoreStylesMenu();
+}
+
+void WriterRibbon::rebuildMoreStylesMenu() {
+    if (!m_moreStylesBtn || !m_styles) return;
+    auto* m = new QMenu(m_moreStylesBtn);
+    for (const WriterStyleDef& sd : m_styles->styles()) {
+        const QString nm = sd.name;
+        const QString label = sd.isCharacter ? (nm + "  (character)") : nm;
+        m->addAction(label, this, [this, nm] { applyStyleByName(nm); });
+    }
+    m->addSeparator();
+    m->addAction("New Style…",     this, [this] { openStyleEditor(QString()); });
+    m->addAction("Manage Styles…", this, [this] { manageStyles(); });
+    if (QMenu* old = m_moreStylesBtn->menu()) old->deleteLater();
+    m_moreStylesBtn->setMenu(m);
+}
+
+void WriterRibbon::showStyleContextMenu(const QString& name, const QPoint& globalPos) {
+    if (!m_styles) return;
+    const WriterStyleDef* d = m_styles->find(name);
+    if (!d) return;
+    QMenu menu(this);
+    menu.addAction(QString("Apply '%1'").arg(name), this, [this, name] { applyStyleByName(name); });
+    menu.addSeparator();
+    menu.addAction("Modify…", this, [this, name] { openStyleEditor(name); });
+    menu.addAction("Update to Match Selection", this, [this, name] { updateStyleFromSelection(name); });
+    if (!d->builtin) {
+        menu.addAction("Rename…", this, [this, name] { renameStyleInteractive(name); });
+        menu.addAction("Delete",  this, [this, name] { deleteStyleInteractive(name); });
+    }
+    menu.exec(globalPos);
+}
+
+void WriterRibbon::openStyleEditor(const QString& editName) {
+    if (!m_styles) return;
+    const bool isNew = editName.isEmpty();
+    WriterStyleDef def;
+    if (!isNew) {
+        if (const WriterStyleDef* d = m_styles->find(editName)) def = *d;
+        else return;
+    } else {
+        def.fontSize = 12;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(isNew ? "New Style" : QString("Modify Style — %1").arg(editName));
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* form = new QFormLayout(&dlg);
+
+    auto* nameEdit = new QLineEdit(def.name, &dlg);
+    nameEdit->setEnabled(isNew || !def.builtin);     // built-in names are fixed
+    form->addRow("Name:", nameEdit);
+
+    auto* typeCombo = new QComboBox(&dlg);
+    typeCombo->addItems({ "Paragraph", "Character" });
+    typeCombo->setCurrentIndex(def.isCharacter ? 1 : 0);
+    typeCombo->setEnabled(isNew);
+    form->addRow("Type:", typeCombo);
+
+    // Font family — lazy delegate so we don't measure every installed font.
+    auto* familyCombo = new QComboBox(&dlg);
+    familyCombo->addItem("(default)");
+    familyCombo->addItems(QFontDatabase::families());
+    familyCombo->setItemDelegate(new FontPreviewDelegate(familyCombo));
+    if (auto* lv = qobject_cast<QListView*>(familyCombo->view())) lv->setUniformItemSizes(true);
+    familyCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    if (!def.fontFamily.isEmpty()) familyCombo->setCurrentText(def.fontFamily);
+    form->addRow("Font:", familyCombo);
+
+    auto* sizeSpin = new QSpinBox(&dlg);
+    sizeSpin->setRange(6, 96);
+    sizeSpin->setValue(def.fontSize > 0 ? int(def.fontSize) : 12);
+    form->addRow("Size:", sizeSpin);
+
+    auto* boldChk = new QCheckBox("Bold", &dlg);      boldChk->setChecked(def.bold);
+    auto* italChk = new QCheckBox("Italic", &dlg);    italChk->setChecked(def.italic);
+    auto* undChk  = new QCheckBox("Underline", &dlg); undChk->setChecked(def.underline);
+    auto* fxRow = new QWidget(&dlg);
+    auto* fxl = new QHBoxLayout(fxRow); fxl->setContentsMargins(0,0,0,0);
+    fxl->addWidget(boldChk); fxl->addWidget(italChk); fxl->addWidget(undChk); fxl->addStretch();
+    form->addRow("Style:", fxRow);
+
+    QColor chosen = def.hasColor ? def.color : QColor("#1C1E26");
+    auto* colorBtn = new QPushButton("Text Colour…", &dlg);
+    auto paintColorBtn = [colorBtn](const QColor& c) {
+        colorBtn->setStyleSheet(QString("text-align:left;padding:4px 8px;"
+            "border:1px solid #C6CAD3;border-radius:4px;background:%1;color:%2;")
+            .arg(c.name(), c.lightness() < 128 ? "#FFFFFF" : "#1C1E26"));
+    };
+    paintColorBtn(chosen);
+    bool hasColor = def.hasColor;
+    connect(colorBtn, &QPushButton::clicked, &dlg, [&]{
+        const QColor c = QColorDialog::getColor(chosen, &dlg, "Text Colour");
+        if (c.isValid()) { chosen = c; hasColor = true; paintColorBtn(c); }
+    });
+    form->addRow("Colour:", colorBtn);
+
+    auto* alignCombo = new QComboBox(&dlg);
+    alignCombo->addItems({ "Left", "Center", "Right", "Justify" });
+    const Qt::Alignment al = static_cast<Qt::Alignment>(def.alignment);
+    alignCombo->setCurrentIndex(al.testFlag(Qt::AlignHCenter) ? 1 :
+                                al.testFlag(Qt::AlignRight)   ? 2 :
+                                al.testFlag(Qt::AlignJustify) ? 3 : 0);
+    form->addRow("Alignment:", alignCombo);
+
+    auto* spaceBefore = new QSpinBox(&dlg); spaceBefore->setRange(0, 200); spaceBefore->setValue(int(def.spaceBefore));
+    auto* spaceAfter  = new QSpinBox(&dlg); spaceAfter->setRange(0, 200);  spaceAfter->setValue(int(def.spaceAfter));
+    auto* spRow = new QWidget(&dlg); auto* spl = new QHBoxLayout(spRow); spl->setContentsMargins(0,0,0,0);
+    spl->addWidget(new QLabel("Before", spRow)); spl->addWidget(spaceBefore);
+    spl->addWidget(new QLabel("After", spRow));  spl->addWidget(spaceAfter); spl->addStretch();
+    form->addRow("Spacing:", spRow);
+
+    auto* lineCombo = new QComboBox(&dlg);
+    lineCombo->addItems({ "Single", "1.15", "1.5", "Double" });
+    lineCombo->setCurrentIndex(def.lineHeight >= 200 ? 3 : def.lineHeight >= 150 ? 2 :
+                               def.lineHeight >= 115 ? 1 : 0);
+    form->addRow("Line spacing:", lineCombo);
+
+    // Paragraph-only rows hide for character styles.
+    auto refreshType = [&](int idx) {
+        const bool para = (idx == 0);
+        alignCombo->setEnabled(para); spaceBefore->setEnabled(para);
+        spaceAfter->setEnabled(para); lineCombo->setEnabled(para);
+    };
+    refreshType(typeCombo->currentIndex());
+    connect(typeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), &dlg, refreshType);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QString newName = nameEdit->text().trimmed();
+    if (newName.isEmpty()) { QMessageBox::warning(this, "Style", "A style needs a name."); return; }
+    if (isNew && m_styles->contains(newName)) {
+        QMessageBox::warning(this, "Style", "A style with that name already exists.");
+        return;
+    }
+
+    def.name        = newName;
+    def.isCharacter = (typeCombo->currentIndex() == 1);
+    def.fontFamily  = (familyCombo->currentIndex() == 0) ? QString() : familyCombo->currentText();
+    def.fontSize    = sizeSpin->value();
+    def.bold        = boldChk->isChecked();
+    def.italic      = italChk->isChecked();
+    def.underline   = undChk->isChecked();
+    def.hasColor    = hasColor;
+    def.color       = chosen;
+    if (!def.isCharacter) {
+        static const Qt::Alignment al4[] = { Qt::AlignLeft, Qt::AlignHCenter, Qt::AlignRight, Qt::AlignJustify };
+        def.alignment   = static_cast<int>(al4[alignCombo->currentIndex()]);
+        def.spaceBefore = spaceBefore->value();
+        def.spaceAfter  = spaceAfter->value();
+        static const double lh[] = { 0, 115, 150, 200 };
+        def.lineHeight  = lh[lineCombo->currentIndex()];
+    }
+
+    m_styles->upsert(def);
+    rebuildStyleGallery();
+    applyStyleByName(def.name);     // apply the freshly created/edited style
+}
+
+void WriterRibbon::updateStyleFromSelection(const QString& name) {
+    if (!m_editor || !m_styles) return;
+    const WriterStyleDef* existing = m_styles->find(name);
+    if (!existing) return;
+    WriterStyleDef def = *existing;
+    const QTextCursor cur = m_editor->textCursor();
+    def.captureFrom(cur.charFormat(), cur.blockFormat());
+    m_styles->upsert(def);
+    rebuildStyleGallery();
+    // Re-apply so the active paragraph reflects the captured look immediately.
+    applyStyleByName(name);
+}
+
+void WriterRibbon::renameStyleInteractive(const QString& name) {
+    if (!m_styles) return;
+    bool ok = false;
+    const QString nn = QInputDialog::getText(this, "Rename Style", "New name:",
+                                             QLineEdit::Normal, name, &ok).trimmed();
+    if (!ok || nn.isEmpty() || nn == name) return;
+    if (m_styles->contains(nn)) { QMessageBox::warning(this, "Rename", "That name is taken."); return; }
+    if (!m_styles->rename(name, nn)) return;
+
+    // Re-tag any paragraphs that used the old name.
+    if (m_editor) {
+        QTextDocument* doc = m_editor->document();
+        for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+            if (b.blockFormat().stringProperty(kStyleNameProp) == name) {
+                QTextCursor c(b);
+                QTextBlockFormat bf; bf.setProperty(kStyleNameProp, nn);
+                c.mergeBlockFormat(bf);
+            }
+        }
+    }
+    rebuildStyleGallery();
+}
+
+void WriterRibbon::deleteStyleInteractive(const QString& name) {
+    if (!m_styles) return;
+    if (QMessageBox::question(this, "Delete Style",
+            QString("Delete the style '%1'? Paragraphs keep their look but revert to Normal.").arg(name))
+        != QMessageBox::Yes) return;
+
+    if (m_editor) {
+        QTextDocument* doc = m_editor->document();
+        for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+            if (b.blockFormat().stringProperty(kStyleNameProp) == name) {
+                QTextCursor c(b);
+                QTextBlockFormat bf; bf.setProperty(kStyleNameProp, QString("Normal"));
+                c.mergeBlockFormat(bf);
+            }
+        }
+    }
+    m_styles->remove(name);
+    rebuildStyleGallery();
+}
+
+void WriterRibbon::manageStyles() {
+    if (!m_styles) return;
+    QDialog dlg(this);
+    dlg.setWindowTitle("Manage Styles");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    dlg.resize(360, 420);
+    auto* root = new QVBoxLayout(&dlg);
+
+    auto* listw = new QListWidget(&dlg);
+    auto fill = [&]{
+        listw->clear();
+        for (const WriterStyleDef& sd : m_styles->styles())
+            listw->addItem(sd.isCharacter ? (sd.name + "  (character)") : sd.name);
+    };
+    fill();
+    root->addWidget(listw, 1);
+
+    auto selectedName = [&]() -> QString {
+        if (!listw->currentItem()) return QString();
+        QString t = listw->currentItem()->text();
+        const int sep = t.indexOf("  (character)");
+        return sep >= 0 ? t.left(sep) : t;
+    };
+
+    auto* row = new QHBoxLayout();
+    auto* btnNew    = new QPushButton("New…", &dlg);
+    auto* btnMod    = new QPushButton("Modify…", &dlg);
+    auto* btnUpd    = new QPushButton("Update", &dlg);
+    auto* btnRen    = new QPushButton("Rename…", &dlg);
+    auto* btnDel    = new QPushButton("Delete", &dlg);
+    for (auto* b : { btnNew, btnMod, btnUpd, btnRen, btnDel }) row->addWidget(b);
+    root->addLayout(row);
+
+    connect(btnNew, &QPushButton::clicked, &dlg, [&]{ openStyleEditor(QString()); fill(); });
+    connect(btnMod, &QPushButton::clicked, &dlg, [&]{ if (!selectedName().isEmpty()) { openStyleEditor(selectedName()); fill(); } });
+    connect(btnUpd, &QPushButton::clicked, &dlg, [&]{ if (!selectedName().isEmpty()) { updateStyleFromSelection(selectedName()); } });
+    connect(btnRen, &QPushButton::clicked, &dlg, [&]{ if (!selectedName().isEmpty()) { renameStyleInteractive(selectedName()); fill(); } });
+    connect(btnDel, &QPushButton::clicked, &dlg, [&]{ if (!selectedName().isEmpty()) { deleteStyleInteractive(selectedName()); fill(); } });
+    connect(listw, &QListWidget::itemDoubleClicked, &dlg, [&]{ if (!selectedName().isEmpty()) applyStyleByName(selectedName()); });
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    root->addWidget(bb);
+    dlg.exec();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Style persistence (called by WriterModule on save / load)
+// ─────────────────────────────────────────────────────────────────────────────
+QString WriterRibbon::styleDefsJson() const {
+    return m_styles ? m_styles->serializeCustom() : QString();
+}
+
+QString WriterRibbon::blockAssignmentsJson() const {
+    if (!m_editor) return QString();
+    QJsonArray arr;
+    int i = 0;
+    for (QTextBlock b = m_editor->document()->begin();
+         b != m_editor->document()->end(); b = b.next(), ++i) {
+        const QString nm = b.blockFormat().stringProperty(kStyleNameProp);
+        if (!nm.isEmpty() && nm != "Normal") {
+            QJsonObject o; o["i"] = i; o["s"] = nm;
+            arr.append(o);
+        }
+    }
+    if (arr.isEmpty()) return QString();
+    return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
+
+void WriterRibbon::applyPersistedStyles(const QString& defsJson, const QString& blocksJson) {
+    if (!m_styles) return;
+    if (!defsJson.isEmpty()) m_styles->loadCustom(defsJson);
+    rebuildStyleGallery();
+
+    if (m_editor && !blocksJson.isEmpty()) {
+        const QJsonDocument doc = QJsonDocument::fromJson(blocksJson.toUtf8());
+        if (doc.isArray()) {
+            QHash<int, QString> map;
+            for (const QJsonValue& v : doc.array()) {
+                const QJsonObject o = v.toObject();
+                map.insert(o.value("i").toInt(), o.value("s").toString());
+            }
+            int i = 0;
+            for (QTextBlock b = m_editor->document()->begin();
+                 b != m_editor->document()->end(); b = b.next(), ++i) {
+                auto it = map.constFind(i);
+                if (it == map.constEnd()) continue;
+                // Re-tag (visuals already round-tripped via HTML; heading levels too).
+                QTextCursor c(b);
+                QTextBlockFormat bf;
+                bf.setProperty(kStyleNameProp, it.value());
+                c.mergeBlockFormat(bf);
+            }
+        }
+    }
     syncToCurrentFormat();
 }
 
@@ -3285,64 +4232,141 @@ void WriterRibbon::openFindReplace() {
     m_findEdit    = new QLineEdit(dlg);
     m_replaceEdit = new QLineEdit(dlg);
     m_matchCase   = new QCheckBox("Match case", dlg);
+    m_wholeWord   = new QCheckBox("Whole word", dlg);
+    m_useRegex    = new QCheckBox("Regular expression", dlg);
+    m_findCount   = new QLabel(QString(), dlg);
+    m_findCount->setObjectName("findCountLabel");
     form->addRow("Find:", m_findEdit);
     form->addRow("Replace with:", m_replaceEdit);
-    form->addRow(m_matchCase);
+    auto* opts = new QHBoxLayout();
+    opts->addWidget(m_matchCase); opts->addWidget(m_wholeWord); opts->addWidget(m_useRegex);
+    opts->addStretch();
+    form->addRow(opts);
+    form->addRow(m_findCount);
 
-    auto* row = new QHBoxLayout();
-    auto* btnFind    = new QPushButton("Find Next", dlg);
+    auto* row1 = new QHBoxLayout();
+    auto* btnPrev    = new QPushButton("Find Previous", dlg);
+    auto* btnNext    = new QPushButton("Find Next", dlg);
+    auto* btnHi      = new QPushButton("Highlight All", dlg);
+    row1->addWidget(btnPrev); row1->addWidget(btnNext); row1->addWidget(btnHi);
+    form->addRow(row1);
+
+    auto* row2 = new QHBoxLayout();
     auto* btnRep     = new QPushButton("Replace", dlg);
     auto* btnRepAll  = new QPushButton("Replace All", dlg);
     auto* btnClose   = new QPushButton("Close", dlg);
-    row->addWidget(btnFind); row->addWidget(btnRep);
-    row->addWidget(btnRepAll); row->addWidget(btnClose);
-    form->addRow(row);
+    row2->addWidget(btnRep); row2->addWidget(btnRepAll); row2->addWidget(btnClose);
+    form->addRow(row2);
 
-    auto findNext = [this]() -> bool {
+    auto flags = [this](bool backward) {
+        QTextDocument::FindFlags f;
+        if (m_matchCase->isChecked()) f |= QTextDocument::FindCaseSensitively;
+        if (m_wholeWord->isChecked()) f |= QTextDocument::FindWholeWords;
+        if (backward)                 f |= QTextDocument::FindBackward;
+        return f;
+    };
+    auto regex = [this]() {
+        return QRegularExpression(m_findEdit->text(),
+            m_matchCase->isChecked() ? QRegularExpression::NoPatternOption
+                                     : QRegularExpression::CaseInsensitiveOption);
+    };
+    auto findStep = [this, flags, regex](bool backward) -> bool {
         const QString needle = m_findEdit->text();
         if (needle.isEmpty()) return false;
-        QTextDocument::FindFlags flags;
-        if (m_matchCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
-        if (!m_editor->find(needle, flags)) {
-            QTextCursor c = m_editor->textCursor();
-            c.movePosition(QTextCursor::Start);
-            m_editor->setTextCursor(c);
-            return m_editor->find(needle, flags);
+        bool ok;
+        if (m_useRegex->isChecked()) {
+            const QRegularExpression re = regex();
+            if (!re.isValid()) { m_findCount->setText("Invalid regular expression"); return false; }
+            ok = m_editor->find(re, flags(backward));
+            if (!ok) { QTextCursor c = m_editor->textCursor();
+                       c.movePosition(backward ? QTextCursor::End : QTextCursor::Start);
+                       m_editor->setTextCursor(c); ok = m_editor->find(re, flags(backward)); }
+        } else {
+            ok = m_editor->find(needle, flags(backward));
+            if (!ok) { QTextCursor c = m_editor->textCursor();
+                       c.movePosition(backward ? QTextCursor::End : QTextCursor::Start);
+                       m_editor->setTextCursor(c); ok = m_editor->find(needle, flags(backward)); }
         }
-        return true;
+        if (!ok) m_findCount->setText("No matches");
+        return ok;
     };
 
-    connect(btnFind, &QPushButton::clicked, dlg, [findNext] { findNext(); });
-    connect(btnRep, &QPushButton::clicked, dlg, [this, findNext] {
+    connect(btnNext, &QPushButton::clicked, dlg, [findStep]{ findStep(false); });
+    connect(btnPrev, &QPushButton::clicked, dlg, [findStep]{ findStep(true); });
+    connect(btnHi,   &QPushButton::clicked, this, &WriterRibbon::highlightAllMatches);
+    connect(m_findEdit, &QLineEdit::textChanged, this, &WriterRibbon::highlightAllMatches);
+    connect(m_matchCase, &QCheckBox::toggled, this, &WriterRibbon::highlightAllMatches);
+    connect(m_wholeWord, &QCheckBox::toggled, this, &WriterRibbon::highlightAllMatches);
+    connect(m_useRegex,  &QCheckBox::toggled, this, &WriterRibbon::highlightAllMatches);
+
+    connect(btnRep, &QPushButton::clicked, dlg, [this, findStep]{
         QTextCursor c = m_editor->textCursor();
-        const bool cs = m_matchCase->isChecked();
-        if (c.hasSelection() &&
-            QString::compare(c.selectedText(), m_findEdit->text(),
-                             cs ? Qt::CaseSensitive : Qt::CaseInsensitive) == 0) {
-            c.insertText(m_replaceEdit->text());
-        }
-        findNext();
+        if (c.hasSelection()) { c.insertText(m_replaceEdit->text()); }
+        findStep(false);
+        highlightAllMatches();
     });
-    connect(btnRepAll, &QPushButton::clicked, dlg, [this] {
+    connect(btnRepAll, &QPushButton::clicked, dlg, [this, flags, regex]{
         const QString needle = m_findEdit->text();
         if (needle.isEmpty()) return;
-        QTextDocument::FindFlags flags;
-        if (m_matchCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
         QTextCursor c = m_editor->textCursor();
+        c.beginEditBlock();
         c.movePosition(QTextCursor::Start);
         m_editor->setTextCursor(c);
         int n = 0;
-        while (m_editor->find(needle, flags)) {
+        const bool rx = m_useRegex->isChecked();
+        const QRegularExpression re = regex();
+        if (rx && !re.isValid()) { c.endEditBlock(); m_findCount->setText("Invalid regular expression"); return; }
+        while (rx ? m_editor->find(re, flags(false)) : m_editor->find(needle, flags(false))) {
             m_editor->textCursor().insertText(m_replaceEdit->text());
             ++n;
         }
-        m_editor->setWindowTitle(m_editor->windowTitle());  // no-op; keep focus path
+        c.endEditBlock();
+        m_findCount->setText(QString("Replaced %1").arg(n));
+        highlightAllMatches();
     });
-    connect(btnClose, &QPushButton::clicked, dlg, &QDialog::close);
+    connect(btnClose, &QPushButton::clicked, dlg, [this]{
+        m_editor->setExtraSelections({});   // clear highlights
+        if (m_findDlg) m_findDlg->close();
+    });
+    connect(dlg, &QDialog::finished, this, [this]{ m_editor->setExtraSelections({}); });
 
     m_findDlg = dlg;
     dlg->show();
     m_findEdit->setFocus();
+}
+
+void WriterRibbon::highlightAllMatches() {
+    if (!m_editor || !m_findEdit) return;
+    QList<QTextEdit::ExtraSelection> sels;
+    const QString needle = m_findEdit->text();
+    if (!needle.isEmpty()) {
+        QTextDocument* doc = m_editor->document();
+        QTextDocument::FindFlags f;
+        if (m_matchCase->isChecked()) f |= QTextDocument::FindCaseSensitively;
+        if (m_wholeWord->isChecked()) f |= QTextDocument::FindWholeWords;
+        QTextCharFormat hf; hf.setBackground(QColor("#FFE27A")); hf.setForeground(QColor("#1C1E26"));
+        const bool rx = m_useRegex->isChecked();
+        QRegularExpression re(needle, m_matchCase->isChecked()
+            ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption);
+        if (rx && !re.isValid()) { if (m_findCount) m_findCount->setText("Invalid regular expression"); return; }
+        QTextCursor c(doc);
+        for (;;) {
+            QTextCursor found = rx ? doc->find(re, c, f) : doc->find(needle, c, f);
+            if (found.isNull()) break;
+            QTextEdit::ExtraSelection es; es.cursor = found; es.format = hf;
+            sels.append(es);
+            c = found;
+            c.setPosition(found.selectionEnd());
+            if (found.selectionStart() == found.selectionEnd()) {   // zero-width match guard
+                if (c.atEnd()) break;
+                c.movePosition(QTextCursor::NextCharacter);
+            }
+        }
+    }
+    m_editor->setExtraSelections(sels);
+    if (m_findCount)
+        m_findCount->setText(sels.isEmpty() ? (needle.isEmpty() ? QString() : "No matches")
+                                            : QString("%1 match%2").arg(sels.size()).arg(sels.size() == 1 ? "" : "es"));
 }
 
 void WriterRibbon::selectSimilarFormatting() {
@@ -3407,14 +4431,17 @@ void WriterRibbon::syncToCurrentFormat() {
     m_btnAlignRight->setChecked(a.testFlag(Qt::AlignRight));
     m_btnAlignJustify->setChecked(a.testFlag(Qt::AlignJustify));
 
-    // Active paragraph style
-    if (m_styleGroup) {
+    // Active paragraph style — highlight the matching gallery chip.
+    {
         const QTextBlockFormat bf = m_editor->textCursor().blockFormat();
-        const int sid = bf.hasProperty(kStyleProp)
-                            ? bf.intProperty(kStyleProp)
-                            : static_cast<int>(WriterStyle::Normal);
-        if (auto* b = m_styleGroup->button(sid)) b->setChecked(true);
+        QString nm = bf.stringProperty(kStyleNameProp);
+        if (nm.isEmpty()) nm = "Normal";
+        if (auto* b = m_styleButtons.value(nm)) b->setChecked(true);
+        else if (auto* nb = m_styleButtons.value("Normal")) nb->setChecked(true);
     }
+
+    // Contextual Table tab follows the cursor in/out of tables.
+    refreshTableTab();
 
     m_syncing = false;
 }
@@ -3579,6 +4606,25 @@ QToolButton#ribbonTabBtn:hover {
 QToolButton#ribbonTabBtn:checked {
     color: #1C1E26;
     background-color: #FFFFFF;
+    border-bottom: 2px solid #E8372A;
+    font-weight: 700;
+}
+QToolButton#ribbonTableTabBtn {
+    color: #C0271C;
+    background: #FCE4E2;
+    border: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    padding: 5px 16px;
+    margin: 0 1px;
+    font-size: 12px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-weight: 600;
+}
+QToolButton#ribbonTableTabBtn:hover { background: #F8D2CE; color: #A21D14; }
+QToolButton#ribbonTableTabBtn:checked {
+    color: #FFFFFF;
+    background-color: #E8372A;
     border-bottom: 2px solid #E8372A;
     font-weight: 700;
 }

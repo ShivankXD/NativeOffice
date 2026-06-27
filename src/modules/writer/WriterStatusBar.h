@@ -27,9 +27,12 @@ public:
     void setWordCount(int words);
     void setZoomPercent(int percent);   // updates slider/label without re-emitting
     void setWebLayoutActive(bool web);  // sync print/web toggle without re-emitting
+    void setSpellCheckActive(bool on);  // sync spell pill without re-emitting
 
 signals:
     void zoomChanged(int percent);
+    // Spell-check pill toggled (true → on).
+    void spellCheckToggled(bool on);
     // true  → web layout (full-width, no page),
     // false → print layout (paged A4 view).
     void webLayoutToggled(bool web);
