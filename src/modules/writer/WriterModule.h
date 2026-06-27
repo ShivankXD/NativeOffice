@@ -24,6 +24,7 @@
 class QTimer;
 
 class QScrollArea;
+class QListWidget;
 
 namespace NativeOffice {
 
@@ -69,6 +70,11 @@ signals:
 public slots:
     // Sprint 23: rulers
     void setRulersVisible(bool on);
+    // Sprint 25: navigation pane (document outline)
+    void setNavPaneVisible(bool on);
+    // Sprint 26: comments pane
+    void setCommentsPaneVisible(bool on);
+    void refreshCommentsPane();
 
 protected:
     // Ctrl+scroll over the canvas zooms the page (Sprint 14).
@@ -107,10 +113,18 @@ private:
     void    writeRecovery();          // timed snapshot of unsaved changes
     void    checkCrashRecovery();     // offer to restore a leftover recovery file
 
+    void refreshNavPane();            // rebuild the heading outline list
+
     WriterRibbon*    m_ribbon    { nullptr };
     WriterRuler*     m_hRuler    { nullptr };
     WriterRuler*     m_vRuler    { nullptr };
     bool             m_rulersVisible { true };
+    QWidget*         m_navPane   { nullptr };
+    QListWidget*     m_navList   { nullptr };
+    bool             m_navVisible { false };
+    QWidget*         m_commentsPane { nullptr };
+    QListWidget*     m_commentsList { nullptr };
+    bool             m_commentsVisible { false };
     WriterStatusBar* m_statusBar { nullptr };
     QWidget*         m_canvas    { nullptr };
     QScrollArea*     m_scroll    { nullptr };

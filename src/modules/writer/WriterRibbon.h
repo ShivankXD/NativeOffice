@@ -84,6 +84,9 @@ signals:
     void pageColorRequested(const QColor& color);
     void webLayoutRequested(bool web);
     void rulerToggled(bool show);
+    void navPaneToggled(bool show);
+    void commentsPaneToggled(bool show);
+    void commentsChanged();            // a comment was added/removed → refresh pane
 
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;
@@ -186,10 +189,12 @@ private:
 
     // Sprint 16 — denser tab feature set
     void setTextDirection(bool rtl);
+    void applyColumns(int n);                 // multi-column layout (Tier 3 #11)
     void applyPageBorders(int kind);          // 0 none, 1 box, 2 shadow
     void insertEndnote();
     void insertTableOfFigures();
     void insertCrossReference();
+    void updateFields();             // renumber captions / refresh fields
     void markIndexEntry();
     void insertIndex();
     void deleteComments(bool all);
@@ -209,6 +214,17 @@ private:
     void renderToPrinter(QPrinter* printer);
     void showTemplateGallery();
     void applyTemplate(int id);
+
+    // Tier 5 — AI assistant
+    void aiRewrite();
+    void aiSummarize();
+    void aiGenerate();
+    void aiSettings();
+
+    // Tier 5 — real-time collaboration (LAN)
+    void collabHost();
+    void collabJoin();
+    void collabStop();
 
     // Tier 4 — equation editor, mail merge, document compare
     void showEquationEditor();
@@ -288,6 +304,14 @@ private:
     // Mail-merge data source (headers + records).
     QStringList         m_mergeHeaders;
     QList<QStringList>  m_mergeRows;
+
+    // Tier 5 — AI assistant
+    class WriterAi* m_ai { nullptr };
+    void runAi(const QString& system, const QString& user, bool replaceSelection);
+
+    // Tier 5 — collaboration
+    class WriterCollab* m_collab { nullptr };
+    QLabel*             m_collabStatus { nullptr };
 };
 
 } // namespace NativeOffice

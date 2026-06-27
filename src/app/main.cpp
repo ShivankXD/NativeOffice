@@ -46,6 +46,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 static const QString NOFF_FILTER =
     "NativeOffice Document (*.noff);;HTML Document (*.html);;All Files (*)";
+// Writer open: accept Word, NativeOffice and HTML documents.
+static const QString WRITER_OPEN_FILTER =
+    "Documents (*.docx *.noff *.html);;Word Document (*.docx);;"
+    "NativeOffice Document (*.noff);;HTML Document (*.html);;All Files (*)";
+// Writer Save As: Word (.docx) is offered first so it is the default format.
+static const QString WRITER_SAVE_FILTER =
+    "Word Document (*.docx);;NativeOffice Document (*.noff);;HTML Document (*.html)";
 // Open: accept Excel, NativeOffice and CSV spreadsheets.
 static const QString CALC_FILTER =
     "Spreadsheets (*.xlsx *.noff *.csv);;Excel Workbook (*.xlsx);;"
@@ -101,14 +108,21 @@ public:
     // ── Save logic ────────────────────────────────────────────────────────
     // Returns false if the user cancelled.
     bool saveAs() {
-        const QString path = QFileDialog::getSaveFileName(
+        QString selectedFilter;
+        QString path = QFileDialog::getSaveFileName(
             this, "Save As…",
             m_writer->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/Untitled.noff"
+                ? QDir::homePath() + "/Untitled.docx"
                 : m_writer->currentFilePath(),
-            NOFF_FILTER);
+            WRITER_SAVE_FILTER, &selectedFilter);
 
         if (path.isEmpty()) return false;
+        // Append an extension matching the chosen filter if the user omitted one.
+        if (QFileInfo(path).suffix().isEmpty()) {
+            if      (selectedFilter.contains("noff")) path += ".noff";
+            else if (selectedFilter.contains("html")) path += ".html";
+            else                                      path += ".docx";
+        }
         return performSave(path);
     }
 
@@ -414,6 +428,21 @@ static WriterWindow* createWriterWindow(const QString& filePath) {
 
     // ── Menu bar ──────────────────────────────────────────────────────────
     auto* mb = win->menuBar();
+    // Light, clean menu bar (no black hero strip) to sit above the banner,
+    // matching Calc and Impress.
+    mb->setStyleSheet(R"(
+QMenuBar {
+    background-color: #FFFFFF;
+    color: #2C3140;
+    border-bottom: 1px solid #E6E8ED;
+    padding: 2px 6px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+}
+QMenuBar::item { background: transparent; color: #2C3140; padding: 5px 12px; border-radius: 6px; }
+QMenuBar::item:selected { background-color: #EAF3EE; color: #107C41; }
+QMenuBar::item:pressed  { background-color: #E0EFE6; color: #0E6F3A; }
+)");
 
     // File
     auto* fileMenu  = mb->addMenu("&File");
@@ -459,7 +488,7 @@ static WriterWindow* createWriterWindow(const QString& filePath) {
         const QString path = QFileDialog::getOpenFileName(
             win, "Open Document",
             QDir::homePath(),
-            NOFF_FILTER);
+            WRITER_OPEN_FILTER);
         if (!path.isEmpty()) {
             auto* newWin = createWriterWindow(path);
             newWin->show();

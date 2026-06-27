@@ -161,6 +161,11 @@ bool DocxIo::exportDocx(QTextDocument* doc, const QString& path) {
         }
         if (!jc.isEmpty()) pPr += "<w:jc w:val=\"" + jc + "\"/>";
 
+        // Heading paragraphs carry a Word style so headings/TOC/outline survive.
+        const int hl = bf.headingLevel();
+        if (hl >= 1 && hl <= 6)
+            pPr.prepend("<w:pStyle w:val=\"Heading" + QString::number(hl) + "\"/>");
+
         QString runs;
         for (auto it = block.begin(); !it.atEnd(); ++it) {
             const QTextFragment f = it.fragment();
@@ -338,6 +343,7 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
         firstBlock = false;
 
         QTextBlockFormat bf;
+        bf.setHeadingLevel(0);   // explicit, so a new block never inherits a heading
         QTextCharFormat baseFmt;
         QString listFmt;
         int listLevel = 0;
@@ -349,7 +355,13 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
             if (tok != QXmlStreamReader::StartElement) continue;
             const QStringView n = xml.name();
 
-            if (n == QLatin1String("jc")) {
+            if (n == QLatin1String("pStyle")) {
+                const QString v = xml.attributes().value("w:val").toString();
+                if (v.startsWith("Heading")) {
+                    const int lvl = v.mid(7).trimmed().toInt();
+                    if (lvl >= 1 && lvl <= 6) bf.setHeadingLevel(lvl);
+                }
+            } else if (n == QLatin1String("jc")) {
                 const QString v = xml.attributes().value("w:val").toString();
                 if (v == "center") bf.setAlignment(Qt::AlignHCenter);
                 else if (v == "right") bf.setAlignment(Qt::AlignRight);

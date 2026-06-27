@@ -20,6 +20,10 @@ class QTextImageFormat;
 
 namespace NativeOffice {
 
+// Char-format property holding a comment's text on the commented range (shared by
+// the ribbon that creates comments and the module that lists them in the pane).
+inline constexpr int kCommentProp = QTextFormat::UserProperty + 32;
+
 class SpellHighlighter;
 
 class PagedTextEdit : public QTextEdit {
@@ -58,6 +62,21 @@ public:
     [[nodiscard]] bool autoCorrectEnabled() const { return m_autoCorrectEnabled; }
     void setAutoCorrectSettings(const AutoCorrectSettings& s) { m_autoCorrect = s; }
     [[nodiscard]] AutoCorrectSettings autoCorrectSettings() const { return m_autoCorrect; }
+
+    // ── Track changes ─────────────────────────────────────────────────────────
+    void setTrackChanges(bool on) {
+        m_trackChanges = on;
+        if (!on) {   // stop tinting subsequently-typed text
+            QTextCharFormat f;
+            f.setForeground(QColor("#1C1E26"));
+            f.setFontUnderline(false);
+            f.setFontStrikeOut(false);
+            mergeCurrentCharFormat(f);
+        }
+    }
+    [[nodiscard]] bool trackChanges() const { return m_trackChanges; }
+    void acceptAllChanges();    // keep insertions, drop deletions
+    void rejectAllChanges();    // drop insertions, restore deletions
 
 signals:
     void imageSelectionChanged(bool hasImage);
@@ -108,6 +127,10 @@ private:
     bool               m_autoCorrectEnabled { true };
     AutoCorrectSettings m_autoCorrect;
     void applyAutoCorrectAtCursor();   // corrects the word just before the cursor
+
+    // ── Track changes ───────────────────────────────────────────────────────────
+    bool m_trackChanges { false };
+    bool handleTrackedKey(QKeyEvent* e);   // returns true if it consumed the key
 
     // ── Image selection / resize ────────────────────────────────────────────
     int    m_imagePos    { -1 };     // position of the selected image char, or -1

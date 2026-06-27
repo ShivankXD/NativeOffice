@@ -7,6 +7,8 @@
 #include "WriterListOps.h"
 #include "WriterStyles.h"
 #include "WriterEquation.h"
+#include "WriterAi.h"
+#include "WriterCollab.h"
 #include "PagedTextEdit.h"
 #include "DocxIo.h"
 #include <QTextDocumentFragment>
@@ -50,6 +52,7 @@
 #include <QTextTable>
 #include <QTextFrame>
 #include <QTextBlock>
+#include <QTextFragment>
 #include <QTextOption>
 #include <QTextDocument>
 #include <QFileDialog>
@@ -94,6 +97,24 @@ namespace NativeOffice {
 namespace {
 
 const QColor kIconColor("#3A3F4B");
+
+// Block property tagging a caption paragraph with its kind ("Figure"/"Table"/…),
+// so "Update Fields" can renumber them in document order.
+constexpr int kCaptionKindProp = QTextFormat::UserProperty + 20;
+
+// Collect the bookmark (anchor) names present in a document.
+QStringList collectBookmarks(QTextDocument* doc) {
+    QStringList names;
+    for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+        for (auto it = b.begin(); it != b.end(); ++it) {
+            const QTextFragment frag = it.fragment();
+            if (!frag.isValid()) continue;
+            for (const QString& a : frag.charFormat().anchorNames())
+                if (!a.isEmpty() && !names.contains(a)) names << a;
+        }
+    }
+    return names;
+}
 
 // Renders each font-picker row in its own typeface, but lazily — the font is
 // only built when a row is actually painted/measured, so opening the editor
@@ -246,6 +267,21 @@ QIcon autoCorrectIcon() { return paintIcon([](QPainter& p) {
     p.drawLine(QPointF(24, 26), QPointF(29, 31)); p.drawLine(QPointF(29, 31), QPointF(36, 20));
 }); }
 
+QIcon aiIcon() { return paintIcon([](QPainter& p) {
+    // A small sparkle / star — the common "AI" glyph.
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    QPolygonF star;
+    const QPointF c(20, 20);
+    for (int i = 0; i < 8; ++i) {
+        const double ang = i * M_PI / 4.0;
+        const double r = (i % 2 == 0) ? 13.0 : 5.0;
+        star << QPointF(c.x() + r * std::cos(ang), c.y() + r * std::sin(ang));
+    }
+    p.drawPolygon(star);
+    p.setBrush(QColor("#FFFFFF"));
+    p.drawEllipse(c, 3.0, 3.0);
+}); }
+
 QIcon printIcon() { return paintIcon([](QPainter& p) {
     p.drawRect(QRectF(8, 16, 24, 12));               // printer body
     p.drawRect(QRectF(12, 7, 16, 9));                // paper in
@@ -265,6 +301,22 @@ QIcon mailMergeIcon() { return paintIcon([](QPainter& p) {
     p.drawRect(QRectF(7, 11, 26, 18));               // envelope
     p.drawLine(QPointF(7, 11), QPointF(20, 21));
     p.drawLine(QPointF(33, 11), QPointF(20, 21));
+}); }
+
+QIcon navPaneIcon() { return paintIcon([](QPainter& p) {
+    p.drawRect(QRectF(6, 7, 11, 26));                // side panel
+    p.drawLine(QPointF(20, 12), QPointF(34, 12));
+    p.drawLine(QPointF(20, 20), QPointF(34, 20));
+    p.drawLine(QPointF(20, 28), QPointF(30, 28));
+}); }
+
+QIcon collabIcon() { return paintIcon([](QPainter& p) {
+    // Two overlapping person glyphs.
+    p.setBrush(kIconColor); p.setPen(Qt::NoPen);
+    p.drawEllipse(QPointF(15, 14), 5, 5);
+    p.drawEllipse(QPointF(26, 16), 4, 4);
+    QPainterPath a; a.moveTo(6, 33); a.arcTo(6, 22, 18, 22, 0, 180); p.drawPath(a);
+    QPainterPath b; b.moveTo(20, 33); b.arcTo(20, 25, 15, 18, 0, 180); p.drawPath(b);
 }); }
 
 QIcon compareIcon() { return paintIcon([](QPainter& p) {
@@ -1062,6 +1114,7 @@ WriterRibbon::WriterRibbon(QWidget* parent)
     setObjectName("writerRibbon");
 
     m_styles = new WriterStyleManager();
+    m_ai     = new WriterAi(this);
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -1130,6 +1183,12 @@ WriterRibbon::WriterRibbon(QWidget* parent)
 void WriterRibbon::attachEditor(QTextEdit* editor) {
     if (m_editor == editor) return;
     m_editor = editor;
+
+    // Tier 5 — collaboration engine binds to the editor.
+    m_collab = new WriterCollab(m_editor, this);
+    connect(m_collab, &WriterCollab::statusChanged, this, [this](const QString& s){
+        if (m_collabStatus) m_collabStatus->setText(s);
+    });
 
     connect(m_editor, &QTextEdit::cursorPositionChanged,
             this, &WriterRibbon::syncToCurrentFormat);
@@ -2298,6 +2357,21 @@ QWidget* WriterRibbon::buildPageLayoutTab() {
     layout->addWidget(makeGroup("Page Setup", { btnMargins, btnOrient, btnSize, btnTextDir }));
     layout->addWidget(makeSeparator());
 
+    // ── Columns & Sections (Tier 3 #11) ──────────────────────────────────────
+    auto* btnColumns = makeBigBtn(columnsIcon(), "Columns", "Lay text out in columns");
+    btnColumns->setPopupMode(QToolButton::InstantPopup);
+    {
+        auto* m = new QMenu(btnColumns);
+        m->addAction(columnsIcon(), "One",   this, [this] { applyColumns(1); });
+        m->addAction(columnsIcon(), "Two",   this, [this] { applyColumns(2); });
+        m->addAction(columnsIcon(), "Three", this, [this] { applyColumns(3); });
+        btnColumns->setMenu(m);
+    }
+    auto* btnSection = makeBigBtn(insPageBreakIcon(), "Section\nBreak", "Start a new section on the next page");
+    connect(btnSection, &QToolButton::clicked, this, &WriterRibbon::insertPageBreak);
+    layout->addWidget(makeGroup("Columns", { btnColumns, btnSection }));
+    layout->addWidget(makeSeparator());
+
     // ── Page Background ─────────────────────────────────────────────────────
     auto* btnPageColor = makeBigBtn(pageColorIcon(), "Page\nColor", "Page background colour");
     btnPageColor->setPopupMode(QToolButton::InstantPopup);
@@ -2472,11 +2546,13 @@ QWidget* WriterRibbon::buildReferencesTab() {
     }
     auto* rTof   = makeRowBtn(tofIcon(),      "Table of Figures", "Insert a list of captions");
     auto* rXref  = makeRowBtn(crossRefIcon(), "Cross-reference",  "Insert a cross-reference");
+    auto* rUpd   = makeRowBtn(crossRefIcon(), "Update Fields",    "Renumber captions and refresh fields");
     connect(rTof,  &QToolButton::clicked, this, &WriterRibbon::insertTableOfFigures);
     connect(rXref, &QToolButton::clicked, this, &WriterRibbon::insertCrossReference);
+    connect(rUpd,  &QToolButton::clicked, this, &WriterRibbon::updateFields);
     auto* capCol = new QWidget(tab);
     auto* cpl = new QVBoxLayout(capCol); cpl->setContentsMargins(0,0,0,0); cpl->setSpacing(2);
-    cpl->addWidget(rTof); cpl->addWidget(rXref);
+    cpl->addWidget(rTof); cpl->addWidget(rXref); cpl->addWidget(rUpd);
     layout->addWidget(makeGroup("Captions", { btnCap, capCol }));
     layout->addWidget(makeSeparator());
 
@@ -2536,22 +2612,28 @@ QWidget* WriterRibbon::buildReviewTab() {
     auto* cNavCol = new QWidget(tab);
     auto* cnl = new QVBoxLayout(cNavCol); cnl->setContentsMargins(0,0,0,0); cnl->setSpacing(2);
     cnl->addWidget(rNext); cnl->addWidget(rPrev);
-    layout->addWidget(makeGroup("Comments", { btnComment, cDelCol, cNavCol }));
+    auto* btnCommentsPane = makeBigBtn(navPaneIcon(), "Comments\nPane", "Show all comments in a side pane", true);
+    connect(btnCommentsPane, &QToolButton::toggled, this, [this](bool on){ emit commentsPaneToggled(on); });
+    layout->addWidget(makeGroup("Comments", { btnComment, cDelCol, cNavCol, btnCommentsPane }));
     layout->addWidget(makeSeparator());
 
-    // ── Tracking ────────────────────────────────────────────────────────────
-    auto* btnTrack = makeBigBtn(trackChangesIcon(), "Track\nChanges", "Highlight your edits as you type", true);
+    // ── Tracking (real revisions: insertions green-underline, deletions red-strike)
+    auto* btnTrack = makeBigBtn(trackChangesIcon(), "Track\nChanges",
+                                "Record insertions and deletions for review", true);
     connect(btnTrack, &QToolButton::toggled, this, [this](bool on) {
-        if (!m_editor) return;
-        QTextCharFormat fmt;
-        fmt.setForeground(on ? QColor("#C0271C") : QColor("#1C1E26"));
-        m_editor->mergeCurrentCharFormat(fmt);
-        m_editor->setFocus();
+        if (auto* paper = qobject_cast<PagedTextEdit*>(m_editor)) paper->setTrackChanges(on);
+        if (m_editor) m_editor->setFocus();
     });
     auto* rAccept = makeRowBtn(acceptIcon(), "Accept All", "Accept all tracked edits");
-    auto* rReject = makeRowBtn(rejectIcon(), "Reject All", "Reject tracked-edit highlighting");
-    connect(rAccept, &QToolButton::clicked, this, &WriterRibbon::acceptAllChanges);
-    connect(rReject, &QToolButton::clicked, this, &WriterRibbon::acceptAllChanges);
+    auto* rReject = makeRowBtn(rejectIcon(), "Reject All", "Reject all tracked edits");
+    connect(rAccept, &QToolButton::clicked, this, [this] {
+        if (auto* paper = qobject_cast<PagedTextEdit*>(m_editor)) paper->acceptAllChanges();
+        m_editor->setFocus();
+    });
+    connect(rReject, &QToolButton::clicked, this, [this] {
+        if (auto* paper = qobject_cast<PagedTextEdit*>(m_editor)) paper->rejectAllChanges();
+        m_editor->setFocus();
+    });
     auto* trkCol = new QWidget(tab);
     auto* tkl = new QVBoxLayout(trkCol); tkl->setContentsMargins(0,0,0,0); tkl->setSpacing(2);
     tkl->addWidget(rAccept); tkl->addWidget(rReject);
@@ -2562,6 +2644,23 @@ QWidget* WriterRibbon::buildReviewTab() {
     auto* btnCompare = makeBigBtn(compareIcon(), "Compare", "Compare with another document");
     connect(btnCompare, &QToolButton::clicked, this, &WriterRibbon::showCompareDialog);
     layout->addWidget(makeGroup("Compare", { btnCompare }));
+    layout->addWidget(makeSeparator());
+
+    // ── Collaborate (Tier 5, LAN live share) ──────────────────────────────────
+    auto* btnHost = makeBigBtn(collabIcon(), "Host\nLive Share", "Host a live collaboration session");
+    connect(btnHost, &QToolButton::clicked, this, &WriterRibbon::collabHost);
+    auto* rJoin = makeRowBtn(collabIcon(), "Join…", "Join a live session by host:port");
+    auto* rLeave = makeRowBtn(collabIcon(), "Leave", "Leave the live session");
+    connect(rJoin,  &QToolButton::clicked, this, &WriterRibbon::collabJoin);
+    connect(rLeave, &QToolButton::clicked, this, &WriterRibbon::collabStop);
+    m_collabStatus = new QLabel("Not connected", tab);
+    m_collabStatus->setStyleSheet("color:#6B7280;font-size:11px;");
+    m_collabStatus->setWordWrap(true);
+    m_collabStatus->setFixedWidth(120);
+    auto* collabCol = new QWidget(tab);
+    auto* ccl = new QVBoxLayout(collabCol); ccl->setContentsMargins(0,0,0,0); ccl->setSpacing(2);
+    ccl->addWidget(rJoin); ccl->addWidget(rLeave); ccl->addWidget(m_collabStatus);
+    layout->addWidget(makeGroup("Collaborate", { btnHost, collabCol }));
     layout->addWidget(makeSeparator());
 
     // ── Protect ─────────────────────────────────────────────────────────────
@@ -2623,7 +2722,9 @@ QWidget* WriterRibbon::buildViewTab() {
     auto* btnRuler = makeBigBtn(rulerIcon(), "Ruler", "Show or hide the rulers", true);
     btnRuler->setChecked(true);
     connect(btnRuler, &QToolButton::toggled, this, [this](bool on) { emit rulerToggled(on); });
-    layout->addWidget(makeGroup("Show", { btnMarksView, btnEye, btnRuler }));
+    auto* btnNav = makeBigBtn(navPaneIcon(), "Navigation\nPane", "Show the heading outline", true);
+    connect(btnNav, &QToolButton::toggled, this, [this](bool on) { emit navPaneToggled(on); });
+    layout->addWidget(makeGroup("Show", { btnMarksView, btnEye, btnRuler, btnNav }));
     layout->addWidget(makeSeparator());
 
     // ── Zoom ────────────────────────────────────────────────────────────────
@@ -2689,6 +2790,21 @@ QWidget* WriterRibbon::buildToolsTab() {
     connect(btnSpell, &QToolButton::clicked, this, &WriterRibbon::showSpellingDialog);
     connect(btnAuto,  &QToolButton::clicked, this, &WriterRibbon::showAutoCorrectOptions);
     layout->addWidget(makeGroup("Proofing", { btnStats, btnSpell, btnAuto }));
+    layout->addWidget(makeSeparator());
+
+    // ── AI Assistant (Tier 5) ─────────────────────────────────────────────────
+    auto* btnAiRewrite = makeBigBtn(aiIcon(), "AI\nRewrite",   "Rewrite the selected text with AI");
+    auto* btnAiSum     = makeBigBtn(aiIcon(), "AI\nSummarize", "Summarize the document with AI");
+    auto* btnAiGen     = makeBigBtn(aiIcon(), "AI\nGenerate",  "Generate text from a prompt");
+    connect(btnAiRewrite, &QToolButton::clicked, this, &WriterRibbon::aiRewrite);
+    connect(btnAiSum,     &QToolButton::clicked, this, &WriterRibbon::aiSummarize);
+    connect(btnAiGen,     &QToolButton::clicked, this, &WriterRibbon::aiGenerate);
+    auto* rAiSettings = makeRowBtn(aiIcon(), "Settings…", "Set your Anthropic API key and model");
+    connect(rAiSettings, &QToolButton::clicked, this, &WriterRibbon::aiSettings);
+    auto* aiCol = new QWidget(tab);
+    auto* ail = new QVBoxLayout(aiCol); ail->setContentsMargins(0,0,0,0); ail->setSpacing(2);
+    ail->addWidget(rAiSettings); ail->addStretch();
+    layout->addWidget(makeGroup("AI Assistant", { btnAiRewrite, btnAiSum, btnAiGen, aiCol }));
     layout->addWidget(makeSeparator());
 
     auto* btnFind  = makeBigBtn(findIcon(), "Find &\nReplace", "Find and replace (Ctrl+F)");
@@ -2994,31 +3110,87 @@ void WriterRibbon::insertCaption(const QString& kind) {
     const QString text = QInputDialog::getText(window(), "Insert Caption",
                             kind + " caption:", QLineEdit::Normal, QString(), &ok);
     if (!ok) return;
+
+    // Auto-number: count captions of this kind that precede the cursor.
     QTextCursor cur = m_editor->textCursor();
+    int number = 1;
+    for (QTextBlock b = m_editor->document()->begin(); b != m_editor->document()->end(); b = b.next()) {
+        if (b.position() >= cur.position()) break;
+        if (b.blockFormat().stringProperty(kCaptionKindProp) == kind) ++number;
+    }
+
     cur.beginEditBlock();
     QTextCharFormat cf; cf.setFontPointSize(10); cf.setFontItalic(true);
     cf.setForeground(QColor("#4B5563"));
     QTextBlockFormat bf; bf.setAlignment(Qt::AlignHCenter); bf.setTopMargin(4); bf.setBottomMargin(8);
+    bf.setProperty(kCaptionKindProp, kind);
     cur.insertBlock(bf, cf);
     QTextCharFormat lbl = cf; lbl.setFontWeight(QFont::Bold);
-    cur.insertText(QString("%1 1").arg(kind), lbl);
+    cur.insertText(QString("%1 %2").arg(kind).arg(number), lbl);
     cur.insertText(text.isEmpty() ? "" : ": " + text, cf);
     cur.endEditBlock();
     m_editor->setFocus();
 }
 
+void WriterRibbon::updateFields() {
+    if (!m_editor) return;
+    QTextDocument* doc = m_editor->document();
+    QHash<QString, int> counters;
+    int renumbered = 0;
+
+    QTextCursor edit(doc);
+    edit.beginEditBlock();
+    for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+        const QString kind = b.blockFormat().stringProperty(kCaptionKindProp);
+        if (kind.isEmpty()) continue;
+        const int n = ++counters[kind];
+        const QString prefix = kind + " ";
+        const QString t = b.text();
+        if (!t.startsWith(prefix)) continue;
+        int ds = prefix.size(), de = ds;
+        while (de < t.size() && t.at(de).isDigit()) ++de;
+        if (de == ds) continue;
+        const QString current = t.mid(ds, de - ds);
+        if (current == QString::number(n)) continue;
+        // Replace just the digits, keeping their (bold) character format.
+        QTextCursor c(doc);
+        c.setPosition(b.position() + ds);
+        c.setPosition(b.position() + de, QTextCursor::KeepAnchor);
+        const QTextCharFormat fmt = c.charFormat();
+        c.insertText(QString::number(n), fmt);
+        ++renumbered;
+    }
+    edit.endEditBlock();
+
+    // Rebuild the navigation/outline by touching the document is automatic; tell
+    // the user what happened.
+    QMessageBox::information(window(), "Update Fields",
+        renumbered > 0 ? QString("Updated %1 caption number(s).").arg(renumbered)
+                       : "Fields are up to date.");
+    m_editor->setFocus();
+}
+
 void WriterRibbon::insertComment() {
     if (!m_editor) return;
+    QTextCursor cur = m_editor->textCursor();
+    if (!cur.hasSelection()) cur.select(QTextCursor::WordUnderCursor);
+    if (!cur.hasSelection()) {
+        QMessageBox::information(window(), "New Comment",
+            "Select the text you want to comment on first.");
+        return;
+    }
     bool ok = false;
-    const QString text = QInputDialog::getText(window(), "New Comment",
-                            "Comment:", QLineEdit::Normal, QString(), &ok);
-    if (!ok || text.isEmpty()) return;
+    const QString text = QInputDialog::getMultiLineText(window(), "New Comment",
+                            "Comment:", QString(), &ok);
+    if (!ok || text.trimmed().isEmpty()) return;
+
+    // Anchor the comment to the selection: highlight it and stash the text on the
+    // range's char format. The comments pane reads it back.
     QTextCharFormat cf;
-    cf.setBackground(QColor("#FFF6BF"));
-    cf.setForeground(QColor("#8A6D00"));
-    m_editor->textCursor().insertText(QString(" [%1] ").arg(text), cf);
-    QTextCharFormat reset; reset.setBackground(Qt::transparent); reset.setForeground(QColor("#1C1E26"));
-    m_editor->mergeCurrentCharFormat(reset);
+    cf.setBackground(QColor("#FFF1A8"));
+    cf.setProperty(kCommentProp, text);
+    cur.mergeCharFormat(cf);
+    emit commentsChanged();
     m_editor->setFocus();
 }
 
@@ -3119,6 +3291,32 @@ void WriterRibbon::setTextDirection(bool rtl) {
     m_editor->setFocus();
 }
 
+void WriterRibbon::applyColumns(int n) {
+    if (!m_editor || n < 1) return;
+    if (n == 1) {
+        QMessageBox::information(window(), "Columns",
+            "Single-column is the default layout. Use Two/Three to create a "
+            "column region, then type into each column.");
+        return;
+    }
+    // Columns are implemented as a borderless full-width table — a real, usable
+    // side-by-side layout (QTextEdit has no native newspaper-column flow).
+    QTextCursor cur = m_editor->textCursor();
+    QTextTableFormat tf;
+    tf.setBorder(0);
+    tf.setBorderStyle(QTextFrameFormat::BorderStyle_None);
+    tf.setCellPadding(8);
+    tf.setCellSpacing(0);
+    tf.setWidth(QTextLength(QTextLength::PercentageLength, 100));
+    QList<QTextLength> widths;
+    for (int i = 0; i < n; ++i)
+        widths << QTextLength(QTextLength::PercentageLength, 100.0 / n);
+    tf.setColumnWidthConstraints(widths);
+    QTextTable* t = cur.insertTable(1, n, tf);
+    if (t) m_editor->setTextCursor(t->cellAt(0, 0).firstCursorPosition());
+    m_editor->setFocus();
+}
+
 void WriterRibbon::applyPageBorders(int kind) {
     if (!m_editor) return;
     QTextFrameFormat ff = m_editor->document()->rootFrame()->frameFormat();
@@ -3194,14 +3392,36 @@ void WriterRibbon::insertTableOfFigures() {
 
 void WriterRibbon::insertCrossReference() {
     if (!m_editor) return;
-    bool ok = false;
-    const QString target = QInputDialog::getText(window(), "Cross-reference",
-                              "Reference to:", QLineEdit::Normal, "Figure 1", &ok);
-    if (!ok || target.isEmpty()) return;
-    QTextCharFormat cf; cf.setForeground(QColor("#2563EB")); cf.setFontUnderline(true);
-    m_editor->textCursor().insertText("see " + target, cf);
-    QTextCharFormat reset; reset.setForeground(QColor("#1C1E26")); reset.setFontUnderline(false);
-    m_editor->mergeCurrentCharFormat(reset);
+    const QStringList marks = collectBookmarks(m_editor->document());
+    if (marks.isEmpty()) {
+        QMessageBox::information(window(), "Cross-reference",
+            "No bookmarks found. Insert a bookmark first (Insert ▸ Bookmark), "
+            "then reference it here.");
+        return;
+    }
+
+    QDialog dlg(window());
+    dlg.setWindowTitle("Cross-reference");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* form = new QFormLayout(&dlg);
+    auto* combo = new QComboBox(&dlg); combo->addItems(marks);
+    auto* textEdit = new QLineEdit(&dlg);
+    textEdit->setPlaceholderText("Link text (defaults to the bookmark name)");
+    form->addRow("Bookmark:", combo);
+    form->addRow("Text:", textEdit);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QString anchor = combo->currentText();
+    QString label = textEdit->text().trimmed();
+    if (label.isEmpty()) label = anchor;
+    // A clickable internal link (Ctrl+click jumps to the bookmark).
+    m_editor->textCursor().insertHtml(
+        QStringLiteral("<a href=\"#%1\" style=\"color:#2563EB;text-decoration:underline;\">%2</a>&nbsp;")
+            .arg(anchor.toHtmlEscaped(), label.toHtmlEscaped()));
     m_editor->setFocus();
 }
 
@@ -3257,43 +3477,57 @@ void WriterRibbon::insertIndex() {
 void WriterRibbon::deleteComments(bool all) {
     if (!m_editor) return;
     QTextDocument* doc = m_editor->document();
-    // Comments were inserted as " [text] " with a yellow background; clear that run.
-    QTextCursor cur(doc);
-    cur.movePosition(QTextCursor::Start);
-    int removed = 0;
-    while (!cur.atEnd()) {
-        cur.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
-        if (cur.charFormat().background().color() == QColor("#FFF6BF")) {
-            cur.removeSelectedText();
-            ++removed;
-            if (!all) break;
-        } else {
-            cur.clearSelection();
-            cur.movePosition(QTextCursor::NextCharacter);
+    // Clear the comment anchor (highlight + stored text) from commented runs.
+    const int caret = m_editor->textCursor().position();
+    QList<QPair<int,int>> ranges;
+    for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+        for (auto it = b.begin(); it != b.end(); ++it) {
+            const QTextFragment f = it.fragment();
+            if (f.isValid() && !f.charFormat().stringProperty(kCommentProp).isEmpty()) {
+                const int s = f.position(), e = f.position() + f.length();
+                if (all || (caret >= s && caret <= e)) ranges << qMakePair(s, e);
+            }
         }
     }
+    std::sort(ranges.begin(), ranges.end(),
+              [](const QPair<int,int>& a, const QPair<int,int>& b){ return a.first > b.first; });
+    QTextCursor cur(doc); cur.beginEditBlock();
+    for (const auto& r : ranges) {
+        cur.setPosition(r.first); cur.setPosition(r.second, QTextCursor::KeepAnchor);
+        QTextCharFormat clr; clr.setBackground(Qt::transparent); clr.setProperty(kCommentProp, QString());
+        cur.mergeCharFormat(clr);
+        if (!all) break;
+    }
+    cur.endEditBlock();
+    emit commentsChanged();
     m_editor->setFocus();
 }
 
 void WriterRibbon::gotoComment(bool next) {
     if (!m_editor) return;
     QTextDocument* doc = m_editor->document();
-    QTextCursor from = m_editor->textCursor();
-    QTextCursor found = next
-        ? doc->find(QRegularExpression("\\[[^\\]]+\\]"), from)
-        : doc->find(QRegularExpression("\\[[^\\]]+\\]"), from, QTextDocument::FindBackward);
-    if (!found.isNull()) { m_editor->setTextCursor(found); m_editor->ensureCursorVisible(); }
+    const int caret = m_editor->textCursor().position();
+    int bestPos = -1;
+    for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+        for (auto it = b.begin(); it != b.end(); ++it) {
+            const QTextFragment f = it.fragment();
+            if (!f.isValid() || f.charFormat().stringProperty(kCommentProp).isEmpty()) continue;
+            const int pos = f.position();
+            if (next) { if (pos > caret && (bestPos < 0 || pos < bestPos)) bestPos = pos; }
+            else      { if (pos < caret && (bestPos < 0 || pos > bestPos)) bestPos = pos; }
+        }
+    }
+    if (bestPos >= 0) {
+        QTextCursor c(doc); c.setPosition(bestPos);
+        m_editor->setTextCursor(c);
+        m_editor->ensureCursorVisible();
+    }
     m_editor->setFocus();
 }
 
 void WriterRibbon::acceptAllChanges() {
-    if (!m_editor) return;
-    // Our lightweight track-changes tints text; "accept" normalises the colour.
-    QTextCursor cur(m_editor->document());
-    cur.select(QTextCursor::Document);
-    QTextCharFormat fmt; fmt.setForeground(QColor("#1C1E26"));
-    cur.mergeCharFormat(fmt);
-    m_editor->setFocus();
+    if (auto* paper = qobject_cast<PagedTextEdit*>(m_editor)) paper->acceptAllChanges();
+    if (m_editor) m_editor->setFocus();
 }
 
 void WriterRibbon::setReadOnly(bool on) {
@@ -3473,6 +3707,152 @@ void WriterRibbon::applyTemplate(int id) {
     home.movePosition(QTextCursor::Start);
     m_editor->setTextCursor(home);
     m_editor->setFocus();
+}
+
+// ── AI assistant (Tier 5) ────────────────────────────────────────────────────
+void WriterRibbon::runAi(const QString& system, const QString& user, bool replaceSelection) {
+    if (!m_editor || !m_ai) return;
+    if (user.trimmed().isEmpty()) {
+        QMessageBox::information(window(), "AI Assistant", "There's no text to work with.");
+        return;
+    }
+    // Remember the target range so the async reply lands in the right place.
+    QTextCursor target = m_editor->textCursor();
+    QApplication::setOverrideCursor(Qt::BusyCursor);
+
+    m_ai->ask(system, user, [this, target, replaceSelection](bool ok, QString text) mutable {
+        QApplication::restoreOverrideCursor();
+        if (!ok) { QMessageBox::warning(window(), "AI Assistant", text); return; }
+
+        if (replaceSelection && target.hasSelection()) {
+            target.insertText(text);
+            m_editor->setTextCursor(target);
+        } else {
+            // Offer to insert the result.
+            QMessageBox box(window());
+            box.setWindowTitle("AI Assistant");
+            box.setText(text.left(4000));
+            box.setStandardButtons(QMessageBox::Ok | QMessageBox::Cancel);
+            box.button(QMessageBox::Ok)->setText("Insert");
+            box.button(QMessageBox::Cancel)->setText("Discard");
+            if (box.exec() == QMessageBox::Ok) {
+                QTextCursor c = m_editor->textCursor();
+                c.insertText(text);
+            }
+        }
+        m_editor->setFocus();
+    });
+}
+
+void WriterRibbon::aiRewrite() {
+    if (!m_editor) return;
+    QTextCursor cur = m_editor->textCursor();
+    if (!cur.hasSelection()) {
+        QMessageBox::information(window(), "AI Rewrite", "Select the text you want to rewrite first.");
+        return;
+    }
+    runAi("You are a precise copy editor. Rewrite the user's text to be clearer, "
+          "more concise, and well-structured, preserving meaning and tone. "
+          "Return only the rewritten text with no preamble or quotation marks.",
+          cur.selectedText().replace(QChar(0x2029), '\n'), /*replaceSelection*/ true);
+}
+
+void WriterRibbon::aiSummarize() {
+    if (!m_editor) return;
+    const QString doc = m_editor->document()->toPlainText();
+    runAi("Summarize the following document in a few clear sentences. "
+          "Return only the summary.",
+          doc, /*replaceSelection*/ false);
+}
+
+void WriterRibbon::aiGenerate() {
+    if (!m_editor) return;
+    bool ok = false;
+    const QString prompt = QInputDialog::getMultiLineText(
+        window(), "AI — Generate", "Describe what you'd like written:", QString(), &ok);
+    if (!ok || prompt.trimmed().isEmpty()) return;
+    runAi("You are a helpful writing assistant. Write the requested content directly, "
+          "ready to paste into a document. Return only the content.",
+          prompt, /*replaceSelection*/ false);
+}
+
+void WriterRibbon::aiSettings() {
+    QDialog dlg(window());
+    dlg.setWindowTitle("AI Assistant — Settings");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* form = new QFormLayout(&dlg);
+
+    auto* keyEdit = new QLineEdit(WriterAi::apiKey(), &dlg);
+    keyEdit->setEchoMode(QLineEdit::PasswordEchoOnEdit);
+    keyEdit->setPlaceholderText("sk-ant-…");
+    auto* modelEdit = new QLineEdit(WriterAi::model(), &dlg);
+    form->addRow("Anthropic API key:", keyEdit);
+    form->addRow("Model:", modelEdit);
+    auto* note = new QLabel("Your key is stored locally. Document text you send is "
+                            "transmitted to the Anthropic API to generate responses.", &dlg);
+    note->setWordWrap(true);
+    note->setStyleSheet("color:#6B7280;font-size:11px;");
+    form->addRow(note);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    form->addRow(bb);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    WriterAi::setApiKey(keyEdit->text().trimmed());
+    WriterAi::setModel(modelEdit->text().trimmed());
+}
+
+// ── Collaboration (Tier 5) ───────────────────────────────────────────────────
+void WriterRibbon::collabHost() {
+    if (!m_collab) return;
+    if (m_collab->active()) { collabStop(); return; }
+    bool ok = false;
+    const int port = QInputDialog::getInt(window(), "Start Live Share",
+        "Host a collaboration session on port:", 8787, 1024, 65535, 1, &ok);
+    if (!ok) return;
+    QString err;
+    if (!m_collab->startHost(quint16(port), err)) {
+        QMessageBox::warning(window(), "Live Share", "Couldn't start hosting:\n" + err);
+        return;
+    }
+    QMessageBox::information(window(), "Live Share",
+        QString("Hosting on port %1.\n\nOthers on your network can join with "
+                "your IP address and this port. Edits sync live.").arg(port));
+}
+
+void WriterRibbon::collabJoin() {
+    if (!m_collab) return;
+    if (m_collab->active()) { collabStop(); return; }
+    QDialog dlg(window());
+    dlg.setWindowTitle("Join Live Share");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* form = new QFormLayout(&dlg);
+    auto* hostEdit = new QLineEdit("127.0.0.1", &dlg);
+    auto* portEdit = new QLineEdit("8787", &dlg);
+    form->addRow("Host address:", hostEdit);
+    form->addRow("Port:", portEdit);
+    auto* note = new QLabel("Joining replaces your document with the host's, then "
+                            "keeps both in sync.", &dlg);
+    note->setWordWrap(true); note->setStyleSheet("color:#6B7280;font-size:11px;");
+    form->addRow(note);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    form->addRow(bb);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QString err;
+    if (!m_collab->joinHost(hostEdit->text().trimmed(), quint16(portEdit->text().toInt()), err)) {
+        QMessageBox::warning(window(), "Live Share", "Couldn't connect:\n" + err);
+    }
+}
+
+void WriterRibbon::collabStop() {
+    if (!m_collab) return;
+    m_collab->stop();
+    if (m_collabStatus) m_collabStatus->setText("Not connected");
 }
 
 // ── Equation editor (Tier 4) ─────────────────────────────────────────────────

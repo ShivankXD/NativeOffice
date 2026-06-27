@@ -7,6 +7,7 @@
 #include "WriterStatusBar.h"
 #include "PagedTextEdit.h"
 #include "WriterRuler.h"
+#include "DocxIo.h"
 #include "core/theme/ThemeManager.h"
 
 #include <QVBoxLayout>
@@ -18,6 +19,10 @@
 #include <QMessageBox>
 #include <QDir>
 #include <QApplication>
+#include <QListWidget>
+#include <QLabel>
+#include <QTextBlock>
+#include <QTextFragment>
 #include <QTextDocument>
 #include <QTextCursor>
 #include <QTextCharFormat>
@@ -39,8 +44,83 @@
 #include <QEvent>
 #include <QTimer>
 #include <QScrollBar>
+#include <QPainter>
+#include <QFont>
+#include <QFontMetrics>
 
 namespace NativeOffice {
+
+namespace {
+// ─────────────────────────────────────────────────────────────────────────────
+// WriterBanner — slim full-width branded strip above the ribbon, matching the
+// Calc/Impress banner (logo + tagline pinned left, soft decorations right).
+// ─────────────────────────────────────────────────────────────────────────────
+class WriterBanner : public QWidget {
+public:
+    explicit WriterBanner(QWidget* parent = nullptr) : QWidget(parent) {
+        setObjectName("writerBanner");
+        setFixedHeight(44);
+    }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const int w = width(), h = height();
+        p.fillRect(rect(), QColor("#FFFFFF"));
+
+        // Right-side decorations (soft blue clouds, dots, ring).
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#E2EAF8"));
+        p.drawEllipse(QPointF(w - 70, h + 8), 40, 26);
+        p.drawEllipse(QPointF(w - 26, h + 10), 50, 32);
+        p.setBrush(QColor("#CFDcF4"));
+        p.drawEllipse(QPointF(w - 4, h + 6), 44, 28);
+        p.setBrush(QColor("#C3C8D4"));
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                p.drawEllipse(QPointF(w - 188 + c * 6.5, h / 2.0 - 6.5 + r * 6.5), 1.5, 1.5);
+        p.setBrush(QColor("#3B82F6"));
+        p.drawEllipse(QPointF(w - 150, h / 2.0 - 7), 3.4, 3.4);
+        p.setBrush(Qt::NoBrush);
+        QPen ring(QColor("#34B6A7")); ring.setWidthF(1.7); p.setPen(ring);
+        p.drawEllipse(QPointF(w - 128, h / 2.0 + 4), 5.5, 5.5);
+
+        // Left: "NP" logo tile.
+        const QRectF logo(12, (h - 28) / 2.0, 28, 28);
+        p.setPen(QPen(QColor("#DADDE4"), 1));
+        p.setBrush(Qt::white);
+        p.drawRoundedRect(logo, 7, 7);
+        QFont lf("Segoe UI"); lf.setBold(true); lf.setPixelSize(14); p.setFont(lf);
+        p.setPen(QColor("#2C3140"));
+        p.drawText(QRectF(logo.left() + 3, logo.top(), 13, logo.height()), Qt::AlignCenter, "N");
+        p.setPen(QColor("#E8372A"));
+        p.drawText(QRectF(logo.left() + 12, logo.top(), 13, logo.height()), Qt::AlignCenter, "P");
+
+        p.setPen(QPen(QColor("#E6E8ED"), 1));
+        p.drawLine(QPointF(50, 10), QPointF(50, h - 10));
+
+        { QFont ef("Segoe UI Emoji"); ef.setPixelSize(16); p.setFont(ef);
+          p.setPen(QColor("#2C3140"));
+          p.drawText(QRectF(58, 0, 24, h), Qt::AlignVCenter | Qt::AlignLeft,
+                     QString::fromUtf8("\xF0\x9F\x9A\x80")); }
+
+        QFont tf("Segoe UI"); tf.setBold(true); tf.setPixelSize(15); p.setFont(tf);
+        const QFontMetrics tfm(tf);
+        const int tx = 86;
+        p.setPen(QColor("#2C3140"));
+        p.drawText(QRectF(tx, 0, tfm.horizontalAdvance("NativeOffice") + 4, h),
+                   Qt::AlignVCenter | Qt::AlignLeft, "NativeOffice");
+        const int sx = tx + tfm.horizontalAdvance("NativeOffice") + 8;
+        QFont sf("Segoe UI"); sf.setPixelSize(13); p.setFont(sf);
+        p.setPen(QColor("#9097A6"));
+        p.drawText(QRectF(sx, 0, w - sx - 150, h),
+                   Qt::AlignVCenter | Qt::AlignLeft, "is your go to OfficeSuite!");
+
+        p.setPen(QPen(QColor("#E4E6EB"), 1));
+        p.drawLine(0, h - 1, w, h - 1);
+    }
+};
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
@@ -114,6 +194,73 @@ void WriterModule::buildUi() {
         m_scroll->ensureVisible(inCanvas.x(), inCanvas.y(), 40, 90);
     });
 
+    // ── Navigation pane (document outline) ────────────────────────────────
+    m_navPane = new QWidget(this);
+    m_navPane->setObjectName("writerNavPane");
+    m_navPane->setFixedWidth(210);
+    auto* navLayout = new QVBoxLayout(m_navPane);
+    navLayout->setContentsMargins(8, 8, 8, 8);
+    navLayout->setSpacing(6);
+    auto* navTitle = new QLabel("Navigation", m_navPane);
+    navTitle->setObjectName("navTitle");
+    m_navList = new QListWidget(m_navPane);
+    m_navList->setObjectName("navList");
+    m_navList->setFrameShape(QFrame::NoFrame);
+    navLayout->addWidget(navTitle);
+    navLayout->addWidget(m_navList, 1);
+    m_navPane->setVisible(false);
+    m_navPane->setStyleSheet(
+        "#writerNavPane{background:#F7F8FA;border-right:1px solid #D7DAE0;}"
+        "#navTitle{font:600 12px 'Segoe UI';color:#3A3F4B;}"
+        "#navList{background:transparent;font:12px 'Segoe UI';color:#3A3F4B;}"
+        "#navList::item{padding:3px 2px;}"
+        "#navList::item:selected{background:#E2E8F8;color:#1C1E26;border-radius:4px;}");
+    connect(m_navList, &QListWidget::itemClicked, this, [this](QListWidgetItem* it){
+        if (!it || !m_editor) return;
+        const int pos = it->data(Qt::UserRole).toInt();
+        QTextCursor c(m_editor->document());
+        c.setPosition(qMin(pos, m_editor->document()->characterCount() - 1));
+        m_editor->setTextCursor(c);
+        const QRect r = m_editor->cursorRect(c);
+        const QPoint inCanvas = m_editor->mapTo(m_canvas, r.topLeft());
+        if (m_scroll) m_scroll->ensureVisible(inCanvas.x(), inCanvas.y(), 20, 80);
+        m_editor->setFocus();
+    });
+
+    // ── Comments pane (right side) ────────────────────────────────────────
+    m_commentsPane = new QWidget(this);
+    m_commentsPane->setObjectName("writerCommentsPane");
+    m_commentsPane->setFixedWidth(240);
+    auto* cmLayout = new QVBoxLayout(m_commentsPane);
+    cmLayout->setContentsMargins(8, 8, 8, 8);
+    cmLayout->setSpacing(6);
+    auto* cmTitle = new QLabel("Comments", m_commentsPane);
+    cmTitle->setObjectName("navTitle");
+    m_commentsList = new QListWidget(m_commentsPane);
+    m_commentsList->setObjectName("navList");
+    m_commentsList->setFrameShape(QFrame::NoFrame);
+    m_commentsList->setWordWrap(true);
+    cmLayout->addWidget(cmTitle);
+    cmLayout->addWidget(m_commentsList, 1);
+    m_commentsPane->setVisible(false);
+    m_commentsPane->setStyleSheet(
+        "#writerCommentsPane{background:#FBFAF4;border-left:1px solid #E7E2C8;}"
+        "#navTitle{font:600 12px 'Segoe UI';color:#3A3F4B;}"
+        "#navList{background:transparent;font:12px 'Segoe UI';color:#3A3F4B;}"
+        "#navList::item{padding:6px 4px;border-bottom:1px solid #EFEAD6;}"
+        "#navList::item:selected{background:#FBEFA8;color:#1C1E26;border-radius:4px;}");
+    connect(m_commentsList, &QListWidget::itemClicked, this, [this](QListWidgetItem* it){
+        if (!it || !m_editor) return;
+        const int pos = it->data(Qt::UserRole).toInt();
+        QTextCursor c(m_editor->document());
+        c.setPosition(qMin(pos, m_editor->document()->characterCount() - 1));
+        m_editor->setTextCursor(c);
+        const QRect r = m_editor->cursorRect(c);
+        const QPoint inCanvas = m_editor->mapTo(m_canvas, r.topLeft());
+        if (m_scroll) m_scroll->ensureVisible(inCanvas.x(), inCanvas.y(), 20, 80);
+        m_editor->setFocus();
+    });
+
     // ── Rulers (Tier 4) ───────────────────────────────────────────────────
     m_hRuler = new WriterRuler(Qt::Horizontal, this);
     m_vRuler = new WriterRuler(Qt::Vertical, this);
@@ -145,6 +292,7 @@ void WriterModule::buildUi() {
     m_autosaveTimer->start();
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this]{ QFile::remove(recoveryFilePath()); });
 
+    rootLayout->addWidget(new WriterBanner(this));   // full-width branded strip
     rootLayout->addWidget(m_ribbon);
     rootLayout->addWidget(m_hRuler);
 
@@ -153,8 +301,10 @@ void WriterModule::buildUi() {
     auto* midLayout = new QHBoxLayout(midRow);
     midLayout->setContentsMargins(0, 0, 0, 0);
     midLayout->setSpacing(0);
+    midLayout->addWidget(m_navPane);
     midLayout->addWidget(m_vRuler);
     midLayout->addWidget(m_scroll, 1);
+    midLayout->addWidget(m_commentsPane);
 
     rootLayout->addWidget(midRow, 1);
     rootLayout->addWidget(m_statusBar);
@@ -178,6 +328,11 @@ void WriterModule::buildUi() {
         setWebLayout(web); if (m_statusBar) m_statusBar->setWebLayoutActive(web);
     });
     connect(m_ribbon, &WriterRibbon::rulerToggled, this, &WriterModule::setRulersVisible);
+    connect(m_ribbon, &WriterRibbon::navPaneToggled, this, &WriterModule::setNavPaneVisible);
+    connect(m_ribbon, &WriterRibbon::commentsPaneToggled, this, &WriterModule::setCommentsPaneVisible);
+    connect(m_ribbon, &WriterRibbon::commentsChanged, this, [this]{
+        setCommentsPaneVisible(true); refreshCommentsPane();
+    });
 
     // ── Wire status bar ───────────────────────────────────────────────────
     connect(m_statusBar, &WriterStatusBar::zoomChanged,
@@ -259,6 +414,16 @@ QString WriterModule::buildNoffString() const {
 }
 
 bool WriterModule::saveToPath(const QString& path) {
+    // Microsoft Word .docx is the default save format (real OOXML via DocxIo).
+    if (path.endsWith(".docx", Qt::CaseInsensitive)) {
+        if (!DocxIo::exportDocx(m_editor->document(), path)) return false;
+        m_currentPath = path;
+        m_dirty       = false;
+        emit filePathChanged(path);
+        QFile::remove(recoveryFilePath());
+        return true;
+    }
+
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
         return false;
@@ -362,6 +527,24 @@ void WriterModule::loadNoffString(QString content) {
 }
 
 bool WriterModule::loadFromPath(const QString& path) {
+    if (path.endsWith(".docx", Qt::CaseInsensitive)) {
+        m_ignoreChange = true;
+        const bool ok = DocxIo::importDocx(path, m_editor->document());
+        m_editor->moveCursor(QTextCursor::Start);
+        m_ignoreChange = false;
+        if (!ok) return false;
+        QTimer::singleShot(0, this, [this] {
+            if (m_scroll && m_scroll->verticalScrollBar())
+                m_scroll->verticalScrollBar()->setValue(0);
+            updateRulerGeometry();
+        });
+        m_currentPath = path;
+        m_dirty       = false;
+        emit filePathChanged(path);
+        QTimer::singleShot(400, this, [this]{ checkCrashRecovery(); });
+        return true;
+    }
+
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
         return false;
@@ -466,6 +649,9 @@ void WriterModule::updateStatus() {
     // Page count — exact, straight from the paginated layout.
     const int pages = m_paper ? m_paper->pageCountValue() : 1;
     m_statusBar->setPageInfo(1, pages);
+
+    refreshNavPane();        // keep the outline current (debounced via this path)
+    refreshCommentsPane();
 }
 
 void WriterModule::applyZoom(int percent) {
@@ -549,6 +735,63 @@ void WriterModule::setRulersVisible(bool on) {
     if (m_hRuler) m_hRuler->setVisible(on);
     if (m_vRuler) m_vRuler->setVisible(on);
     if (on) updateRulerGeometry();
+}
+
+void WriterModule::setNavPaneVisible(bool on) {
+    m_navVisible = on;
+    if (m_navPane) m_navPane->setVisible(on);
+    if (on) refreshNavPane();
+}
+
+void WriterModule::setCommentsPaneVisible(bool on) {
+    m_commentsVisible = on;
+    if (m_commentsPane) m_commentsPane->setVisible(on);
+    if (on) refreshCommentsPane();
+}
+
+void WriterModule::refreshCommentsPane() {
+    if (!m_commentsVisible || !m_commentsList || !m_editor) return;
+    m_commentsList->clear();
+    QTextDocument* doc = m_editor->document();
+    QString runText, runComment;
+    int runStart = -1;
+    auto flush = [&]{
+        if (runStart < 0) return;
+        auto* item = new QListWidgetItem(
+            QString("💬 %1\n   “%2”").arg(runComment, runText.simplified().left(40)), m_commentsList);
+        item->setData(Qt::UserRole, runStart);
+        runStart = -1; runText.clear(); runComment.clear();
+    };
+    for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+        for (auto it = b.begin(); it != b.end(); ++it) {
+            const QTextFragment f = it.fragment();
+            if (!f.isValid()) continue;
+            const QString cmt = f.charFormat().stringProperty(kCommentProp);
+            if (cmt.isEmpty()) { flush(); continue; }
+            if (runStart >= 0 && cmt == runComment) { runText += f.text(); }
+            else { flush(); runStart = f.position(); runComment = cmt; runText = f.text(); }
+        }
+        flush();   // comments don't span paragraphs
+    }
+    if (m_commentsList->count() == 0)
+        m_commentsList->addItem(new QListWidgetItem("(no comments)"));
+}
+
+void WriterModule::refreshNavPane() {
+    if (!m_navVisible || !m_navList || !m_editor) return;
+    m_navList->clear();
+    QTextDocument* doc = m_editor->document();
+    for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+        const int level = b.blockFormat().headingLevel();
+        if (level < 1 || level > 3) continue;
+        const QString text = b.text().trimmed();
+        if (text.isEmpty()) continue;
+        auto* item = new QListWidgetItem(QString(2 * (level - 1), ' ') + text, m_navList);
+        item->setData(Qt::UserRole, b.position());
+        if (level == 1) { QFont f = item->font(); f.setBold(true); item->setFont(f); }
+    }
+    if (m_navList->count() == 0)
+        m_navList->addItem(new QListWidgetItem("(no headings)"));
 }
 
 bool WriterModule::eventFilter(QObject* obj, QEvent* ev) {

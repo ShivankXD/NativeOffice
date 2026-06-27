@@ -22,11 +22,19 @@
 #include <QTextBlockFormat>
 #include <QAction>
 #include <QFont>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QDate>
 #include <QtMath>
 #include <cmath>
 
 namespace NativeOffice {
+
+// Char-format properties tagging tracked-change runs.
+static constexpr int kTrackInsert = QTextFormat::UserProperty + 30;
+static constexpr int kTrackDelete = QTextFormat::UserProperty + 31;
+static const QColor kInsColor("#1A7F37");   // green — inserted
+static const QColor kDelColor("#C0271C");   // red   — deleted
 
 PagedTextEdit::PagedTextEdit(QWidget* parent)
     : QTextEdit(parent)
@@ -235,6 +243,16 @@ void PagedTextEdit::deleteSelectedImage() {
 }
 
 void PagedTextEdit::mousePressEvent(QMouseEvent* e) {
+    // Ctrl+click follows a hyperlink (external URL → browser, #anchor → scroll).
+    if (e->button() == Qt::LeftButton && (e->modifiers() & Qt::ControlModifier)) {
+        const QString href = anchorAt(e->pos());
+        if (!href.isEmpty()) {
+            if (href.startsWith('#')) scrollToAnchor(href.mid(1));
+            else QDesktopServices::openUrl(QUrl(href));
+            e->accept();
+            return;
+        }
+    }
     if (e->button() == Qt::LeftButton && m_imagePos >= 0) {
         const int h = handleAt(e->pos());
         if (h >= 0) {
@@ -298,6 +316,9 @@ void PagedTextEdit::keyPressEvent(QKeyEvent* e) {
         return;
     }
 
+    // Track changes intercepts typing/deletion to mark rather than mutate.
+    if (m_trackChanges && !isReadOnly() && handleTrackedKey(e)) { e->accept(); return; }
+
     // AutoCorrect (only on real typing, never read-only or with a selection edit).
     if (m_autoCorrectEnabled && !isReadOnly() && !textCursor().hasSelection()) {
         const QString t = e->text();
@@ -331,6 +352,123 @@ void PagedTextEdit::keyPressEvent(QKeyEvent* e) {
     }
 
     QTextEdit::keyPressEvent(e);
+}
+
+bool PagedTextEdit::handleTrackedKey(QKeyEvent* e) {
+    const int k = e->key();
+    const QString t = e->text();
+
+    // Deletion → strike through instead of removing.
+    if (k == Qt::Key_Backspace || k == Qt::Key_Delete) {
+        QTextCursor c = textCursor();
+        if (!c.hasSelection()) {
+            c.movePosition(k == Qt::Key_Backspace ? QTextCursor::PreviousCharacter
+                                                  : QTextCursor::NextCharacter,
+                           QTextCursor::KeepAnchor);
+        }
+        if (c.hasSelection()) {
+            QTextCharFormat del;
+            del.setForeground(kDelColor);
+            del.setFontStrikeOut(true);
+            del.setProperty(kTrackDelete, true);
+            c.mergeCharFormat(del);
+            QTextCursor nc = textCursor();
+            nc.setPosition(k == Qt::Key_Backspace ? c.selectionStart() : c.selectionEnd());
+            setTextCursor(nc);
+        }
+        return true;
+    }
+
+    // Printable text → insert marked as an insertion (mark any replaced selection
+    // as deleted first).
+    if (!t.isEmpty() && t.at(0).isPrint()) {
+        QTextCursor c = textCursor();
+        if (c.hasSelection()) {
+            QTextCharFormat del;
+            del.setForeground(kDelColor); del.setFontStrikeOut(true);
+            del.setProperty(kTrackDelete, true);
+            c.mergeCharFormat(del);
+            QTextCursor nc = textCursor(); nc.setPosition(c.selectionEnd());
+            setTextCursor(nc);
+        }
+        QTextCharFormat ins;
+        ins.setForeground(kInsColor);
+        ins.setFontUnderline(true);
+        ins.setProperty(kTrackInsert, true);
+        textCursor().insertText(t, ins);
+        return true;
+    }
+    return false;   // navigation keys etc. fall through to normal handling
+}
+
+void PagedTextEdit::acceptAllChanges() {
+    QTextDocument* d = document();
+    struct Range { int start, end; bool del; };
+    QList<Range> ranges;
+    for (QTextBlock b = d->begin(); b != d->end(); b = b.next()) {
+        for (auto it = b.begin(); it != b.end(); ++it) {
+            const QTextFragment f = it.fragment();
+            if (!f.isValid()) continue;
+            const QTextCharFormat cf = f.charFormat();
+            if (cf.boolProperty(kTrackDelete))
+                ranges.append({ f.position(), f.position() + f.length(), true });
+            else if (cf.boolProperty(kTrackInsert))
+                ranges.append({ f.position(), f.position() + f.length(), false });
+        }
+    }
+    std::sort(ranges.begin(), ranges.end(),
+              [](const Range& a, const Range& b){ return a.start > b.start; });
+    QTextCursor c(d);
+    c.beginEditBlock();
+    for (const Range& r : ranges) {
+        c.setPosition(r.start);
+        c.setPosition(r.end, QTextCursor::KeepAnchor);
+        if (r.del) {
+            c.removeSelectedText();                 // deletion accepted → gone
+        } else {                                    // insertion accepted → keep as normal
+            QTextCharFormat n;
+            n.setForeground(QColor("#1C1E26"));
+            n.setFontUnderline(false);
+            n.setProperty(kTrackInsert, false);
+            c.mergeCharFormat(n);
+        }
+    }
+    c.endEditBlock();
+}
+
+void PagedTextEdit::rejectAllChanges() {
+    QTextDocument* d = document();
+    struct Range { int start, end; bool ins; };
+    QList<Range> ranges;
+    for (QTextBlock b = d->begin(); b != d->end(); b = b.next()) {
+        for (auto it = b.begin(); it != b.end(); ++it) {
+            const QTextFragment f = it.fragment();
+            if (!f.isValid()) continue;
+            const QTextCharFormat cf = f.charFormat();
+            if (cf.boolProperty(kTrackInsert))
+                ranges.append({ f.position(), f.position() + f.length(), true });
+            else if (cf.boolProperty(kTrackDelete))
+                ranges.append({ f.position(), f.position() + f.length(), false });
+        }
+    }
+    std::sort(ranges.begin(), ranges.end(),
+              [](const Range& a, const Range& b){ return a.start > b.start; });
+    QTextCursor c(d);
+    c.beginEditBlock();
+    for (const Range& r : ranges) {
+        c.setPosition(r.start);
+        c.setPosition(r.end, QTextCursor::KeepAnchor);
+        if (r.ins) {
+            c.removeSelectedText();                 // insertion rejected → gone
+        } else {                                    // deletion rejected → restore text
+            QTextCharFormat n;
+            n.setForeground(QColor("#1C1E26"));
+            n.setFontStrikeOut(false);
+            n.setProperty(kTrackDelete, false);
+            c.mergeCharFormat(n);
+        }
+    }
+    c.endEditBlock();
 }
 
 void PagedTextEdit::applyAutoCorrectAtCursor() {

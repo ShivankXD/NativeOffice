@@ -23,6 +23,10 @@ add_library(WriterModule STATIC
     AutoCorrect.h
     WriterEquation.cpp
     WriterEquation.h
+    WriterAi.cpp
+    WriterAi.h
+    WriterCollab.cpp
+    WriterCollab.h
 )
 
 target_include_directories(WriterModule PUBLIC
@@ -39,12 +43,16 @@ foreach(_d IN LISTS _qtcore_inc)
     endif()
 endforeach()
 
+# Tier 5 needs networking (AI assistant HTTP, LAN collaboration sockets).
+find_package(Qt6 REQUIRED COMPONENTS Network)
+
 target_link_libraries(WriterModule PUBLIC
     NativeOfficeCore
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
     Qt6::PrintSupport
+    Qt6::Network
 )
 
 # Spell-check dictionary. SpellChecker searches next to the executable first; the
