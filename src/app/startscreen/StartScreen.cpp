@@ -21,6 +21,9 @@
 #include <QButtonGroup>
 #include <QMouseEvent>
 #include <QEnterEvent>
+#include <QSvgRenderer>
+#include <QPainter>
+#include <QPixmap>
 #include <functional>
 #include <utility>
 
@@ -57,6 +60,78 @@ QLabel* heading(const QString& text, int px, const QString& color, bool bold, QW
                          .arg(color).arg(bold ? "700" : "400").arg(px));
     return l;
 }
+
+// Render an inline SVG illustration into a transparent QLabel at the given
+// height (clicks pass through to the parent card).
+QLabel* svgArt(const char* svg, int h, QWidget* parent) {
+    const QByteArray data(svg);
+    QSvgRenderer r(data);
+    const QSize def = r.defaultSize();
+    const int w = (def.height() > 0) ? def.width() * h / def.height() : h;
+    QPixmap pm(w * 2, h * 2);                  // 2× for crispness on hi-dpi
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    r.render(&p);
+    p.end();
+    pm.setDevicePixelRatio(2.0);
+    auto* l = new QLabel(parent);
+    l->setPixmap(pm);
+    l->setStyleSheet("background:transparent;");
+    l->setAttribute(Qt::WA_TransparentForMouseEvents);
+    return l;
+}
+
+// ── Illustrations for the four "create" tiles ────────────────────────────────
+constexpr const char* kArtDocument = R"SVG(
+<svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
+  <rect x="46" y="14" width="70" height="90" rx="6" fill="#1b2740" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="32" y="22" width="70" height="90" rx="6" fill="#22314f" stroke="#60a5fa" stroke-width="2"/>
+  <rect x="42" y="34" width="38" height="6" rx="3" fill="#9cc3ff"/>
+  <rect x="42" y="48" width="50" height="4" rx="2" fill="#6f93c8"/>
+  <rect x="42" y="58" width="50" height="4" rx="2" fill="#6f93c8"/>
+  <rect x="42" y="68" width="40" height="4" rx="2" fill="#6f93c8"/>
+  <rect x="42" y="78" width="46" height="4" rx="2" fill="#6f93c8"/>
+  <rect x="42" y="88" width="30" height="4" rx="2" fill="#6f93c8"/>
+</svg>)SVG";
+
+constexpr const char* kArtSpreadsheet = R"SVG(
+<svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
+  <rect x="33" y="16" width="84" height="82" rx="6" fill="#102a20" stroke="#22c55e" stroke-width="2"/>
+  <rect x="33" y="16" width="84" height="17" fill="#16a34a"/>
+  <line x1="61" y1="16" x2="61" y2="98" stroke="#2f6f53" stroke-width="1.5"/>
+  <line x1="89" y1="16" x2="89" y2="98" stroke="#2f6f53" stroke-width="1.5"/>
+  <line x1="33" y1="49" x2="117" y2="49" stroke="#2f6f53" stroke-width="1.5"/>
+  <line x1="33" y1="65" x2="117" y2="65" stroke="#2f6f53" stroke-width="1.5"/>
+  <line x1="33" y1="81" x2="117" y2="81" stroke="#2f6f53" stroke-width="1.5"/>
+  <rect x="37" y="52" width="20" height="10" rx="2" fill="#1e5e44"/>
+  <rect x="93" y="68" width="20" height="10" rx="2" fill="#1e5e44"/>
+</svg>)SVG";
+
+constexpr const char* kArtPresentation = R"SVG(
+<svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
+  <rect x="27" y="18" width="96" height="72" rx="6" fill="#3a2418" stroke="#fb923c" stroke-width="2"/>
+  <rect x="38" y="28" width="46" height="7" rx="3.5" fill="#fdba74"/>
+  <rect x="40" y="72" width="10" height="10" fill="#fb923c"/>
+  <rect x="55" y="62" width="10" height="20" fill="#fb923c"/>
+  <rect x="70" y="52" width="10" height="30" fill="#fdba74"/>
+  <rect x="85" y="58" width="10" height="24" fill="#fb923c"/>
+  <line x1="38" y1="82" x2="112" y2="82" stroke="#7c4a2b" stroke-width="1.5"/>
+  <rect x="71" y="90" width="8" height="9" fill="#7c4a2b"/>
+  <rect x="60" y="99" width="30" height="4" rx="2" fill="#7c4a2b"/>
+</svg>)SVG";
+
+constexpr const char* kArtOpenFile = R"SVG(
+<svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
+  <rect x="48" y="20" width="46" height="40" rx="4" fill="#2a2440" stroke="#a78bfa" stroke-width="2"/>
+  <rect x="55" y="29" width="30" height="4" rx="2" fill="#c4b5fd"/>
+  <rect x="55" y="39" width="30" height="3" rx="1.5" fill="#8b7bc0"/>
+  <rect x="55" y="47" width="22" height="3" rx="1.5" fill="#8b7bc0"/>
+  <path d="M28 50 l6 -7 h22 l5 7 h33 v34 a3 3 0 0 1 -3 3 H31 a3 3 0 0 1 -3 -3 z"
+        fill="#6d4ed6" stroke="#a78bfa" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M27 56 h90 l-9 30 a3 3 0 0 1 -3 2 H21 z"
+        fill="#8b6df0" stroke="#a78bfa" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>)SVG";
 
 } // namespace
 
@@ -270,12 +345,12 @@ QWidget* StartScreen::buildCreateCards() {
     auto* g = new QHBoxLayout(w);
     g->setContentsMargins(0, 0, 0, 0); g->setSpacing(18);
 
-    struct Card { QString letter, title, sub, color, grad1, grad2; int action; };
+    struct Card { QString letter, title, sub, color, grad1, grad2; int action; const char* art; };
     const Card cards[] = {
-        {"W","Document","Create a new document","#2563EB","#21314f","#16203a", 1},
-        {"S","Spreadsheet","Create a new spreadsheet","#16A34A","#16352a","#102a20", 2},
-        {"P","Presentation","Create a new presentation","#EA580C","#3a2418","#2a1810", 3},
-        {"📁","Open File","Browse and open files","#7C5CFC","#2a2440","#1d1a33", 0},
+        {"W","Document","Create a new document","#2563EB","#21314f","#16203a", 1, kArtDocument},
+        {"S","Spreadsheet","Create a new spreadsheet","#16A34A","#16352a","#102a20", 2, kArtSpreadsheet},
+        {"P","Presentation","Create a new presentation","#EA580C","#3a2418","#2a1810", 3, kArtPresentation},
+        {"📁","Open File","Browse and open files","#7C5CFC","#2a2440","#1d1a33", 0, kArtOpenFile},
     };
     for (const Card& c : cards) {
         auto* card = new ClickableFrame(w);
@@ -293,6 +368,8 @@ QWidget* StartScreen::buildCreateCards() {
         tv->setContentsMargins(16, 16, 16, 16);
         tv->addWidget(badge(c.letter, c.color, 40, thumb), 0, Qt::AlignLeft | Qt::AlignTop);
         tv->addStretch();
+        // Illustration anchored bottom-right of the thumbnail.
+        tv->addWidget(svgArt(c.art, 82, thumb), 0, Qt::AlignRight | Qt::AlignBottom);
         cv->addWidget(thumb);
 
         auto* foot = new QWidget(card);

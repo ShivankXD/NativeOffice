@@ -36,6 +36,15 @@
 #include <QMessageBox>
 #include <QString>
 #include <QCloseEvent>
+#include <QTabWidget>
+#include <QTabBar>
+#include <QToolButton>
+#include <QStackedWidget>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFontDatabase>
+#include <functional>
+#include <thread>
 // Sprint 6: PDF export
 #include <QPdfWriter>
 #include <QPainter>
@@ -73,19 +82,41 @@ static const QString IMPRESS_OPEN_FILTER =
 static const QString PDF_FILTER =
     "PDF Document (*.pdf)";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EditorWindow — common base for the three document windows.
+//
+// Each document is a QMainWindow (with its own menu bar + central module
+// widget). They live as pages inside the main shell's tab bar. requestClose()
+// runs the unsaved-changes prompt and returns false if the user cancelled; it
+// is shared by closeEvent() (window close) and the shell's tab-close handler.
+// ─────────────────────────────────────────────────────────────────────────────
+class EditorWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    using QMainWindow::QMainWindow;
+    virtual bool requestClose() = 0;        // false ⇒ user cancelled, keep open
+    // Used by the shell to build the tab label.
+    virtual QString docKindName()   const = 0;  // "Document"/"Spreadsheet"/"Presentation"
+    virtual QString currentDocPath() const = 0;  // empty while untitled
+    virtual bool    docDirty()      const = 0;
+};
+
 // Forward declarations for free-function helpers
 static class WriterWindow* createWriterWindow(const QString& filePath = {});
 static class CalcWindow*   createCalcWindow(const QString& filePath = {});
 static class ImpressWindow* createImpressWindow(const QString& filePath = {});
 
+// Adds an editor window as a new tab in the main shell (defined after MainShell).
+static void presentEditor(EditorWindow* win);
+
 // ─────────────────────────────────────────────────────────────────────────────
-// WriterWindow — QMainWindow subclass with close-confirmation logic
+// WriterWindow — document window with close-confirmation logic
 // ─────────────────────────────────────────────────────────────────────────────
-class WriterWindow : public QMainWindow {
+class WriterWindow : public EditorWindow {
     Q_OBJECT
 public:
     explicit WriterWindow(QWidget* parent = nullptr)
-        : QMainWindow(parent)
+        : EditorWindow(parent)
     {
         setAttribute(Qt::WA_DeleteOnClose);
         setMinimumSize(960, 640);
@@ -137,8 +168,12 @@ public slots:
         setWindowTitle(m_writer ? m_writer->titleString() : "NativeOffice Writer");
     }
 
-protected:
-    void closeEvent(QCloseEvent* e) override {
+public:
+    QString docKindName()    const override { return QStringLiteral("Document"); }
+    QString currentDocPath() const override { return m_writer ? m_writer->currentFilePath() : QString(); }
+    bool    docDirty()       const override { return m_writer && m_writer->isDirty(); }
+
+    bool requestClose() override {
         if (m_writer && m_writer->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
@@ -149,16 +184,16 @@ protected:
                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
                 QMessageBox::Save);
 
-            if (btn == QMessageBox::Cancel) {
-                e->ignore();
-                return;
-            }
-            if (btn == QMessageBox::Save && !save()) {
-                e->ignore();
-                return;
-            }
+            if (btn == QMessageBox::Cancel)            return false;
+            if (btn == QMessageBox::Save && !save())   return false;
         }
-        e->accept();
+        return true;
+    }
+
+protected:
+    void closeEvent(QCloseEvent* e) override {
+        if (requestClose()) e->accept();
+        else                e->ignore();
     }
 
 private:
@@ -180,11 +215,11 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 // CalcWindow — QMainWindow subclass with close-confirmation logic (Sprint 8)
 // ─────────────────────────────────────────────────────────────────────────────
-class CalcWindow : public QMainWindow {
+class CalcWindow : public EditorWindow {
     Q_OBJECT
 public:
     explicit CalcWindow(QWidget* parent = nullptr)
-        : QMainWindow(parent)
+        : EditorWindow(parent)
     {
         setAttribute(Qt::WA_DeleteOnClose);
         setMinimumSize(960, 640);
@@ -233,8 +268,12 @@ public slots:
         setWindowTitle(m_calc ? m_calc->titleString() : "NativeOffice Calc");
     }
 
-protected:
-    void closeEvent(QCloseEvent* e) override {
+public:
+    QString docKindName()    const override { return QStringLiteral("Spreadsheet"); }
+    QString currentDocPath() const override { return m_calc ? m_calc->currentFilePath() : QString(); }
+    bool    docDirty()       const override { return m_calc && m_calc->isDirty(); }
+
+    bool requestClose() override {
         if (m_calc && m_calc->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
@@ -245,16 +284,16 @@ protected:
                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
                 QMessageBox::Save);
 
-            if (btn == QMessageBox::Cancel) {
-                e->ignore();
-                return;
-            }
-            if (btn == QMessageBox::Save && !save()) {
-                e->ignore();
-                return;
-            }
+            if (btn == QMessageBox::Cancel)            return false;
+            if (btn == QMessageBox::Save && !save())   return false;
         }
-        e->accept();
+        return true;
+    }
+
+protected:
+    void closeEvent(QCloseEvent* e) override {
+        if (requestClose()) e->accept();
+        else                e->ignore();
     }
 
 private:
@@ -275,11 +314,11 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 // ImpressWindow — QMainWindow subclass with close-confirmation logic (Sprint 8)
 // ─────────────────────────────────────────────────────────────────────────────
-class ImpressWindow : public QMainWindow {
+class ImpressWindow : public EditorWindow {
     Q_OBJECT
 public:
     explicit ImpressWindow(QWidget* parent = nullptr)
-        : QMainWindow(parent)
+        : EditorWindow(parent)
     {
         setAttribute(Qt::WA_DeleteOnClose);
         setMinimumSize(1100, 680);
@@ -322,8 +361,12 @@ public slots:
         setWindowTitle(m_impress ? m_impress->titleString() : "NativeOffice Impress");
     }
 
-protected:
-    void closeEvent(QCloseEvent* e) override {
+public:
+    QString docKindName()    const override { return QStringLiteral("Presentation"); }
+    QString currentDocPath() const override { return m_impress ? m_impress->currentFilePath() : QString(); }
+    bool    docDirty()       const override { return m_impress && m_impress->isDirty(); }
+
+    bool requestClose() override {
         if (m_impress && m_impress->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
@@ -334,16 +377,16 @@ protected:
                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
                 QMessageBox::Save);
 
-            if (btn == QMessageBox::Cancel) {
-                e->ignore();
-                return;
-            }
-            if (btn == QMessageBox::Save && !save()) {
-                e->ignore();
-                return;
-            }
+            if (btn == QMessageBox::Cancel)            return false;
+            if (btn == QMessageBox::Save && !save())   return false;
         }
-        e->accept();
+        return true;
+    }
+
+protected:
+    void closeEvent(QCloseEvent* e) override {
+        if (requestClose()) e->accept();
+        else                e->ignore();
     }
 
 private:
@@ -365,6 +408,241 @@ private:
 
     NativeOffice::ImpressModule* m_impress { nullptr };
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ShellTabBar — custom-painted tab bar: a white strip, the first ("Home") tab
+// violet, every other tab white. (Native QTabBar ignores per-tab background, so
+// we paint it ourselves for an exact, style-independent look.)
+// ─────────────────────────────────────────────────────────────────────────────
+class ShellTabBar : public QTabBar {
+    Q_OBJECT
+public:
+    explicit ShellTabBar(QWidget* parent = nullptr) : QTabBar(parent) {
+        setExpanding(false);
+        setDrawBase(false);
+        setTabsClosable(true);
+        setElideMode(Qt::ElideRight);
+        setMovable(false);
+    }
+
+protected:
+    QSize tabSizeHint(int index) const override {
+        QSize s = QTabBar::tabSizeHint(index);
+        s.setHeight(qMax(s.height(), 36));
+        s.setWidth(qMax(s.width() + 24, 110));   // padding + room for close button
+        return s;
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), QColor("#FFFFFF"));      // white strip
+
+        for (int i = 0; i < count(); ++i) {
+            const QRect r   = tabRect(i);
+            const bool home = (i == 0);
+            const bool sel  = (i == currentIndex());
+
+            const QColor bg = home ? QColor(sel ? "#6D28D9" : "#7C3AED")
+                                   : QColor("#FFFFFF");
+            const QColor fg = home ? QColor("#FFFFFF")
+                                   : QColor(sel ? "#6D28D9" : "#2C3140");
+            p.fillRect(r, bg);
+
+            if (!home) {
+                p.setPen(QColor("#E6E8ED"));
+                p.drawLine(r.topRight(), r.bottomRight());
+                if (sel)
+                    p.fillRect(QRect(r.left(), r.bottom() - 2, r.width(), 2),
+                               QColor("#7C3AED"));
+            }
+
+            QFont f = font();
+            f.setBold(home || sel);
+            p.setFont(f);
+            p.setPen(fg);
+            // Leave room on the right for the close button on non-Home tabs.
+            const QRect tr = r.adjusted(14, 0, home ? -14 : -30, 0);
+            p.drawText(tr, Qt::AlignVCenter | Qt::AlignLeft,
+                       fontMetrics().elidedText(tabText(i), Qt::ElideRight, tr.width()));
+        }
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MainShell — single top-level window hosting a WPS-style tab bar.
+//
+// Built from a QTabBar + QStackedWidget (rather than QTabWidget) on a white top
+// strip, so the tab look is fully under our control:
+//   • Tab 0 is the pinned, violet "Home" page (the StartScreen); other tabs are
+//     white. The Home tab cannot be closed.
+//   • Each document opens as its own tab named per type ("Document 1",
+//     "Spreadsheet 1", "Presentation 1", …), switching to the file name on save.
+//   • The "+" button opens a fresh Home page in a new tab; choosing a format
+//     there opens the document as a new tab.
+//   • Closing a document tab runs its unsaved-changes prompt first.
+// ─────────────────────────────────────────────────────────────────────────────
+class MainShell : public QMainWindow {
+    Q_OBJECT
+public:
+    explicit MainShell(QWidget* parent = nullptr)
+        : QMainWindow(parent)
+    {
+        setWindowTitle("NativeOffice");
+        setMinimumSize(1024, 680);
+
+        auto* central = new QWidget(this);
+        central->setObjectName("shellCentral");
+        // Match the home page's dark background — only the tab STRIP is white.
+        // (Painting the whole central white bled through behind the home page.)
+        central->setStyleSheet("#shellCentral { background:#0D1117; }");
+        auto* v = new QVBoxLayout(central);
+        v->setContentsMargins(0, 0, 0, 0);
+        v->setSpacing(0);
+
+        // White top strip: tab bar on the left, "+" right after the last tab.
+        auto* topBar = new QWidget(central);
+        topBar->setObjectName("shellTopBar");
+        topBar->setStyleSheet("#shellTopBar { background:#FFFFFF; }");
+        auto* hb = new QHBoxLayout(topBar);
+        hb->setContentsMargins(0, 0, 0, 0);
+        hb->setSpacing(0);
+
+        m_bar = new ShellTabBar(topBar);
+
+        auto* plus = new QToolButton(topBar);
+        plus->setText("+");
+        plus->setAutoRaise(true);
+        plus->setToolTip("New tab — open Home");
+        plus->setCursor(Qt::PointingHandCursor);
+        plus->setFixedHeight(36);
+        plus->setStyleSheet(
+            "QToolButton { font-size:20px; font-weight:600; color:#6D28D9;"
+            "  background:#FFFFFF; padding:0 16px; border:none; }"
+            "QToolButton:hover { color:#7C3AED; background:#F3F0FB; }");
+        connect(plus, &QToolButton::clicked, this, [this]() { openHomeTab(); });
+
+        hb->addWidget(m_bar, 0);
+        hb->addWidget(plus, 0);
+        hb->addStretch(1);             // white fill to the right of the "+"
+
+        m_stack = new QStackedWidget(central);
+
+        v->addWidget(topBar, 0);
+        v->addWidget(m_stack, 1);
+        setCentralWidget(central);
+
+        connect(m_bar, &QTabBar::currentChanged,
+                m_stack, &QStackedWidget::setCurrentIndex);
+        connect(m_bar, &QTabBar::tabCloseRequested,
+                this, &MainShell::handleTabClose);
+    }
+
+    // Factory used to spin up additional Home pages (wired to the controller).
+    void setHomeFactory(std::function<QWidget*()> f) { m_homeFactory = std::move(f); }
+
+    // Install the Home page (StartScreen) as the pinned first tab.
+    void setHomePage(QWidget* home) {
+        const int idx = addPage(home, "Home");
+        // Home cannot be closed: drop its close button.
+        m_bar->setTabButton(idx, QTabBar::RightSide, nullptr);
+        m_bar->setTabButton(idx, QTabBar::LeftSide,  nullptr);
+        m_bar->setCurrentIndex(idx);
+    }
+
+    // Open a fresh Home page in a new tab (the "+" action).
+    void openHomeTab() {
+        if (!m_homeFactory) { m_bar->setCurrentIndex(0); return; }
+        addPage(m_homeFactory(), "Home");
+    }
+
+    // Add a document window as a new tab beside the others and focus it.
+    void addEditorTab(EditorWindow* win) {
+        // The shell owns lifetime now; cancel the per-window self-delete.
+        win->setAttribute(Qt::WA_DeleteOnClose, false);
+        win->setWindowFlags(Qt::Widget);   // behave as a plain child widget
+
+        // Assign a per-type sequential name ("Document 1", "Spreadsheet 1", …).
+        const QString kind = win->docKindName();
+        int n = 0;
+        if      (kind == QLatin1String("Spreadsheet"))  n = ++m_nSheet;
+        else if (kind == QLatin1String("Presentation")) n = ++m_nPres;
+        else                                             n = ++m_nDoc;
+        win->setProperty("autoName", QStringLiteral("%1 %2").arg(kind).arg(n));
+
+        addPage(win, labelFor(win));
+
+        // Keep the tab label in sync with the document's save/dirty state.
+        connect(win, &QWidget::windowTitleChanged, this, [this, win](const QString&) {
+            const int i = m_stack->indexOf(win);
+            if (i >= 0) m_bar->setTabText(i, labelFor(win));
+        });
+    }
+
+protected:
+    void closeEvent(QCloseEvent* e) override {
+        // Prompt for every dirty document before the whole app exits.
+        for (int i = m_stack->count() - 1; i >= 0; --i) {
+            auto* win = qobject_cast<EditorWindow*>(m_stack->widget(i));
+            if (win && !win->requestClose()) { e->ignore(); return; }
+        }
+        e->accept();
+    }
+
+private:
+    // Append a page: add the tab and the matching stacked widget (1:1 indices),
+    // then focus it.
+    int addPage(QWidget* page, const QString& label) {
+        const int idx = m_bar->addTab(label);
+        m_stack->insertWidget(idx, page);
+        m_bar->setCurrentIndex(idx);
+        m_stack->setCurrentIndex(idx);
+        return idx;
+    }
+
+    // Tab label: the auto-assigned name while untitled ("Document 1"), or the
+    // file name once saved, prefixed "* " when a saved file has unsaved edits.
+    QString labelFor(EditorWindow* win) const {
+        const QString path = win->currentDocPath();
+        if (path.isEmpty()) {
+            QString base = win->property("autoName").toString();
+            if (base.isEmpty()) base = win->docKindName();
+            return elide(base);
+        }
+        return (win->docDirty() ? QStringLiteral("* ") : QString())
+               + elide(QFileInfo(path).fileName());
+    }
+
+    static QString elide(QString s) {
+        if (s.size() > 26) s = s.left(25) + QChar(0x2026);
+        return s;
+    }
+
+    void handleTabClose(int idx) {
+        if (idx == 0) return;                      // Home is pinned
+        QWidget* w = m_stack->widget(idx);
+        if (!w) return;
+        auto* win = qobject_cast<EditorWindow*>(w);
+        if (win && !win->requestClose()) return;   // user cancelled
+        m_bar->removeTab(idx);
+        m_stack->removeWidget(w);
+        w->deleteLater();
+    }
+
+    ShellTabBar*               m_bar   { nullptr };
+    QStackedWidget*            m_stack { nullptr };
+    std::function<QWidget*()>  m_homeFactory;
+    int m_nDoc   { 0 };
+    int m_nSheet { 0 };
+    int m_nPres  { 0 };
+};
+
+// The single shell instance; document windows route their tabs through it.
+static MainShell* g_shell = nullptr;
+
+static void presentEditor(EditorWindow* win) {
+    if (g_shell) g_shell->addEditorTab(win);
+    else         win->show();   // fallback (should not happen in normal flow)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sprint 6: Writer PDF export helper
@@ -482,7 +760,7 @@ QMenuBar::item:pressed  { background-color: #E0EFE6; color: #0E6F3A; }
 
     // ── Wire actions ──────────────────────────────────────────────────────
     QObject::connect(actNew, &QAction::triggered, win, []() {
-        createWriterWindow()->show();
+        presentEditor(createWriterWindow());
     });
 
     QObject::connect(actOpen, &QAction::triggered, win, [win]() {
@@ -490,10 +768,8 @@ QMenuBar::item:pressed  { background-color: #E0EFE6; color: #0E6F3A; }
             win, "Open Document",
             QDir::homePath(),
             WRITER_OPEN_FILTER);
-        if (!path.isEmpty()) {
-            auto* newWin = createWriterWindow(path);
-            newWin->show();
-        }
+        if (!path.isEmpty())
+            presentEditor(createWriterWindow(path));
     });
 
     QObject::connect(actSave,      &QAction::triggered, win, [win]() { win->save();   });
@@ -580,16 +856,15 @@ QMenuBar::item:pressed  { background-color: #E0EFE6; color: #0E6F3A; }
 
     // ── Wire actions ──────────────────────────────────────────────────────
     QObject::connect(actNew, &QAction::triggered, win, []() {
-        createCalcWindow()->show();
+        presentEditor(createCalcWindow());
     });
     QObject::connect(actOpen, &QAction::triggered, win, [win]() {
         const QString path = QFileDialog::getOpenFileName(
             win, "Open Spreadsheet",
             QDir::homePath(),
             CALC_FILTER);
-        if (!path.isEmpty()) {
-            createCalcWindow(path)->show();
-        }
+        if (!path.isEmpty())
+            presentEditor(createCalcWindow(path));
     });
     QObject::connect(actSave,   &QAction::triggered, win, [win]() { win->save();   });
     QObject::connect(actSaveAs, &QAction::triggered, win, [win]() { win->saveAs(); });
@@ -696,7 +971,7 @@ QMenuBar::item:pressed {
 
     // ── Wire actions ──────────────────────────────────────────────────────
     QObject::connect(actNew, &QAction::triggered, win, []() {
-        createImpressWindow()->show();
+        presentEditor(createImpressWindow());
     });
     QObject::connect(actOpen, &QAction::triggered, win, [win]() {
         const QString path = QFileDialog::getOpenFileName(
@@ -715,7 +990,7 @@ QMenuBar::item:pressed {
             else
                 QMessageBox::critical(win, "Open Failed", "Could not read:\n" + path);
         } else {
-            createImpressWindow(path)->show();
+            presentEditor(createImpressWindow(path));
         }
     });
     QObject::connect(actSave,      &QAction::triggered, win, [win]() { win->save();   });
@@ -794,15 +1069,15 @@ static void openDocumentByPath(const QString& path) {
 
     switch (fileType) {
     case DetectedFileType::SpreadsheetData:
-        createCalcWindow(path)->show();
+        presentEditor(createCalcWindow(path));
         break;
     case DetectedFileType::PresentationData:
-        createImpressWindow(path)->show();
+        presentEditor(createImpressWindow(path));
         break;
     case DetectedFileType::WriterDocument:
     default:
         // createWriterWindow already calls addFile(path, "Writer") on success
-        createWriterWindow(path)->show();
+        presentEditor(createWriterWindow(path));
         break;
     }
 }
@@ -823,6 +1098,16 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
+    // ── Warm Qt's font cache in the background ──────────────────────────────
+    // The first document window builds a font picker; on font-heavy machines the
+    // cold enumeration of installed fonts can stall for several seconds. Kicking
+    // it off now (while the splash + home screen are on screen) means the cache
+    // is already warm by the time the user opens a document, so it appears fast.
+    // Joined after exec() so it never touches Qt during application teardown.
+    std::thread fontWarmup([] {
+        QFontDatabase::families();   // read-only; builds the shared font cache
+    });
+
     // ── Global theme ───────────────────────────────────────────────────────
     auto& theme = NativeOffice::ThemeManager::instance();
     app.setStyleSheet(theme.applicationStyleSheet());
@@ -830,41 +1115,37 @@ int main(int argc, char* argv[]) {
     // ── App controller ─────────────────────────────────────────────────────
     NativeOffice::AppController controller;
 
-    // ── Start screen window ────────────────────────────────────────────────
-    QMainWindow startWindow;
-    startWindow.setWindowTitle("NativeOffice");
-    startWindow.setMinimumSize(1024, 680);
+    // ── Main shell window (WPS-style tabbed workflow) ──────────────────────
+    MainShell shell;
+    g_shell = &shell;
 
     const QScreen* screen = QApplication::primaryScreen();
-    startWindow.resize(1480, 900);
-    startWindow.move(screen->availableGeometry().center()
-                     - startWindow.rect().center());
+    shell.resize(1480, 900);
+    shell.move(screen->availableGeometry().center() - shell.rect().center());
 
-    auto* startScreen = new NativeOffice::StartScreen(&controller);
-    startWindow.setCentralWidget(startScreen);
+    // Factory for Home pages (StartScreen wired to the controller). Used for the
+    // pinned first tab and for every extra Home page opened via the "+" button.
+    auto makeHome = [&controller]() -> QWidget* {
+        auto* s = new NativeOffice::StartScreen(&controller);
+        QObject::connect(s, &NativeOffice::StartScreen::newDocumentRequested,
+                         &controller, &NativeOffice::AppController::newDocument);
+        QObject::connect(s, &NativeOffice::StartScreen::fileOpenRequested,
+                         &controller, &NativeOffice::AppController::openFile);
+        QObject::connect(s, &NativeOffice::StartScreen::settingsRequested,
+                         &controller, &NativeOffice::AppController::openSettings);
+        return s;
+    };
+    shell.setHomeFactory(makeHome);
+    shell.setHomePage(makeHome());   // pinned first tab
 
-    // ── Start Screen → AppController ──────────────────────────────────────
-    QObject::connect(startScreen, &NativeOffice::StartScreen::newDocumentRequested,
-                     &controller,  &NativeOffice::AppController::newDocument);
-    QObject::connect(startScreen, &NativeOffice::StartScreen::fileOpenRequested,
-                     &controller,  &NativeOffice::AppController::openFile);
-    QObject::connect(startScreen, &NativeOffice::StartScreen::settingsRequested,
-                     &controller,  &NativeOffice::AppController::openSettings);
-
-    // ── AppController → editor windows ────────────────────────────────────
+    // ── AppController → open new documents / files as tabs ────────────────
     QObject::connect(&controller, &NativeOffice::AppController::newDocumentRequested,
                      &app, [](NativeOffice::DocumentType type) {
         using NativeOffice::DocumentType;
         switch (type) {
-        case DocumentType::Writer:
-            createWriterWindow()->show();
-            break;
-        case DocumentType::Calc:
-            createCalcWindow()->show();
-            break;
-        case DocumentType::Impress:
-            createImpressWindow()->show();
-            break;
+        case DocumentType::Writer:  presentEditor(createWriterWindow());  break;
+        case DocumentType::Calc:    presentEditor(createCalcWindow());    break;
+        case DocumentType::Impress: presentEditor(createImpressWindow()); break;
         }
     });
 
@@ -874,7 +1155,8 @@ int main(int argc, char* argv[]) {
     });
 
     // ── Open any document passed on the command line (file association /
-    //    double-click-to-open). Each existing path is routed by content type.
+    //    double-click-to-open). Each existing path is routed by content type
+    //    and opens as a tab inside the shell.
     const QStringList cliArgs = app.arguments();
     bool openedFromCli = false;
     for (int i = 1; i < cliArgs.size(); ++i) {
@@ -885,22 +1167,27 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // When launched to open a specific document, go straight to it (no splash
-    // or home screen). Otherwise show the WPS-style startup splash, then bring
-    // up the home screen once it finishes.
-    NativeOffice::SplashScreen* splash = nullptr;
-    if (!openedFromCli) {
-        splash = new NativeOffice::SplashScreen;
+    // When launched to open a specific document, go straight to its tab (no
+    // splash). Otherwise show the WPS-style startup splash, then reveal the
+    // shell on the Home tab once it finishes.
+    if (openedFromCli) {
+        shell.show();
+        shell.raise();
+        shell.activateWindow();
+    } else {
+        auto* splash = new NativeOffice::SplashScreen;
         QObject::connect(splash, &NativeOffice::SplashScreen::finished,
-                         &startWindow, [&startWindow]() {
-            startWindow.show();
-            startWindow.raise();
-            startWindow.activateWindow();
+                         &shell, [&shell]() {
+            shell.show();
+            shell.raise();
+            shell.activateWindow();
         });
         splash->start(2200);
     }
 
-    return app.exec();
+    const int rc = app.exec();
+    if (fontWarmup.joinable()) fontWarmup.join();
+    return rc;
 }
 
 #include "main.moc"
