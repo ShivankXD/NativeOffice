@@ -13,6 +13,7 @@
 // Sprint 3: .noff file format, WriterWindow, RecentFilesManager
 // ─────────────────────────────────────────────────────────────────────────────
 #include "startscreen/StartScreen.h"
+#include "startscreen/SplashScreen.h"
 #include "core/theme/ThemeManager.h"
 #include "core/application/AppController.h"
 #include "core/application/RecentFilesManager.h"
@@ -872,15 +873,31 @@ int main(int argc, char* argv[]) {
         openDocumentByPath(path);
     });
 
-    startWindow.show();
-
     // ── Open any document passed on the command line (file association /
     //    double-click-to-open). Each existing path is routed by content type.
     const QStringList cliArgs = app.arguments();
+    bool openedFromCli = false;
     for (int i = 1; i < cliArgs.size(); ++i) {
         const QString path = cliArgs.at(i);
-        if (QFileInfo::exists(path))
+        if (QFileInfo::exists(path)) {
             openDocumentByPath(path);
+            openedFromCli = true;
+        }
+    }
+
+    // When launched to open a specific document, go straight to it (no splash
+    // or home screen). Otherwise show the WPS-style startup splash, then bring
+    // up the home screen once it finishes.
+    NativeOffice::SplashScreen* splash = nullptr;
+    if (!openedFromCli) {
+        splash = new NativeOffice::SplashScreen;
+        QObject::connect(splash, &NativeOffice::SplashScreen::finished,
+                         &startWindow, [&startWindow]() {
+            startWindow.show();
+            startWindow.raise();
+            startWindow.activateWindow();
+        });
+        splash->start(2200);
     }
 
     return app.exec();

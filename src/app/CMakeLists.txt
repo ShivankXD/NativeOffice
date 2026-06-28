@@ -8,6 +8,8 @@ qt_add_executable(NativeOffice
     startscreen/TemplateBarWidget.h
     startscreen/RecentFilesWidget.cpp
     startscreen/RecentFilesWidget.h
+    startscreen/SplashScreen.cpp
+    startscreen/SplashScreen.h
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
 
