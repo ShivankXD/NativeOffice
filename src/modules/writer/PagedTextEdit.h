@@ -44,6 +44,9 @@ public:
 
     [[nodiscard]] int  pageCountValue() const;
 
+    // 1-based page number the text cursor is currently on (1 in web layout).
+    [[nodiscard]] int  currentPageNumber() const;
+
     // ── Headers & footers (drawn per page in the margins) ───────────────────
     // Each is 3 zones: left, center, right. Fields {n} {N} {date} {file} expand.
     void setHeaderFooter(const QStringList& header, const QStringList& footer,
@@ -56,6 +59,7 @@ public:
     // ── Spell check ─────────────────────────────────────────────────────────
     void setSpellCheckEnabled(bool on);
     [[nodiscard]] bool spellCheckEnabled() const;
+    void rehighlightSpelling();   // refresh squiggles after dictionary changes
 
     // ── AutoCorrect ─────────────────────────────────────────────────────────
     void setAutoCorrectEnabled(bool on) { m_autoCorrectEnabled = on; }
@@ -78,6 +82,12 @@ public:
     void acceptAllChanges();    // keep insertions, drop deletions
     void rejectAllChanges();    // drop insertions, restore deletions
 
+    // Per-change review (Word parity): the contiguous tracked run at `pos`
+    // (start/end/isDeletion), or start=-1 when the position isn't tracked.
+    struct TrackedRun { int start = -1; int end = -1; bool deletion = false; };
+    [[nodiscard]] TrackedRun trackedRunAt(int pos) const;
+    void resolveTrackedRun(const TrackedRun& run, bool accept);
+
 signals:
     void imageSelectionChanged(bool hasImage);
 
@@ -90,6 +100,11 @@ protected:
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
 
+    // Clipboard-paste and drag-drop of images (Word/WPS parity): raw image data
+    // and local image files are embedded as base64 PNG scaled to the text width.
+    bool canInsertFromMimeData(const QMimeData* source) const override;
+    void insertFromMimeData(const QMimeData* source) override;
+
 public:
     // Image actions (used by the context menu and could be wired to a ribbon).
     bool hasImageSelected() const { return m_imagePos >= 0; }
@@ -100,6 +115,8 @@ public:
 
 private:
     void syncHeight();
+    bool insertMimeImage(const QMimeData* source);   // true if an image was embedded
+    void embedImage(QImage img);
     QTextImageFormat selectedImageFormat() const;
     QRect  selectedImageRect() const;           // viewport coords
     int    handleAt(const QPoint& p) const;      // -1 none, 0..7 handles

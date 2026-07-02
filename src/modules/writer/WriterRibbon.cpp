@@ -10,6 +10,7 @@
 #include "WriterAi.h"
 #include "WriterCollab.h"
 #include "PagedTextEdit.h"
+#include "SpellChecker.h"
 #include "DocxIo.h"
 #include <QTextDocumentFragment>
 #include "core/theme/ThemeManager.h"
@@ -66,6 +67,8 @@
 #include <QPrintDialog>
 #include <QPrintPreviewDialog>
 #include <memory>
+#include <functional>
+#include <QListWidget>
 #include <QDateTime>
 #include <QImage>
 #include <QBuffer>
@@ -1206,13 +1209,59 @@ void WriterRibbon::attachEditor(QTextEdit* editor) {
         m_editor->viewport()->unsetCursor();
     });
 
-    // Ctrl+F → Find & Replace (QTextEdit has no default binding for it).
-    auto* find = new QShortcut(QKeySequence::Find, m_editor);
-    connect(find, &QShortcut::activated, this, &WriterRibbon::openFindReplace);
+    // ── Word/WPS-standard keyboard shortcuts ────────────────────────────────
+    // Scoped to the editor (WidgetWithChildrenShortcut) so multiple Writer tabs
+    // in one window never produce ambiguous-shortcut conflicts.
+    auto addSc = [this](const QKeySequence& seq, std::function<void()> fn) {
+        auto* sc = new QShortcut(seq, m_editor);
+        sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(sc, &QShortcut::activated, this, std::move(fn));
+    };
 
-    // Ctrl+P → Print.
-    auto* print = new QShortcut(QKeySequence::Print, m_editor);
-    connect(print, &QShortcut::activated, this, &WriterRibbon::printDocument);
+    // Find / Replace / Print
+    addSc(QKeySequence::Find,    [this]{ openFindReplace(); });
+    addSc(QKeySequence::Replace, [this]{ openFindReplace(); });
+    addSc(QKeySequence::Print,   [this]{ printDocument(); });
+
+    // Character formatting (the buttons already own the merge logic and stay
+    // visually in sync via their toggled/clicked handlers).
+    addSc(QKeySequence::Bold,      [this]{ if (m_btnBold)      m_btnBold->click(); });
+    addSc(QKeySequence::Italic,    [this]{ if (m_btnItalic)    m_btnItalic->click(); });
+    addSc(QKeySequence::Underline, [this]{ if (m_btnUnderline) m_btnUnderline->click(); });
+    addSc(QKeySequence("Ctrl+="),       [this]{ if (m_btnSub)   m_btnSub->click(); });
+    addSc(QKeySequence("Ctrl+Shift+="), [this]{ if (m_btnSuper) m_btnSuper->click(); });
+    addSc(QKeySequence("Ctrl+Shift+."), [this]{ adjustFontSize(+1); });   // Ctrl+Shift+>
+    addSc(QKeySequence("Ctrl+Shift+,"), [this]{ adjustFontSize(-1); });   // Ctrl+Shift+<
+    addSc(QKeySequence("Ctrl+]"),       [this]{ adjustFontSize(+1); });
+    addSc(QKeySequence("Ctrl+["),       [this]{ adjustFontSize(-1); });
+    addSc(QKeySequence("Ctrl+Space"),   [this]{ clearFormatting(); });
+    addSc(QKeySequence("Shift+F3"),     [this]{
+        applyChangeCase(m_caseCycle);                 // 0 UPPER → 1 lower → 2 Title
+        m_caseCycle = (m_caseCycle + 1) % 3;
+    });
+
+    // Paragraph formatting
+    addSc(QKeySequence("Ctrl+L"), [this]{ setAlignment(Qt::AlignLeft); });
+    addSc(QKeySequence("Ctrl+E"), [this]{ setAlignment(Qt::AlignHCenter); });
+    addSc(QKeySequence("Ctrl+R"), [this]{ setAlignment(Qt::AlignRight); });
+    addSc(QKeySequence("Ctrl+J"), [this]{ setAlignment(Qt::AlignJustify); });
+    addSc(QKeySequence("Ctrl+1"), [this]{ applyLineSpacing(1.0); });
+    addSc(QKeySequence("Ctrl+5"), [this]{ applyLineSpacing(1.5); });
+    addSc(QKeySequence("Ctrl+2"), [this]{ applyLineSpacing(2.0); });
+    addSc(QKeySequence("Ctrl+M"),        [this]{ changeIndent(+1); });
+    addSc(QKeySequence("Ctrl+Shift+M"),  [this]{ changeIndent(-1); });
+    addSc(QKeySequence("Ctrl+Shift+L"),  [this]{ applyBullets(QTextListFormat::ListDisc); });
+
+    // Styles
+    addSc(QKeySequence("Ctrl+Shift+N"), [this]{ applyParagraphStyle(WriterStyle::Normal); });
+    addSc(QKeySequence("Ctrl+Alt+1"),   [this]{ applyParagraphStyle(WriterStyle::Heading1); });
+    addSc(QKeySequence("Ctrl+Alt+2"),   [this]{ applyParagraphStyle(WriterStyle::Heading2); });
+    addSc(QKeySequence("Ctrl+Alt+3"),   [this]{ applyParagraphStyle(WriterStyle::Heading3); });
+
+    // Insert / tools
+    addSc(QKeySequence("Ctrl+K"),      [this]{ insertHyperlink(); });
+    addSc(QKeySequence("Ctrl+Return"), [this]{ insertPageBreak(); });
+    addSc(QKeySequence("F7"),          [this]{ showSpellingDialog(); });
 
     syncToCurrentFormat();
 }
@@ -1889,6 +1938,58 @@ QWidget* WriterRibbon::buildInsertTab() {
         }
         auto* wa = new QWidgetAction(menu); wa->setDefaultWidget(grid);
         menu->addAction(wa);
+        menu->addSeparator();
+        // Full character map, grouped by category (Word's "More Symbols…").
+        menu->addAction(insSymbolIcon(), "More Symbols…", this, [this] {
+            QDialog dlg(window());
+            dlg.setWindowTitle("Symbols");
+            dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+            dlg.resize(520, 440);
+            auto* root = new QVBoxLayout(&dlg);
+            auto* combo = new QComboBox(&dlg);
+            auto* scroll = new QScrollArea(&dlg);
+            scroll->setWidgetResizable(true);
+            root->addWidget(combo);
+            root->addWidget(scroll, 1);
+
+            struct Range { const char* name; uint from, to; };
+            const Range ranges[] = {
+                { "Latin & Punctuation",  0x00A1, 0x00FF },
+                { "Greek",                0x0391, 0x03C9 },
+                { "Currency",             0x20A0, 0x20BF },
+                { "Arrows",               0x2190, 0x21FF },
+                { "Mathematical",         0x2200, 0x22FF },
+                { "Geometric Shapes",     0x25A0, 0x25FF },
+                { "Miscellaneous",        0x2600, 0x26FF },
+                { "Dingbats",             0x2700, 0x27BF },
+                { "Box Drawing",          0x2500, 0x257F },
+                { "Superscript/Subscript",0x2070, 0x209C },
+            };
+            for (const auto& r : ranges) combo->addItem(r.name);
+
+            auto rebuild = [this, scroll, &ranges, &dlg](int idx) {
+                auto* grid2 = new QWidget(scroll);
+                auto* g2 = new QGridLayout(grid2);
+                g2->setContentsMargins(6, 6, 6, 6); g2->setSpacing(2);
+                int n = 0;
+                for (uint cp = ranges[idx].from; cp <= ranges[idx].to; ++cp) {
+                    const QString s = QString::fromUcs4(reinterpret_cast<const char32_t*>(&cp), 1);
+                    auto* b = new QToolButton(grid2);
+                    b->setText(s);
+                    b->setFixedSize(34, 34);
+                    b->setCursor(Qt::PointingHandCursor);
+                    b->setFont(QFont("Segoe UI", 13));
+                    b->setToolTip(QString("U+%1").arg(cp, 4, 16, QChar('0')).toUpper());
+                    connect(b, &QToolButton::clicked, this, [this, s] { insertSymbolText(s); });
+                    g2->addWidget(b, n / 10, n % 10); ++n;
+                }
+                scroll->setWidget(grid2);
+                Q_UNUSED(dlg);
+            };
+            connect(combo, &QComboBox::currentIndexChanged, &dlg, rebuild);
+            rebuild(0);
+            dlg.exec();
+        });
         btnSymbol->setMenu(menu);
     }
 
@@ -2333,16 +2434,31 @@ QWidget* WriterRibbon::buildPageLayoutTab() {
         auto* m = new QMenu(btnSize);
         struct S { const char* name; double w, h; };
         const S ss[] = {
+            { "A3  (29.7 × 42 cm)",    1123, 1587 },
             { "A4  (21 × 29.7 cm)",    794, 1123 },
             { "A5  (14.8 × 21 cm)",    559, 794 },
+            { "A6  (10.5 × 14.8 cm)",  397, 559 },
+            { "B5  (17.6 × 25 cm)",    665, 944 },
             { "Letter  (8.5 × 11 in)", 816, 1056 },
             { "Legal  (8.5 × 14 in)",  816, 1344 },
+            { "Executive  (7.25 × 10.5 in)", 696, 1008 },
             { "Tabloid  (11 × 17 in)", 1056, 1632 },
         };
         for (const auto& s : ss) {
             const double w = s.w, h = s.h;
             m->addAction(pageSizeIcon(), s.name, this, [this, w, h] { emit pageSizeRequested(w, h); });
         }
+        m->addSeparator();
+        m->addAction(pageSizeIcon(), "Custom Size…", this, [this] {
+            bool ok = false;
+            const double wcm = QInputDialog::getDouble(window(), "Custom Page Size",
+                                   "Width (cm):", 21.0, 5.0, 120.0, 1, &ok);
+            if (!ok) return;
+            const double hcm = QInputDialog::getDouble(window(), "Custom Page Size",
+                                   "Height (cm):", 29.7, 5.0, 120.0, 1, &ok);
+            if (!ok) return;
+            emit pageSizeRequested(wcm / 2.54 * 96.0, hcm / 2.54 * 96.0);
+        });
         btnSize->setMenu(m);
     }
 
@@ -3222,12 +3338,145 @@ void WriterRibbon::showWordCountDialog() {
 }
 
 void WriterRibbon::showSpellingDialog() {
-    QMessageBox box(window());
-    box.setWindowTitle("Spelling & Grammar");
-    box.setIcon(QMessageBox::Information);
-    box.setStyleSheet(ThemeManager::inputDialogStyleSheet());
-    box.setText("Spelling and grammar check complete.\nNo issues were found.");
-    box.exec();
+    if (!m_editor) return;
+    auto* sc = SpellChecker::instance();
+    sc->ensureLoaded();
+    auto* paper = qobject_cast<PagedTextEdit*>(m_editor);
+
+    QDialog dlg(window());
+    dlg.setWindowTitle("Spelling & Grammar");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    dlg.setMinimumWidth(420);
+
+    auto* root = new QVBoxLayout(&dlg);
+    auto* lblWord = new QLabel(&dlg);
+    lblWord->setTextFormat(Qt::RichText);
+    auto* sugTitle = new QLabel("Suggestions:", &dlg);
+    auto* sugList = new QListWidget(&dlg);
+    sugList->setMinimumHeight(140);
+    root->addWidget(lblWord);
+    root->addWidget(sugTitle);
+    root->addWidget(sugList);
+
+    auto* btnRow = new QHBoxLayout;
+    auto* btnIgnore    = new QPushButton("Ignore", &dlg);
+    auto* btnIgnoreAll = new QPushButton("Ignore All", &dlg);
+    auto* btnAdd       = new QPushButton("Add", &dlg);
+    auto* btnChange    = new QPushButton("Change", &dlg);
+    auto* btnChangeAll = new QPushButton("Change All", &dlg);
+    auto* btnClose     = new QPushButton("Close", &dlg);
+    for (auto* b : { btnIgnore, btnIgnoreAll, btnAdd, btnChange, btnChangeAll, btnClose })
+        btnRow->addWidget(b);
+    root->addLayout(btnRow);
+
+    static const QRegularExpression wordRe("[A-Za-z][A-Za-z']*");
+    int searchPos = 0;          // plain-text offset to resume scanning from
+    QString curWord;
+    int curStart = -1;
+
+    auto selectRange = [this](int start, int len) {
+        QTextCursor c(m_editor->document());
+        c.setPosition(start);
+        c.setPosition(start + len, QTextCursor::KeepAnchor);
+        m_editor->setTextCursor(c);
+    };
+
+    auto finish = [&dlg, this] {
+        QMessageBox done(window());
+        done.setWindowTitle("Spelling & Grammar");
+        done.setIcon(QMessageBox::Information);
+        done.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+        done.setText("Spelling check complete.");
+        done.exec();
+        dlg.accept();
+    };
+
+    // Advance to the next misspelling from searchPos; false when none remain.
+    auto findNext = [&]() -> bool {
+        const QString text = m_editor->toPlainText();
+        auto it = wordRe.globalMatch(text, searchPos);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            QString w = m.captured(0);
+            while (w.endsWith('\'')) w.chop(1);       // trailing apostrophes
+            if (w.size() < 2 || sc->isCorrect(w)) continue;
+            curWord  = w;
+            curStart = m.capturedStart();
+            searchPos = m.capturedStart() + w.size();
+            selectRange(curStart, w.size());
+            lblWord->setText(QString("Not in dictionary:  <b style='color:#C0271C'>%1</b>")
+                                 .arg(w.toHtmlEscaped()));
+            sugList->clear();
+            const QStringList sugg = sc->suggestions(w);
+            if (sugg.isEmpty()) {
+                auto* none = new QListWidgetItem("(no suggestions)", sugList);
+                none->setFlags(none->flags() & ~Qt::ItemIsEnabled);
+            } else {
+                sugList->addItems(sugg);
+                sugList->setCurrentRow(0);
+            }
+            return true;
+        }
+        return false;
+    };
+
+    auto next = [&]{ if (!findNext()) finish(); };
+
+    connect(btnIgnore, &QPushButton::clicked, &dlg, [&]{ next(); });
+    connect(btnIgnoreAll, &QPushButton::clicked, &dlg, [&]{
+        sc->ignoreWord(curWord);
+        if (paper) paper->rehighlightSpelling();
+        next();
+    });
+    connect(btnAdd, &QPushButton::clicked, &dlg, [&]{
+        sc->addToDictionary(curWord);
+        if (paper) paper->rehighlightSpelling();
+        next();
+    });
+    connect(btnChange, &QPushButton::clicked, &dlg, [&]{
+        auto* item = sugList->currentItem();
+        if (!item || !(item->flags() & Qt::ItemIsEnabled)) { next(); return; }
+        const QString repl = item->text();
+        selectRange(curStart, curWord.size());
+        m_editor->textCursor().insertText(repl);
+        searchPos = curStart + repl.size();
+        next();
+    });
+    connect(btnChangeAll, &QPushButton::clicked, &dlg, [&]{
+        auto* item = sugList->currentItem();
+        if (!item || !(item->flags() & Qt::ItemIsEnabled)) { next(); return; }
+        const QString repl = item->text();
+        QTextDocument* doc = m_editor->document();
+        QTextCursor edit(doc);
+        edit.beginEditBlock();
+        QTextCursor found = doc->find(curWord, curStart,
+                                      QTextDocument::FindWholeWords
+                                      | QTextDocument::FindCaseSensitively);
+        int lastEnd = curStart;
+        while (!found.isNull()) {
+            lastEnd = found.selectionStart() + repl.size();
+            found.insertText(repl);
+            found = doc->find(curWord, found,
+                              QTextDocument::FindWholeWords
+                              | QTextDocument::FindCaseSensitively);
+        }
+        edit.endEditBlock();
+        searchPos = lastEnd;
+        next();
+    });
+    connect(btnClose, &QPushButton::clicked, &dlg, &QDialog::reject);
+    connect(sugList, &QListWidget::itemDoubleClicked, btnChange, &QPushButton::click);
+
+    if (!findNext()) {
+        QMessageBox box(window());
+        box.setWindowTitle("Spelling & Grammar");
+        box.setIcon(QMessageBox::Information);
+        box.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+        box.setText("Spelling check complete.\nNo issues were found.");
+        box.exec();
+        return;
+    }
+    dlg.exec();
 }
 
 void WriterRibbon::showAutoCorrectOptions() {

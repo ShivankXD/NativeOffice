@@ -24,6 +24,7 @@
 #include <QSvgRenderer>
 #include <QPainter>
 #include <QPixmap>
+#include <QTime>
 #include <functional>
 #include <utility>
 
@@ -39,7 +40,9 @@ public:
 protected:
     void enterEvent(QEnterEvent*) override { if (onClick) setCursor(Qt::PointingHandCursor); }
     void mousePressEvent(QMouseEvent* e) override {
-        if (e->button() == Qt::LeftButton && onClick) onClick();
+        // Consume the click when handled, so it doesn't bubble to a clickable
+        // ancestor (e.g. a template card inside the clickable templates panel).
+        if (e->button() == Qt::LeftButton && onClick) { onClick(); e->accept(); return; }
         QFrame::mousePressEvent(e);
     }
 };
@@ -309,7 +312,12 @@ QWidget* StartScreen::buildCenterColumn() {
     auto* wl = new QHBoxLayout(welcome);
     wl->setContentsMargins(0, 0, 0, 0); wl->setSpacing(8);
     auto* wcol = new QVBoxLayout(); wcol->setSpacing(4);
-    wcol->addWidget(heading("Welcome back, Shivank 👋", 26, "#F0F2F7", true, welcome));
+    const int hr = QTime::currentTime().hour();
+    const QString greet = hr < 5  ? "Burning the midnight oil, Shivank 🌙"
+                        : hr < 12 ? "Good morning, Shivank ☀️"
+                        : hr < 17 ? "Good afternoon, Shivank 👋"
+                                  : "Good evening, Shivank 🌆";
+    wcol->addWidget(heading(greet, 26, "#F0F2F7", true, welcome));
     wcol->addWidget(heading("What would you like to create today?", 14, "#8A93A6", false, welcome));
     wl->addLayout(wcol); wl->addStretch();
     auto* importBtn = new QPushButton("⤒  Import File", welcome);
@@ -446,7 +454,12 @@ QWidget* StartScreen::buildRecentPanel() {
     auto* head = new QHBoxLayout();
     head->addWidget(heading("Recent Files", 15, "#EAEDF3", true, panel));
     head->addStretch();
-    head->addWidget(heading("View all", 12, "#3B82F6", false, panel));
+    auto* browse = new ClickableFrame(panel);
+    auto* bl = new QHBoxLayout(browse);
+    bl->setContentsMargins(0, 0, 0, 0);
+    bl->addWidget(heading("Browse…", 12, "#3B82F6", false, browse));
+    browse->onClick = [this]{ openFileDialog(); };
+    head->addWidget(browse);
     v->addLayout(head);
 
     // Real recent files from the manager.
@@ -494,17 +507,22 @@ QWidget* StartScreen::buildTemplatesPanel() {
     auto* head = new QHBoxLayout();
     head->addWidget(heading("Templates for You", 15, "#EAEDF3", true, panel));
     head->addStretch();
-    head->addWidget(heading("View all", 12, "#3B82F6", false, panel));
+    auto* viewAllTpl = new ClickableFrame(panel);
+    auto* vaL = new QHBoxLayout(viewAllTpl);
+    vaL->setContentsMargins(0, 0, 0, 0);
+    vaL->addWidget(heading("View all", 12, "#3B82F6", false, viewAllTpl));
+    viewAllTpl->onClick = [this]{ showTemplatesDialog(0); };
+    head->addWidget(viewAllTpl);
     v->addLayout(head);
 
     auto* grid = new QGridLayout();
     grid->setSpacing(12);
-    struct T { QString title, sub, grad1, grad2; int cat; };
+    struct T { QString title, sub, grad1, grad2; DocumentType type; };
     const T ts[] = {
-        {"Business Report","Document","#21314f","#16203a", 0},
-        {"Project Plan","Spreadsheet","#16352a","#102a20", 1},
-        {"Pitch Deck","Presentation","#3a2418","#2a1810", 2},
-        {"Resume","Document","#2a2440","#1d1a33", 0},
+        {"Professional Resume","Document","#2a2440","#1d1a33", DocumentType::Writer},
+        {"Monthly Budget","Spreadsheet","#16352a","#102a20", DocumentType::Calc},
+        {"Pitch Deck","Presentation","#3a2418","#2a1810", DocumentType::Impress},
+        {"Project Report","Document","#21314f","#16203a", DocumentType::Writer},
     };
     int i = 0;
     for (const T& t : ts) {
@@ -523,8 +541,9 @@ QWidget* StartScreen::buildTemplatesPanel() {
         foot->addWidget(heading(t.title, 12, "#E2E6EE", true, c));
         foot->addWidget(heading(t.sub, 11, "#7B8494", false, c));
         cv->addLayout(foot);
-        const int cat = t.cat;
-        c->onClick = [this, cat]{ showTemplatesDialog(cat); };
+        const DocumentType type = t.type;
+        const QString name = t.title;
+        c->onClick = [this, type, name]{ emit templateChosen(type, name); };
         grid->addWidget(c, i / 2, i % 2);
         ++i;
     }
@@ -604,7 +623,7 @@ void StartScreen::showTemplatesDialog(int initialCategory) {
     QDialog dlg(this);
     dlg.setObjectName("tplDialog");
     dlg.setWindowTitle("Templates");
-    dlg.resize(760, 560);
+    dlg.resize(820, 620);
     auto* root = new QVBoxLayout(&dlg);
     root->setContentsMargins(24, 20, 24, 20); root->setSpacing(16);
 
@@ -631,19 +650,28 @@ void StartScreen::showTemplatesDialog(int initialCategory) {
     struct Cat { DocumentType type; QString accent; QStringList names; };
     const Cat data[] = {
         { DocumentType::Writer, "#2563EB",
-          {"Blank Document","Professional Resume","Cover Letter","Tax Return (1040)",
-           "Business Letter","Project Report","Meeting Notes","Newsletter"} },
+          {"Blank Document","Professional Resume","Modern Resume","Cover Letter",
+           "Business Letter","Project Report","Meeting Notes","Newsletter",
+           "Invoice Letter","To-Do List","Academic Essay","Press Release"} },
         { DocumentType::Calc, "#16A34A",
           {"Blank Spreadsheet","Monthly Budget","Invoice","Expense Tracker",
-           "Tax Worksheet","Sales Dashboard","Inventory List","Loan Calculator"} },
+           "Sales Dashboard","Inventory List","Loan Calculator","Timesheet",
+           "Grade Book","Habit Tracker","Attendance Sheet","Savings Goal"} },
         { DocumentType::Impress, "#EA580C",
           {"Blank Presentation","Pitch Deck","Business Review","Project Plan",
-           "Portfolio","Webinar Deck","Training Slides","Product Launch"} },
+           "Portfolio","Marketing Plan","Company Profile","Product Roadmap",
+           "Training Deck"} },
     };
     for (const Cat& cat : data) {
-        auto* page = new QWidget(stack);
-        auto* grid = new QGridLayout(page);
-        grid->setSpacing(14); grid->setContentsMargins(0, 4, 0, 0);
+        auto* pageScroll = new QScrollArea(stack);
+        pageScroll->setWidgetResizable(true);
+        pageScroll->setFrameShape(QFrame::NoFrame);
+        pageScroll->setStyleSheet("background:transparent;");
+        auto* page = new QWidget(pageScroll);
+        auto* pv = new QVBoxLayout(page);
+        pv->setContentsMargins(0, 4, 6, 0); pv->setSpacing(0);
+        auto* grid = new QGridLayout();
+        grid->setSpacing(14);
         int i = 0;
         for (const QString& name : cat.names) {
             auto* c = new ClickableFrame(page);
@@ -667,11 +695,20 @@ void StartScreen::showTemplatesDialog(int initialCategory) {
             lbl->setContentsMargins(10, 8, 10, 10);
             cv->addWidget(lbl);
             const DocumentType type = cat.type;
-            c->onClick = [this, type, &dlg]{ emit newDocumentRequested(type); dlg.accept(); };
+            const bool blank = name.startsWith("Blank");
+            const QString tplName = name;
+            c->onClick = [this, type, blank, tplName, &dlg]{
+                if (blank) emit newDocumentRequested(type);
+                else       emit templateChosen(type, tplName);
+                dlg.accept();
+            };
             grid->addWidget(c, i / 4, i % 4);
             ++i;
         }
-        stack->addWidget(page);
+        pv->addLayout(grid);
+        pv->addStretch();
+        pageScroll->setWidget(page);
+        stack->addWidget(pageScroll);
     }
 
     connect(catGroup, &QButtonGroup::idClicked, stack, &QStackedWidget::setCurrentIndex);

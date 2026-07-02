@@ -356,6 +356,11 @@ void WriterModule::buildUi() {
             this, &WriterModule::onContentsChanged);
     connect(m_editor->document(), &QTextDocument::contentsChanged,
             this, &WriterModule::scheduleStatusUpdate);
+    // Keep "Page X / Y" and the selection word count live as the cursor moves.
+    connect(m_editor, &QTextEdit::cursorPositionChanged,
+            this, &WriterModule::scheduleStatusUpdate);
+    connect(m_editor, &QTextEdit::selectionChanged,
+            this, &WriterModule::scheduleStatusUpdate);
 
     applyCanvasStyles();
     updateStatus();
@@ -638,17 +643,28 @@ void WriterModule::scheduleStatusUpdate() {
 void WriterModule::updateStatus() {
     if (!m_editor || !m_statusBar) return;
 
-    // Word count
+    // Word count (plus "N of M" while a selection is active, like Word/WPS).
+    static const QRegularExpression ws("\\s+");
     const QString text = m_editor->document()->toPlainText().trimmed();
     const int words = text.isEmpty()
                           ? 0
-                          : static_cast<int>(text.split(QRegularExpression("\\s+"),
-                                                        Qt::SkipEmptyParts).size());
-    m_statusBar->setWordCount(words);
+                          : static_cast<int>(text.split(ws, Qt::SkipEmptyParts).size());
+    int selWords = -1;
+    const QTextCursor cur = m_editor->textCursor();
+    if (cur.hasSelection()) {
+        QString sel = cur.selectedText();
+        sel.replace(QChar(0x2029), ' ');           // paragraph separators → spaces
+        sel = sel.trimmed();
+        selWords = sel.isEmpty()
+                       ? 0
+                       : static_cast<int>(sel.split(ws, Qt::SkipEmptyParts).size());
+    }
+    m_statusBar->setWordCount(words, selWords);
 
-    // Page count — exact, straight from the paginated layout.
+    // Page position — exact, straight from the paginated layout.
     const int pages = m_paper ? m_paper->pageCountValue() : 1;
-    m_statusBar->setPageInfo(1, pages);
+    const int page  = m_paper ? m_paper->currentPageNumber() : 1;
+    m_statusBar->setPageInfo(page, pages);
 
     refreshNavPane();        // keep the outline current (debounced via this path)
     refreshCommentsPane();
@@ -806,7 +822,7 @@ bool WriterModule::eventFilter(QObject* obj, QEvent* ev) {
 }
 
 void WriterModule::zoomBy(int deltaPercent) {
-    const int nz = qBound(75, m_zoom + deltaPercent, 200);
+    const int nz = qBound(50, m_zoom + deltaPercent, 300);
     if (nz == m_zoom) return;
     applyZoom(nz);
     if (m_statusBar) m_statusBar->setZoomPercent(nz);  // keep the slider in sync
@@ -863,10 +879,10 @@ void WriterModule::insertImage() {
     QImage image(path);
     if (image.isNull()) return;
 
-    // 3. Scale down to fit within the A4 paper content area
-    //    Paper width = 794 px, document margin = 60 px each side
-    //    Max usable width = 794 - 60 - 60 = 674 px
-    constexpr int maxWidth = 674;
+    // 3. Scale down to fit within the current page's content area
+    //    (page width minus the left+right margins, in base 100%-zoom units).
+    const double pageW = m_landscape ? m_basePageH : m_basePageW;
+    const int maxWidth = qMax(100, int(pageW - 2 * m_pageMargin));
     if (image.width() > maxWidth) {
         image = image.scaledToWidth(maxWidth, Qt::SmoothTransformation);
     }

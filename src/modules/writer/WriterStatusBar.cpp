@@ -83,7 +83,7 @@ WriterStatusBar::WriterStatusBar(QWidget* parent)
 
     // ── Zoom slider (far right) ─────────────────────────────────────────────
     m_zoomSlider = new QSlider(Qt::Horizontal, this);
-    m_zoomSlider->setRange(75, 200);
+    m_zoomSlider->setRange(50, 300);
     m_zoomSlider->setValue(100);
     m_zoomSlider->setFixedWidth(120);
     m_zoomSlider->setObjectName("statusZoomSlider");
@@ -166,8 +166,11 @@ void WriterStatusBar::setPageInfo(int current, int total) {
     m_pageLabel->setText(QString("Page %1 / %2").arg(current).arg(total));
 }
 
-void WriterStatusBar::setWordCount(int words) {
-    m_wordLabel->setText(QString("%1 %2").arg(words).arg(words == 1 ? "word" : "words"));
+void WriterStatusBar::setWordCount(int words, int selWords) {
+    if (selWords >= 0)
+        m_wordLabel->setText(QString("%1 of %2 words").arg(selWords).arg(words));
+    else
+        m_wordLabel->setText(QString("%1 %2").arg(words).arg(words == 1 ? "word" : "words"));
 }
 
 void WriterStatusBar::setZoomPercent(int percent) {

@@ -21,6 +21,7 @@
 
 #include "WriterModule.h"
 #include "CalcModule.h"
+#include "SpreadsheetModel.h"
 #include "ImpressModule.h"
 
 #include <QApplication>
@@ -36,6 +37,9 @@
 #include <QMessageBox>
 #include <QString>
 #include <QCloseEvent>
+#include <QMouseEvent>
+#include <QTime>
+#include <QDate>
 #include <QTabWidget>
 #include <QTabBar>
 #include <QToolButton>
@@ -420,12 +424,27 @@ public:
     explicit ShellTabBar(QWidget* parent = nullptr) : QTabBar(parent) {
         setExpanding(false);
         setDrawBase(false);
-        setTabsClosable(true);
+        // Close buttons are custom QToolButtons (added per tab by MainShell) so
+        // they match the custom-painted tabs; the native style-drawn "x" looked
+        // broken on top of our painting.
+        setTabsClosable(false);
         setElideMode(Qt::ElideRight);
         setMovable(false);
+        setMouseTracking(true);
+        // Overflow scroll arrows: keep them on the white strip.
+        setStyleSheet("QTabBar QToolButton { background:#FFFFFF; border:none; }");
     }
 
 protected:
+    void mouseMoveEvent(QMouseEvent* e) override {
+        const int h = tabAt(e->pos());
+        if (h != m_hover) { m_hover = h; update(); }
+        QTabBar::mouseMoveEvent(e);
+    }
+    void leaveEvent(QEvent* e) override {
+        if (m_hover != -1) { m_hover = -1; update(); }
+        QTabBar::leaveEvent(e);
+    }
     QSize tabSizeHint(int index) const override {
         QSize s = QTabBar::tabSizeHint(index);
         s.setHeight(qMax(s.height(), 36));
@@ -442,8 +461,9 @@ protected:
             const bool home = (i == 0);
             const bool sel  = (i == currentIndex());
 
-            const QColor bg = home ? QColor(sel ? "#6D28D9" : "#7C3AED")
-                                   : QColor("#FFFFFF");
+            const bool hov = (i == m_hover);
+            const QColor bg = home ? QColor(sel ? "#6D28D9" : hov ? "#8B5CF6" : "#7C3AED")
+                                   : QColor(hov && !sel ? "#F6F3FD" : "#FFFFFF");
             const QColor fg = home ? QColor("#FFFFFF")
                                    : QColor(sel ? "#6D28D9" : "#2C3140");
             p.fillRect(r, bg);
@@ -465,7 +485,14 @@ protected:
             p.drawText(tr, Qt::AlignVCenter | Qt::AlignLeft,
                        fontMetrics().elidedText(tabText(i), Qt::ElideRight, tr.width()));
         }
+
+        // Bottom hairline so the white strip reads as a proper bar.
+        p.setPen(QColor("#E6E8ED"));
+        p.drawLine(0, height() - 1, width(), height() - 1);
     }
+
+private:
+    int m_hover { -1 };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -594,6 +621,28 @@ private:
     int addPage(QWidget* page, const QString& label) {
         const int idx = m_bar->addTab(label);
         m_stack->insertWidget(idx, page);
+
+        // Custom close button matching the custom-painted tabs (the native
+        // style-drawn one clashed visually). Resolved to an index at click
+        // time, so tab reindexing after closes can't hit the wrong tab.
+        auto* close = new QToolButton(m_bar);
+        close->setText(QString::fromUtf8("✕"));
+        close->setToolTip("Close tab");
+        close->setCursor(Qt::PointingHandCursor);
+        close->setFixedSize(18, 18);
+        close->setStyleSheet(
+            "QToolButton { border:none; border-radius:9px; background:transparent;"
+            "  color:#9097A6; font-size:10px; }"
+            "QToolButton:hover { background:#FCE4E2; color:#C0271C; }");
+        connect(close, &QToolButton::clicked, this, [this, close] {
+            for (int i = 0; i < m_bar->count(); ++i)
+                if (m_bar->tabButton(i, QTabBar::RightSide) == close) {
+                    handleTabClose(i);
+                    return;
+                }
+        });
+        m_bar->setTabButton(idx, QTabBar::RightSide, close);
+
         m_bar->setCurrentIndex(idx);
         m_stack->setCurrentIndex(idx);
         return idx;
@@ -1056,6 +1105,237 @@ QMenuBar::item:pressed {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Home-screen templates — real starter content per template name.
+// ─────────────────────────────────────────────────────────────────────────────
+static QString writerTemplateHtml(const QString& name) {
+    const QString base = "font-family:'Segoe UI'; color:#1C1E26;";
+    auto h1 = [&](const QString& t, const QString& col = "#1F3864") {
+        return QString("<h1 style=\"%1 color:%2;\">%3</h1>").arg(base, col, t); };
+    auto p = [&](const QString& t) {
+        return QString("<p style=\"%1\">%2</p>").arg(base, t); };
+    auto hr = []{ return QStringLiteral("<hr/>"); };
+
+    if (name == "Professional Resume" || name == "Modern Resume") {
+        const QString accent = name.startsWith("Modern") ? "#0E7C5A" : "#1F3864";
+        return QString(R"(<h1 style="%1 color:%2; margin-bottom:2px;">Your Name</h1>
+<p style="%1 color:#5A6071;">City, Country · +00 00000 00000 · you@email.com · linkedin.com/in/you</p><hr/>
+<h2 style="%1 color:%2;">Summary</h2>
+<p style="%1">Results-driven professional with X years of experience in ____. Known for ____ and ____.</p>
+<h2 style="%1 color:%2;">Experience</h2>
+<p style="%1"><b>Job Title — Company</b> &nbsp;·&nbsp; <i>20XX – Present</i></p>
+<ul><li style="%1">Achievement with a measurable result (grew X by Y%)</li>
+<li style="%1">Responsibility that shows scope and ownership</li>
+<li style="%1">Tool, process or initiative you led</li></ul>
+<p style="%1"><b>Previous Title — Company</b> &nbsp;·&nbsp; <i>20XX – 20XX</i></p>
+<ul><li style="%1">Key contribution</li><li style="%1">Key contribution</li></ul>
+<h2 style="%1 color:%2;">Education</h2>
+<p style="%1"><b>Degree, Institution</b> — 20XX</p>
+<h2 style="%1 color:%2;">Skills</h2>
+<p style="%1">Skill one · Skill two · Skill three · Skill four · Skill five</p>)")
+            .arg(base, accent);
+    }
+    if (name == "Cover Letter")
+        return p("Your Name<br/>Your Address<br/>you@email.com") + p(QDate::currentDate().toString("MMMM d, yyyy"))
+             + p("Hiring Manager<br/>Company Name<br/>Company Address") + p("<b>Re: Application for [Position]</b>")
+             + p("Dear Hiring Manager,") + p("Opening paragraph — name the role, where you found it, and one line on why you're a strong fit.")
+             + p("Body paragraph — connect two or three of your achievements directly to the role's requirements. Use numbers where you can.")
+             + p("Closing paragraph — restate your enthusiasm, mention availability, and thank them for their time.")
+             + p("Sincerely,<br/><b>Your Name</b>");
+    if (name == "Business Letter")
+        return p("<b>Your Company</b><br/>Street Address<br/>City, State ZIP") + p(QDate::currentDate().toString("MMMM d, yyyy"))
+             + p("Recipient Name<br/>Title, Company<br/>Address") + p("Dear Mr./Ms. ____,")
+             + p("First paragraph: state the purpose of this letter in one or two sentences.")
+             + p("Second paragraph: give the supporting details — context, facts, amounts, dates.")
+             + p("Final paragraph: state the action you request and by when, and how you can be reached.")
+             + p("Yours faithfully,<br/><br/><b>Your Name</b><br/>Your Title");
+    if (name == "Project Report")
+        return h1("Project Report") + p("<i>Author · Date · Version 1.0</i>") + hr()
+             + QString("<h2 style=\"%1 color:#1F3864;\">1. Executive Summary</h2>").arg(base)
+             + p("Two or three sentences: what the project is, its current status, and the headline result.")
+             + QString("<h2 style=\"%1 color:#1F3864;\">2. Objectives</h2>").arg(base)
+             + QString("<ul><li style=\"%1\">Objective one</li><li style=\"%1\">Objective two</li></ul>").arg(base)
+             + QString("<h2 style=\"%1 color:#1F3864;\">3. Progress</h2>").arg(base)
+             + p("What was completed this period, what is in flight, and what's next.")
+             + QString("<h2 style=\"%1 color:#1F3864;\">4. Risks & Issues</h2>").arg(base)
+             + p("Top risks with owner and mitigation.")
+             + QString("<h2 style=\"%1 color:#1F3864;\">5. Conclusion</h2>").arg(base)
+             + p("Overall assessment and recommendation.");
+    if (name == "Meeting Notes")
+        return h1("Meeting Notes") + p(QString("<b>Date:</b> %1 &nbsp;&nbsp; <b>Time:</b> ____ &nbsp;&nbsp; <b>Location:</b> ____")
+                    .arg(QDate::currentDate().toString("MMMM d, yyyy")))
+             + p("<b>Attendees:</b> ____") + hr()
+             + QString("<h2 style=\"%1 color:#1F3864;\">Agenda</h2><ol><li style=\"%1\">Topic one</li><li style=\"%1\">Topic two</li></ol>").arg(base)
+             + QString("<h2 style=\"%1 color:#1F3864;\">Discussion</h2>").arg(base) + p("Notes…")
+             + QString("<h2 style=\"%1 color:#1F3864;\">Decisions</h2><ul><li style=\"%1\">Decision</li></ul>").arg(base)
+             + QString("<h2 style=\"%1 color:#1F3864;\">Action Items</h2><ul><li style=\"%1\">☐ Action — owner — due date</li><li style=\"%1\">☐ Action — owner — due date</li></ul>").arg(base);
+    if (name == "Newsletter")
+        return QString("<h1 style=\"%1 color:#7C3AED; text-align:center;\">THE MONTHLY BULLETIN</h1>").arg(base)
+             + QString("<p style=\"%1 text-align:center; color:#5A6071;\">Issue #1 · %2</p>").arg(base, QDate::currentDate().toString("MMMM yyyy")) + hr()
+             + QString("<h2 style=\"%1 color:#7C3AED;\">Top Story</h2>").arg(base)
+             + p("Lead article text goes here. Hook the reader in the first sentence.")
+             + QString("<h2 style=\"%1 color:#7C3AED;\">In Brief</h2><ul><li style=\"%1\">Short update one</li><li style=\"%1\">Short update two</li><li style=\"%1\">Short update three</li></ul>").arg(base)
+             + QString("<h2 style=\"%1 color:#7C3AED;\">Upcoming</h2>").arg(base) + p("Dates and events to know about.");
+    if (name == "Invoice Letter")
+        return h1("INVOICE", "#B45309") + p("<b>Invoice #:</b> 0001 &nbsp;&nbsp; <b>Date:</b> " + QDate::currentDate().toString("MMM d, yyyy"))
+             + p("<b>From:</b> Your Company · Address · Tax ID") + p("<b>Bill To:</b> Client Name · Address") + hr()
+             + QString(R"(<table border="1" cellpadding="6" width="100%" style="%1">
+<tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>
+<tr><td>Service or product</td><td>1</td><td>0.00</td><td>0.00</td></tr>
+<tr><td>Service or product</td><td>1</td><td>0.00</td><td>0.00</td></tr>
+<tr><td colspan="3" align="right"><b>Total</b></td><td><b>0.00</b></td></tr></table>)").arg(base)
+             + p("<i>Payment due within 30 days. Bank details: ____</i>");
+    if (name == "To-Do List")
+        return h1("To-Do List", "#0E7C5A") + p("<i>" + QDate::currentDate().toString("dddd, MMMM d") + "</i>") + hr()
+             + QString("<h2 style=\"%1 color:#0E7C5A;\">Today</h2><ul><li style=\"%1\">☐ Most important task</li><li style=\"%1\">☐ Second task</li><li style=\"%1\">☐ Third task</li></ul>").arg(base)
+             + QString("<h2 style=\"%1 color:#0E7C5A;\">This Week</h2><ul><li style=\"%1\">☐ Task</li><li style=\"%1\">☐ Task</li></ul>").arg(base)
+             + QString("<h2 style=\"%1 color:#0E7C5A;\">Someday</h2><ul><li style=\"%1\">☐ Idea</li></ul>").arg(base);
+    if (name == "Academic Essay")
+        return QString("<p style=\"%1\">Student Name<br/>Instructor Name<br/>Course<br/>%2</p>").arg(base, QDate::currentDate().toString("d MMMM yyyy"))
+             + QString("<h1 style=\"%1 text-align:center;\">Essay Title: Subtitle if Needed</h1>").arg(base)
+             + p("&nbsp;&nbsp;&nbsp;&nbsp;Introduction — open with context, narrow to your thesis. End the paragraph with a clear thesis statement.")
+             + p("&nbsp;&nbsp;&nbsp;&nbsp;Body paragraph one — topic sentence, evidence, analysis, transition.")
+             + p("&nbsp;&nbsp;&nbsp;&nbsp;Body paragraph two — topic sentence, evidence, analysis, transition.")
+             + p("&nbsp;&nbsp;&nbsp;&nbsp;Conclusion — restate the thesis in new words and state the wider significance.")
+             + QString("<h2 style=\"%1 text-align:center;\">Works Cited</h2>").arg(base)
+             + p("Author. <i>Title</i>. Publisher, Year.");
+    if (name == "Press Release")
+        return p("<b>FOR IMMEDIATE RELEASE</b>") + h1("Headline That States the News")
+             + p("<i>Subheadline with one supporting detail</i>")
+             + p(QString("<b>CITY, %1</b> — Opening paragraph: who, what, when, where, why — the entire story in two sentences.")
+                   .arg(QDate::currentDate().toString("MMMM d, yyyy")))
+             + p("Second paragraph: key details and context.")
+             + p("“A quotation from a named spokesperson that adds a human voice,” said Name, Title at Company.")
+             + p("Closing paragraph: what happens next and where to learn more.") + hr()
+             + p("<b>Media Contact:</b> Name · email · phone");
+    return h1("New Document") + p("Start typing…");
+}
+
+static void applyCalcTemplate(NativeOffice::CalcModule* calc, const QString& name) {
+    if (!calc || !calc->model()) return;
+    QList<QStringList> rows;
+    if (name == "Monthly Budget")
+        rows = { {"Monthly Budget"}, {},
+                 {"Category","Budgeted","Actual","Difference"},
+                 {"Housing / Rent","1200","","=B4-C4"},
+                 {"Groceries","400","","=B5-C5"},
+                 {"Transport","150","","=B6-C6"},
+                 {"Utilities","180","","=B7-C7"},
+                 {"Entertainment","120","","=B8-C8"},
+                 {"Savings","300","","=B9-C9"},
+                 {"Other","100","","=B10-C10"}, {},
+                 {"Total","=SUM(B4:B10)","=SUM(C4:C10)","=B12-C12"} };
+    else if (name == "Invoice")
+        rows = { {"INVOICE"}, {"Invoice #","0001","","Date",""}, {},
+                 {"From:","Your Company"}, {"Bill To:","Client Name"}, {},
+                 {"Description","Qty","Unit Price","Amount"},
+                 {"Item or service","1","0","=B8*C8"},
+                 {"Item or service","1","0","=B9*C9"},
+                 {"Item or service","1","0","=B10*C10"}, {},
+                 {"","","Subtotal","=SUM(D8:D10)"},
+                 {"","","Tax (10%)","=D12*0.1"},
+                 {"","","TOTAL","=D12+D13"} };
+    else if (name == "Expense Tracker")
+        rows = { {"Expense Tracker"}, {},
+                 {"Date","Description","Category","Amount"},
+                 {"","","Food",""}, {"","","Travel",""}, {"","","Bills",""},
+                 {"","","Shopping",""}, {"","","Other",""}, {},
+                 {"","","Total","=SUM(D4:D8)"} };
+    else if (name == "Sales Dashboard")
+        rows = { {"Sales Dashboard"}, {},
+                 {"Month","Revenue","Units","Avg Sale"},
+                 {"January","10000","120","=B4/C4"},
+                 {"February","12000","135","=B5/C5"},
+                 {"March","14500","150","=B6/C6"},
+                 {"April","13200","140","=B7/C7"},
+                 {"May","16800","170","=B8/C8"},
+                 {"June","18100","181","=B9/C9"}, {},
+                 {"Total","=SUM(B4:B9)","=SUM(C4:C9)","=B11/C11"},
+                 {"Best month","=MAX(B4:B9)"},
+                 {"Average","=AVERAGE(B4:B9)"} };
+    else if (name == "Inventory List")
+        rows = { {"Inventory"}, {},
+                 {"Item","SKU","Qty","Unit Cost","Value","Reorder at"},
+                 {"Item A","SKU-001","25","4.50","=C4*D4","10"},
+                 {"Item B","SKU-002","8","12.00","=C5*D5","5"},
+                 {"Item C","SKU-003","60","1.75","=C6*D6","20"}, {},
+                 {"","","","Total value","=SUM(E4:E6)"} };
+    else if (name == "Loan Calculator")
+        rows = { {"Loan Calculator (simple interest)"}, {},
+                 {"Loan amount","10000"},
+                 {"Annual rate (%)","8"},
+                 {"Term (years)","3"}, {},
+                 {"Total interest","=B3*B4/100*B5"},
+                 {"Total repayable","=B3+B7"},
+                 {"Monthly payment","=B8/(B5*12)"} };
+    else if (name == "Timesheet")
+        rows = { {"Weekly Timesheet"}, {"Name:","","Week of:",""}, {},
+                 {"Day","Start","End","Break (h)","Hours"},
+                 {"Monday","9:00","17:00","1",""},
+                 {"Tuesday","","","",""}, {"Wednesday","","","",""},
+                 {"Thursday","","","",""}, {"Friday","","","",""}, {},
+                 {"","","","Total","=SUM(E5:E9)"} };
+    else if (name == "Grade Book")
+        rows = { {"Grade Book"}, {},
+                 {"Student","Test 1","Test 2","Test 3","Average"},
+                 {"Student A","85","92","78","=AVERAGE(B4:D4)"},
+                 {"Student B","74","81","90","=AVERAGE(B5:D5)"},
+                 {"Student C","95","88","93","=AVERAGE(B6:D6)"}, {},
+                 {"Class average","=AVERAGE(B4:B6)","=AVERAGE(C4:C6)","=AVERAGE(D4:D6)","=AVERAGE(E4:E6)"} };
+    else if (name == "Habit Tracker")
+        rows = { {"Habit Tracker"}, {},
+                 {"Habit","Mon","Tue","Wed","Thu","Fri","Sat","Sun"},
+                 {"Exercise"}, {"Read 20 min"}, {"No junk food"}, {"Sleep by 11"}, {},
+                 {"Mark each day with a 1 — weekly total:","=SUM(B4:H4)"} };
+    else if (name == "Attendance Sheet")
+        rows = { {"Attendance"}, {},
+                 {"Name","Day 1","Day 2","Day 3","Day 4","Day 5","Present"},
+                 {"Person A","1","1","","1","1","=SUM(B4:F4)"},
+                 {"Person B","1","","1","1","","=SUM(B5:F5)"},
+                 {"Person C","","1","1","1","1","=SUM(B6:F6)"}, {},
+                 {"Daily total","=SUM(B4:B6)","=SUM(C4:C6)","=SUM(D4:D6)","=SUM(E4:E6)","=SUM(F4:F6)"} };
+    else if (name == "Savings Goal")
+        rows = { {"Savings Goal"}, {},
+                 {"Goal amount","5000"},
+                 {"Saved so far","1250"},
+                 {"Remaining","=B3-B4"},
+                 {"Progress (%)","=B4/B3*100"}, {},
+                 {"Monthly deposit","250"},
+                 {"Months to goal","=B5/B8"} };
+    else return;
+
+    for (int r = 0; r < rows.size(); ++r)
+        for (int c = 0; c < rows[r].size(); ++c)
+            if (!rows[r][c].isEmpty())
+                calc->model()->setCellContent(c, r, rows[r][c], QStringLiteral("Apply Template"));
+    calc->markClean();
+}
+
+// Open a document pre-filled from a Home-screen template.
+static void openFromTemplate(NativeOffice::DocumentType type, const QString& name) {
+    using NativeOffice::DocumentType;
+    switch (type) {
+    case DocumentType::Writer: {
+        auto* w = createWriterWindow();
+        w->writer()->setContent(writerTemplateHtml(name));
+        presentEditor(w);
+        break;
+    }
+    case DocumentType::Calc: {
+        auto* w = createCalcWindow();
+        applyCalcTemplate(w->calc(), name);
+        presentEditor(w);
+        break;
+    }
+    case DocumentType::Impress: {
+        auto* w = createImpressWindow();
+        w->impress()->applyDeckTemplate(name);
+        presentEditor(w);
+        break;
+    }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helper: open any document via smart content-based routing  (Sprint 7)
 //
 // Uses FileRouter::detectFileType() to read the file content first and
@@ -1133,6 +1413,10 @@ int main(int argc, char* argv[]) {
                          &controller, &NativeOffice::AppController::openFile);
         QObject::connect(s, &NativeOffice::StartScreen::settingsRequested,
                          &controller, &NativeOffice::AppController::openSettings);
+        QObject::connect(s, &NativeOffice::StartScreen::templateChosen,
+                         s, [](NativeOffice::DocumentType type, const QString& name) {
+            openFromTemplate(type, name);
+        });
         return s;
     };
     shell.setHomeFactory(makeHome);

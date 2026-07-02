@@ -16,6 +16,7 @@
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
+#include <QHash>
 #include <QGraphicsView>
 #include <QGraphicsTextItem>
 #include <QTextCursor>
@@ -879,6 +880,135 @@ void ImpressModule::showTemplatesGallery() {
     v->setContentsMargins(0, 0, 0, 0);
     v->addWidget(scroll);
     dlg.exec();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-slide deck templates for the Home screen gallery
+// ─────────────────────────────────────────────────────────────────────────────
+void ImpressModule::applyDeckTemplate(const QString& name) {
+    auto txt = [](double x, double y, double w, double h, const QString& t,
+                  int sz, const QString& col, bool bold, const QString& align) {
+        SlideItem s;
+        s.type     = SlideItemType::TextBox;
+        s.rect     = QRectF(x, y, w, h);
+        s.text     = t;
+        s.fontSize = sz;
+        s.penColor = QColor(col);
+        s.html = QString("<p align=\"%1\" style=\"margin:0; font-size:%2pt; color:%3;\">%4%5%6</p>")
+                     .arg(align).arg(sz).arg(col)
+                     .arg(bold ? "<b>" : "", t.toHtmlEscaped(), bold ? "</b>" : "");
+        return s;
+    };
+    auto shp = [](double x, double y, double w, double h, ShapeKind k, const QString& fill) {
+        SlideItem s;
+        s.type      = SlideItemType::Shape;
+        s.shapeKind = k;
+        s.rect      = QRectF(x, y, w, h);
+        s.fillColor = QColor(fill);
+        s.penColor  = QColor(fill);
+        s.penWidth  = 0.0;
+        return s;
+    };
+
+    struct Pal { QString bg, bg2, title, body, accent; };
+    struct Sect { QString heading; QStringList bullets; };
+    struct Deck { QString title, subtitle; Pal pal; QList<Sect> sections; };
+
+    const Pal navy   { "#0F172A", "#1E293B", "#FFFFFF", "#CBD5E1", "#38BDF8" };
+    const Pal blue   { "#FFFFFF", "#DBEAFE", "#1E3A8A", "#334155", "#2563EB" };
+    const Pal green  { "#ECFDF5", "#A7F3D0", "#064E3B", "#065F46", "#10B981" };
+    const Pal amber  { "#FEF3C7", "#FDE68A", "#7C2D12", "#92400E", "#EA580C" };
+    const Pal violet { "#F8FAFC", "#EDE9FE", "#4C1D95", "#334155", "#7C3AED" };
+    const Pal dark   { "#18181B", "#27272A", "#FAFAFA", "#D4D4D8", "#F59E0B" };
+
+    QHash<QString, Deck> decks;
+    decks["Pitch Deck"] = { "Your Startup", "one line that investors remember", navy, {
+        { "The Problem",  { "What's broken today", "Who feels the pain and how often", "Cost of the status quo" } },
+        { "The Solution", { "Your product in one sentence", "Why now — what changed", "Live demo" } },
+        { "Market & Model", { "TAM / SAM / SOM", "How you make money", "Pricing" } },
+        { "Traction",     { "Key metrics and growth", "Customers & pipeline", "Milestones hit" } },
+        { "The Ask",      { "Raising: amount & instrument", "Use of funds", "12-month plan" } } } };
+    decks["Business Review"] = { "Quarterly Business Review", "Q_ 20__ · Team", blue, {
+        { "Highlights",     { "Wins this quarter", "Revenue vs plan", "Team changes" } },
+        { "Key Metrics",    { "Revenue & margin", "Customer growth / churn", "NPS" } },
+        { "Challenges",     { "What slipped and why", "Risks ahead", "Mitigations" } },
+        { "Next Quarter",   { "Top 3 priorities", "Targets", "Asks from leadership" } } } };
+    decks["Project Plan"] = { "Project Kickoff", "goal · scope · timeline", green, {
+        { "Objectives",   { "What success looks like", "In scope / out of scope", "Stakeholders" } },
+        { "Timeline",     { "Phase 1 — Discovery", "Phase 2 — Build", "Phase 3 — Launch" } },
+        { "Team & Roles", { "Sponsor", "Project lead", "Contributors" } },
+        { "Risks",        { "Top risks & owners", "Dependencies", "Contingency" } } } };
+    decks["Portfolio"] = { "Your Name", "designer · developer · creator", dark, {
+        { "About Me",       { "Short bio", "Skills & tools", "Contact" } },
+        { "Selected Work",  { "Project one — result", "Project two — result", "Project three — result" } },
+        { "Process",        { "Discover", "Design", "Deliver" } },
+        { "Let's Talk",     { "email@example.com", "portfolio.example.com" } } } };
+    decks["Marketing Plan"] = { "Marketing Plan", "reach · engage · convert", amber, {
+        { "Goals",     { "Awareness targets", "Lead / signup targets", "Revenue contribution" } },
+        { "Audience",  { "Primary persona", "Where they spend time", "What they care about" } },
+        { "Channels",  { "Content & SEO", "Paid & social", "Email & community" } },
+        { "Budget & KPIs", { "Spend by channel", "CAC / ROAS", "Review cadence" } } } };
+    decks["Company Profile"] = { "Company Name", "what we do, in one line", violet, {
+        { "Who We Are",   { "Founded · HQ · team size", "Mission", "Values" } },
+        { "What We Do",   { "Products & services", "Who we serve", "What makes us different" } },
+        { "Our Numbers",  { "Customers", "Revenue growth", "Coverage" } },
+        { "Contact",      { "hello@company.com", "company.com" } } } };
+    decks["Product Roadmap"] = { "Product Roadmap", "now · next · later", navy, {
+        { "Now",   { "Shipping this quarter", "Owner & status", "Launch dates" } },
+        { "Next",  { "Committed for next quarter", "Dependencies", "Open questions" } },
+        { "Later", { "Exploring / research", "Big bets", "Ideas parking lot" } },
+        { "Themes", { "Quality & performance", "Growth", "Platform" } } } };
+    decks["Training Deck"] = { "Training Session", "topic · audience · duration", blue, {
+        { "Agenda",       { "What we'll cover", "Timing", "Ground rules" } },
+        { "Core Concepts", { "Concept one", "Concept two", "Concept three" } },
+        { "Hands-On",     { "Exercise walkthrough", "Common mistakes", "Tips" } },
+        { "Wrap-Up",      { "Key takeaways", "Resources", "Q&A" } } } };
+
+    if (!decks.contains(name)) return;
+    const Deck deck = decks.value(name);
+    const Pal& p = deck.pal;
+
+    std::vector<SlideData> slides;
+    {   // Title slide
+        SlideData d;
+        d.title = deck.title;
+        d.background = QColor(p.bg);
+        d.background2 = QColor(p.bg2);
+        d.items.push_back(shp(0, 476, 960, 64, ShapeKind::Rectangle, p.accent));
+        d.items.push_back(txt(80, 170, 800, 110, deck.title, 46, p.title, true, "center"));
+        d.items.push_back(txt(120, 300, 720, 50, deck.subtitle, 20, p.body, false, "center"));
+        slides.push_back(d);
+    }
+    for (const Sect& s : deck.sections) {
+        SlideData d;
+        d.title = s.heading;
+        d.background = QColor(p.bg);
+        d.items.push_back(shp(60, 108, 66, 6, ShapeKind::Rectangle, p.accent));
+        d.items.push_back(txt(60, 48, 840, 60, s.heading, 32, p.title, true, "left"));
+        QString html, plain;
+        for (const QString& b : s.bullets) {
+            html += QString("<p style=\"margin:0 0 14px 0; font-size:20pt; color:%1;\">•  %2</p>")
+                        .arg(p.body, b.toHtmlEscaped());
+            plain += "• " + b + "\n";
+        }
+        SlideItem body;
+        body.type = SlideItemType::TextBox;
+        body.rect = QRectF(80, 150, 800, 330);
+        body.text = plain.trimmed();
+        body.fontSize = 20;
+        body.penColor = QColor(p.body);
+        body.html = html;
+        d.items.push_back(body);
+        slides.push_back(d);
+    }
+
+    m_ignoreChange = true;
+    clearDeck();
+    for (const SlideData& d : slides) createSlide(d);
+    m_ignoreChange = false;
+    if (!m_scenes.empty()) switchToSlide(0);
+    captureUndoBaseline();
+    m_undoStack->clear();
 }
 
 void ImpressModule::applyTemplate(const SlideData& tpl) {

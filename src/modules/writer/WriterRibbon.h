@@ -300,6 +300,7 @@ private:
     void              highlightAllMatches();   // live "highlight all"
 
     bool m_syncing { false };
+    int  m_caseCycle { 0 };   // Shift+F3 cycle position (UPPER → lower → Title)
 
     // Mail-merge data source (headers + records).
     QStringList         m_mergeHeaders;

@@ -75,6 +75,9 @@ public:
     [[nodiscard]] QUndoStack* undoStack() const noexcept { return m_undoStack; }
 
 public slots:
+    // Replace the deck with a ready-made multi-slide template ("Pitch Deck",
+    // "Business Review", …) — used by the Home screen template gallery.
+    void applyDeckTemplate(const QString& name);
     void addNewSlide();
     void switchToSlide(int index);
     void duplicateCurrentSlide();

@@ -29,6 +29,8 @@ signals:
     void newDocumentRequested(DocumentType type);
     void fileOpenRequested(const QString& path);
     void settingsRequested();
+    // A named (non-blank) template was chosen in the gallery.
+    void templateChosen(DocumentType type, const QString& name);
 
 private:
     void     buildUi();

@@ -6,7 +6,7 @@
 //   • Word count  (live)
 //   • AI Spell Check pill toggle (UI only — no backend)
 //   • Page view toggle buttons (Print Layout / Web Layout)
-//   • Zoom slider (75%–200%) on the far right
+//   • Zoom slider (50%–300%) on the far right
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QWidget>
@@ -24,7 +24,8 @@ public:
     explicit WriterStatusBar(QWidget* parent = nullptr);
 
     void setPageInfo(int current, int total);
-    void setWordCount(int words);
+    // selWords ≥ 0 → "N of M words" (a selection is active), otherwise "M words".
+    void setWordCount(int words, int selWords = -1);
     void setZoomPercent(int percent);   // updates slider/label without re-emitting
     void setWebLayoutActive(bool web);  // sync print/web toggle without re-emitting
     void setSpellCheckActive(bool on);  // sync spell pill without re-emitting

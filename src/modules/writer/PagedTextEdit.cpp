@@ -25,6 +25,10 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QDate>
+#include <QMimeData>
+#include <QBuffer>
+#include <QFileInfo>
+#include <QImage>
 #include <QtMath>
 #include <cmath>
 
@@ -65,6 +69,10 @@ bool PagedTextEdit::spellCheckEnabled() const {
     return m_spell && m_spell->isEnabled();
 }
 
+void PagedTextEdit::rehighlightSpelling() {
+    if (m_spell) m_spell->rehighlight();
+}
+
 void PagedTextEdit::setPageMetrics(double pageW, double pageH, double margin) {
     m_pageW = pageW; m_pageH = pageH; m_margin = margin;
     document()->setDocumentMargin(margin);
@@ -97,6 +105,14 @@ void PagedTextEdit::setPaperColor(const QColor& c) {
 
 int PagedTextEdit::pageCountValue() const {
     return m_paged ? qMax(1, document()->pageCount()) : 1;
+}
+
+int PagedTextEdit::currentPageNumber() const {
+    if (!m_paged || m_pageH <= 0) return 1;
+    // Widget coords == document coords (no internal scrolling), so the cursor's
+    // y position divided by the page height is the page index.
+    const QRect cr = cursorRect();
+    return qBound(1, int(cr.top() / m_pageH) + 1, pageCountValue());
 }
 
 void PagedTextEdit::setHeaderFooter(const QStringList& header, const QStringList& footer,
@@ -306,6 +322,61 @@ void PagedTextEdit::mouseReleaseEvent(QMouseEvent* e) {
     QTextEdit::mouseReleaseEvent(e);
 }
 
+// ── Image paste & drag-drop ──────────────────────────────────────────────────
+static bool isLocalImageFile(const QUrl& url) {
+    if (!url.isLocalFile()) return false;
+    static const QStringList exts = { "png", "jpg", "jpeg", "bmp", "gif", "webp", "tiff" };
+    const QString suffix = QFileInfo(url.toLocalFile()).suffix().toLower();
+    return exts.contains(suffix);
+}
+
+bool PagedTextEdit::canInsertFromMimeData(const QMimeData* source) const {
+    if (source->hasImage()) return true;
+    if (source->hasUrls()) {
+        for (const QUrl& u : source->urls())
+            if (isLocalImageFile(u)) return true;
+    }
+    return QTextEdit::canInsertFromMimeData(source);
+}
+
+void PagedTextEdit::insertFromMimeData(const QMimeData* source) {
+    if (insertMimeImage(source)) return;
+    QTextEdit::insertFromMimeData(source);
+}
+
+bool PagedTextEdit::insertMimeImage(const QMimeData* source) {
+    if (source->hasImage()) {
+        const QImage img = qvariant_cast<QImage>(source->imageData());
+        if (!img.isNull()) { embedImage(img); return true; }
+    }
+    if (source->hasUrls()) {
+        bool any = false;
+        for (const QUrl& u : source->urls()) {
+            if (!isLocalImageFile(u)) continue;
+            QImage img(u.toLocalFile());
+            if (!img.isNull()) { embedImage(img); any = true; }
+        }
+        if (any) return true;
+    }
+    return false;
+}
+
+void PagedTextEdit::embedImage(QImage img) {
+    // Fit within the content area between the margins.
+    const int maxWidth = qMax(100, int(m_pageW - 2 * m_margin));
+    if (img.width() > maxWidth)
+        img = img.scaledToWidth(maxWidth, Qt::SmoothTransformation);
+
+    QByteArray data;
+    {
+        QBuffer buffer(&data);
+        buffer.open(QIODevice::WriteOnly);
+        img.save(&buffer, "PNG");
+    }
+    textCursor().insertHtml(QStringLiteral("<img src=\"data:image/png;base64,%1\"/>")
+                                .arg(QString::fromLatin1(data.toBase64())));
+}
+
 void PagedTextEdit::keyPressEvent(QKeyEvent* e) {
     // Tab / Shift+Tab demote / promote list items (Word-style multi-level lists),
     // but only outside tables, where Tab still moves between cells.
@@ -313,6 +384,47 @@ void PagedTextEdit::keyPressEvent(QKeyEvent* e) {
             && textCursor().currentList() && !TableOps::inTable(this)) {
         ListOps::changeLevel(this, e->key() == Qt::Key_Backtab ? -1 : +1);
         e->accept();
+        return;
+    }
+
+    const bool isReturn = (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter)
+                          && !(e->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier));
+
+    // Enter on an empty list item ends the list (Word/WPS behaviour) instead of
+    // producing another empty bullet.
+    if (isReturn && !isReadOnly()) {
+        QTextCursor c = textCursor();
+        QTextList* list = c.currentList();
+        if (list && c.block().text().trimmed().isEmpty() && !c.hasSelection()) {
+            c.beginEditBlock();
+            list->remove(c.block());
+            QTextBlockFormat bf = c.blockFormat();
+            bf.setIndent(0);
+            bf.setObjectIndex(-1);
+            c.setBlockFormat(bf);
+            c.endEditBlock();
+            e->accept();
+            return;
+        }
+    }
+
+    // Enter at the end of a heading starts a Normal paragraph (Word's
+    // "style for following paragraph") instead of continuing the heading.
+    if (isReturn && !isReadOnly() && !textCursor().hasSelection()
+            && textCursor().atBlockEnd()
+            && textCursor().blockFormat().headingLevel() > 0) {
+        QTextEdit::keyPressEvent(e);
+        QTextCursor c = textCursor();
+        QTextBlockFormat bf = c.blockFormat();
+        bf.setHeadingLevel(0);
+        c.setBlockFormat(bf);
+        QTextCharFormat cf;
+        cf.setFontFamilies({"Segoe UI", "Inter", "Roboto", "sans-serif"});
+        cf.setFontPointSize(12);
+        cf.setFontWeight(QFont::Normal);
+        cf.setForeground(QColor("#1C1E26"));
+        c.setCharFormat(cf);
+        setTextCursor(c);
         return;
     }
 
@@ -471,6 +583,61 @@ void PagedTextEdit::rejectAllChanges() {
     c.endEditBlock();
 }
 
+PagedTextEdit::TrackedRun PagedTextEdit::trackedRunAt(int pos) const {
+    const QTextBlock b = document()->findBlock(pos);
+    if (!b.isValid()) return {};
+    // Locate the fragment containing pos, then extend across adjacent fragments
+    // of the same tracked kind so one click covers the whole edit.
+    bool del = false;
+    int start = -1, end = -1;
+    for (auto it = b.begin(); it != b.end(); ++it) {
+        const QTextFragment f = it.fragment();
+        if (!f.isValid()) continue;
+        if (pos < f.position() || pos > f.position() + f.length()) continue;
+        const QTextCharFormat cf = f.charFormat();
+        if (cf.boolProperty(kTrackDelete)) del = true;
+        else if (!cf.boolProperty(kTrackInsert)) return {};
+        start = f.position();
+        end   = f.position() + f.length();
+        break;
+    }
+    if (start < 0) return {};
+    for (auto it = b.begin(); it != b.end(); ++it) {         // extend both ways
+        const QTextFragment f = it.fragment();
+        if (!f.isValid()) continue;
+        const QTextCharFormat cf = f.charFormat();
+        const bool same = del ? cf.boolProperty(kTrackDelete)
+                              : cf.boolProperty(kTrackInsert);
+        if (!same) continue;
+        if (f.position() + f.length() == start) start = f.position();
+        if (f.position() == end)                end   = f.position() + f.length();
+    }
+    return { start, end, del };
+}
+
+void PagedTextEdit::resolveTrackedRun(const TrackedRun& run, bool accept) {
+    if (run.start < 0 || run.end <= run.start) return;
+    QTextCursor c(document());
+    c.setPosition(run.start);
+    c.setPosition(qMin(run.end, document()->characterCount() - 1),
+                  QTextCursor::KeepAnchor);
+    c.beginEditBlock();
+    // Accepting a deletion or rejecting an insertion removes the text;
+    // otherwise the text stays and the tracking markup is stripped.
+    if (run.deletion == accept) {
+        c.removeSelectedText();
+    } else {
+        QTextCharFormat n;
+        n.setForeground(QColor("#1C1E26"));
+        n.setFontUnderline(false);
+        n.setFontStrikeOut(false);
+        n.setProperty(kTrackInsert, false);
+        n.setProperty(kTrackDelete, false);
+        c.mergeCharFormat(n);
+    }
+    c.endEditBlock();
+}
+
 void PagedTextEdit::applyAutoCorrectAtCursor() {
     QTextCursor c = textCursor();
     if (c.hasSelection() || c.positionInBlock() == 0) return;
@@ -518,6 +685,27 @@ void PagedTextEdit::contextMenuEvent(QContextMenuEvent* e) {
         menu.addAction("Delete Image",  this, [this]{ deleteSelectedImage(); });
         menu.exec(e->globalPos());
         return;
+    }
+
+    // Right-clicking a tracked change offers per-change accept/reject.
+    {
+        const TrackedRun run = trackedRunAt(cursorForPosition(e->pos()).position());
+        if (run.start >= 0) {
+            QMenu* menu = createStandardContextMenu(e->pos());
+            QAction* before = menu->actions().isEmpty() ? nullptr : menu->actions().first();
+            auto* acc = new QAction(run.deletion ? tr("Accept Deletion")
+                                                 : tr("Accept Insertion"), menu);
+            connect(acc, &QAction::triggered, this, [this, run]{ resolveTrackedRun(run, true); });
+            auto* rej = new QAction(run.deletion ? tr("Reject Deletion (Restore Text)")
+                                                 : tr("Reject Insertion"), menu);
+            connect(rej, &QAction::triggered, this, [this, run]{ resolveTrackedRun(run, false); });
+            menu->insertAction(before, acc);
+            menu->insertAction(before, rej);
+            menu->insertSeparator(before);
+            menu->exec(e->globalPos());
+            delete menu;
+            return;
+        }
     }
 
     // Spell suggestions take priority when right-clicking a misspelled word.
