@@ -10,6 +10,10 @@ qt_add_executable(NativeOffice
     startscreen/RecentFilesWidget.h
     startscreen/SplashScreen.cpp
     startscreen/SplashScreen.h
+    auth/LoginGate.cpp
+    auth/LoginGate.h
+    auth/InstanceGuard.cpp
+    auth/InstanceGuard.h
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
 
@@ -30,6 +34,7 @@ target_link_libraries(NativeOffice PRIVATE
     Qt6::Widgets
     Qt6::Svg
     Qt6::PrintSupport
+    Qt6::Network
 )
 
 set_target_properties(NativeOffice PROPERTIES

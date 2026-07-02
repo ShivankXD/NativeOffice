@@ -559,16 +559,17 @@ ImpressRibbon::ImpressRibbon(QWidget* parent)
     m_stack = new QStackedWidget(this);
     m_stack->setObjectName("ribbonStack");
     m_stack->setFixedHeight(92);
+    // Only Home builds eagerly; the other tabs build on first click so the
+    // presentation window opens fast (ribbon construction dominates open time).
     m_stack->addWidget(buildHomeTab());
-    m_stack->addWidget(buildInsertTab());
-    m_stack->addWidget(buildDesignTab());
-    m_stack->addWidget(buildTransitionsTab());
-    m_stack->addWidget(buildAnimationsTab());
-    m_stack->addWidget(buildSlideShowTab());
-    m_stack->addWidget(buildReviewTab());
-    m_stack->addWidget(buildViewTab());
+    for (int i = 1; i <= 7; ++i)
+        m_stack->addWidget(new QWidget(this));   // placeholders, built on demand
+    m_tabBuilt = { true, false, false, false, false, false, false, false };
 
-    connect(m_tabGroup, &QButtonGroup::idClicked, m_stack, &QStackedWidget::setCurrentIndex);
+    connect(m_tabGroup, &QButtonGroup::idClicked, this, [this](int id) {
+        ensureTabBuilt(id);
+        m_stack->setCurrentIndex(id);
+    });
 
     root->addWidget(tabRow);
     root->addWidget(m_stack);
@@ -1250,6 +1251,26 @@ QWidget* ImpressRibbon::makeSeparator() {
     sep->setFixedWidth(1);
     sep->setObjectName("ribbonSep");
     return sep;
+}
+
+void ImpressRibbon::ensureTabBuilt(int id) {
+    if (id < 0 || id >= m_tabBuilt.size() || m_tabBuilt[id]) return;
+    QWidget* built = nullptr;
+    switch (id) {
+    case 1: built = buildInsertTab();      break;
+    case 2: built = buildDesignTab();      break;
+    case 3: built = buildTransitionsTab(); break;
+    case 4: built = buildAnimationsTab();  break;
+    case 5: built = buildSlideShowTab();   break;
+    case 6: built = buildReviewTab();      break;
+    case 7: built = buildViewTab();        break;
+    default: return;
+    }
+    QWidget* placeholder = m_stack->widget(id);
+    m_stack->removeWidget(placeholder);
+    placeholder->deleteLater();
+    m_stack->insertWidget(id, built);
+    m_tabBuilt[id] = true;
 }
 
 void ImpressRibbon::resetInsertMode() {

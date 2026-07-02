@@ -96,6 +96,8 @@ signals:
     void viewModeChanged(NativeOffice::ImpressViewMode mode);
 
 private:
+    void     ensureTabBuilt(int id);   // lazy tab construction (perf)
+    QVector<bool> m_tabBuilt;
     QWidget* buildHomeTab();
     QWidget* buildInsertTab();
     QWidget* buildDesignTab();

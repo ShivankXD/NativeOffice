@@ -34,6 +34,7 @@ find_package(Qt6 REQUIRED COMPONENTS
     Svg
     PrintSupport
     Charts
+    Network
 )
 
 qt_standard_project_setup()

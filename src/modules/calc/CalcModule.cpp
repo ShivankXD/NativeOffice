@@ -52,6 +52,7 @@
 #include <QProcess>
 #include <QComboBox>
 #include <QFontComboBox>
+#include <QFontDatabase>
 #include <QStackedWidget>
 #include <QScrollArea>
 #include <QColorDialog>
@@ -1706,12 +1707,23 @@ void CalcModule::buildRibbon() {
         auto* fg = new QGridLayout(fw);
         fg->setContentsMargins(0, 0, 0, 0);
         fg->setHorizontalSpacing(2); fg->setVerticalSpacing(2);
-        m_fontCombo = new QFontComboBox(m_ribbon);
+        // Plain QComboBox instead of QFontComboBox: QFontComboBox touches every
+        // installed font up front, which stalls window creation on font-heavy
+        // machines (same fix as the Writer ribbon).
+        m_fontCombo = new QComboBox(m_ribbon);
         m_fontCombo->setObjectName("fontCombo");
+        m_fontCombo->setEditable(true);
+        m_fontCombo->setInsertPolicy(QComboBox::NoInsert);
         m_fontCombo->setMaximumWidth(132);
-        m_fontCombo->setCurrentFont(QFont("Calibri"));
+        m_fontCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        m_fontCombo->setMinimumContentsLength(10);
+        m_fontCombo->addItems(QFontDatabase::families());
+        m_fontCombo->setCurrentText("Calibri");
         m_fontCombo->setFocusPolicy(Qt::ClickFocus);
-        connect(m_fontCombo, &QFontComboBox::currentFontChanged, this, [this](const QFont&){ onFontFamilyChanged(); });
+        connect(m_fontCombo, &QComboBox::currentTextChanged, this, [this](const QString& fam){
+            if (m_updatingToolbar || fam.isEmpty()) return;
+            onFontFamilyChanged();
+        });
         m_sizeCombo = new QComboBox(m_ribbon);
         m_sizeCombo->setObjectName("sizeCombo");
         m_sizeCombo->setEditable(true);
@@ -2275,13 +2287,6 @@ void CalcModule::buildRibbon() {
         QHBoxLayout* sheetT = group(pl, "Sheet");
         act(sheetT, "merge-sheet", "Merge\nSheets", "Combine every sheet into a new one", [this]{ mergeAllSheets(); });
         act(sheetT, "split-sheet", "Split\nSheet",  "Split a sheet into files (not yet)", [this]{ featureInfo("Split Sheet", "Splitting a sheet into files isn't supported yet."); });
-
-        QHBoxLayout* cloud = group(pl, "Cloud & Files");
-        act(cloud, "auto-backup", "Auto\nBackup",  "Automatic backup (not configured)", [this]{ featureInfo("Auto Backup", "Automatic backup isn't configured in this build."); });
-        act(cloud, "save-cloud",  "Save to\nCloud", "Cloud sync (needs an account)", [this]{ featureInfo("Save to Cloud", "Cloud sync needs an online account not in this build."); });
-        act(cloud, "scan-mobile", "Scan to\nMobile","Mobile pairing (online service)", [this]{ featureInfo("Scan to Mobile", "Mobile pairing needs an online service."); });
-        act(cloud, "design-lib",  "Design\nLibrary","Online template library", [this]{ featureInfo("Design Library", "The online template library isn't part of this build."); });
-        act(cloud, "invoice",     "Invoice\nMaker", "Invoice templates", [this]{ featureInfo("Invoice Maker", "The invoice template gallery isn't part of this build."); });
 
         pl->addStretch(1);
     }
@@ -3446,7 +3451,7 @@ void CalcModule::onFormatPainterClicked() {
     }
 }
 void CalcModule::onFontFamilyChanged() {
-    const QString fam = m_fontCombo->currentFont().family();
+    const QString fam = m_fontCombo->currentText();
     applyFormatToSelection([fam](CellFormat& f){ f.fontFamily = fam; }, "Font");
 }
 void CalcModule::onFontSizeChanged() {
@@ -4125,7 +4130,7 @@ void CalcModule::updateToolbarFromCell() {
                              : CellFormat{};
 
     m_updatingToolbar = true;
-    m_fontCombo->setCurrentFont(QFont(f.fontFamily.isEmpty() ? "Calibri" : f.fontFamily));
+    m_fontCombo->setCurrentText(f.fontFamily.isEmpty() ? "Calibri" : f.fontFamily);
     m_sizeCombo->setCurrentText(QString::number(f.fontSize > 0 ? f.fontSize : 11));
     m_boldBtn->setChecked(f.bold);
     m_italicBtn->setChecked(f.italic);

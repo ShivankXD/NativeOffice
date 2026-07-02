@@ -101,6 +101,7 @@ private:
     QWidget* buildViewTab();
     QWidget* buildToolsTab();
     QWidget* buildTableTab();
+    void     ensureTabBuilt(int id);     // lazy tab construction (perf)
     void     refreshTableTab();          // show/hide the contextual Table tab
     QWidget* buildPlaceholderTab(const QString& tabName);
 
@@ -301,6 +302,7 @@ private:
 
     bool m_syncing { false };
     int  m_caseCycle { 0 };   // Shift+F3 cycle position (UPPER → lower → Title)
+    QVector<bool> m_tabBuilt; // lazy ribbon tabs: which stack pages exist yet
 
     // Mail-merge data source (headers + records).
     QStringList         m_mergeHeaders;

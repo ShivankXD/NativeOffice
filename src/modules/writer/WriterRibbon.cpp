@@ -1157,16 +1157,16 @@ WriterRibbon::WriterRibbon(QWidget* parent)
     m_stack = new QStackedWidget(this);
     m_stack->setObjectName("ribbonStack");
     m_stack->setFixedHeight(100);
+    // Only the Home tab is built eagerly; the other seven build on first click.
+    // This cuts document-open time sharply — the full ribbon is by far the most
+    // expensive part of constructing a Writer window.
     m_stack->addWidget(buildHomeTab());        // 0 — Home
-    m_stack->addWidget(buildInsertTab());      // 1 — Insert
-    m_stack->addWidget(buildPageLayoutTab());  // 2 — Page Layout
-    m_stack->addWidget(buildReferencesTab());  // 3 — References
-    m_stack->addWidget(buildReviewTab());      // 4 — Review
-    m_stack->addWidget(buildViewTab());        // 5 — View
-    m_stack->addWidget(buildToolsTab());       // 6 — Tools
-    m_stack->addWidget(buildTableTab());       // 7 — Table (contextual)
+    for (int i = 1; i <= 7; ++i)
+        m_stack->addWidget(new QWidget(this)); // placeholders, replaced on demand
+    m_tabBuilt = { true, false, false, false, false, false, false, false };
 
     connect(m_tabGroup, &QButtonGroup::idClicked, this, [this](int id) {
+        ensureTabBuilt(id);
         m_stack->setCurrentIndex(id);
         if (m_collapsed) {                       // a click re-opens a collapsed ribbon
             m_collapsed = false;
@@ -2908,21 +2908,6 @@ QWidget* WriterRibbon::buildToolsTab() {
     layout->addWidget(makeGroup("Proofing", { btnStats, btnSpell, btnAuto }));
     layout->addWidget(makeSeparator());
 
-    // ── AI Assistant (Tier 5) ─────────────────────────────────────────────────
-    auto* btnAiRewrite = makeBigBtn(aiIcon(), "AI\nRewrite",   "Rewrite the selected text with AI");
-    auto* btnAiSum     = makeBigBtn(aiIcon(), "AI\nSummarize", "Summarize the document with AI");
-    auto* btnAiGen     = makeBigBtn(aiIcon(), "AI\nGenerate",  "Generate text from a prompt");
-    connect(btnAiRewrite, &QToolButton::clicked, this, &WriterRibbon::aiRewrite);
-    connect(btnAiSum,     &QToolButton::clicked, this, &WriterRibbon::aiSummarize);
-    connect(btnAiGen,     &QToolButton::clicked, this, &WriterRibbon::aiGenerate);
-    auto* rAiSettings = makeRowBtn(aiIcon(), "Settings…", "Set your Anthropic API key and model");
-    connect(rAiSettings, &QToolButton::clicked, this, &WriterRibbon::aiSettings);
-    auto* aiCol = new QWidget(tab);
-    auto* ail = new QVBoxLayout(aiCol); ail->setContentsMargins(0,0,0,0); ail->setSpacing(2);
-    ail->addWidget(rAiSettings); ail->addStretch();
-    layout->addWidget(makeGroup("AI Assistant", { btnAiRewrite, btnAiSum, btnAiGen, aiCol }));
-    layout->addWidget(makeSeparator());
-
     auto* btnFind  = makeBigBtn(findIcon(), "Find &\nReplace", "Find and replace (Ctrl+F)");
     connect(btnFind, &QToolButton::clicked, this, &WriterRibbon::openFindReplace);
 
@@ -3068,6 +3053,26 @@ QWidget* WriterRibbon::buildTableTab() {
     layout->addStretch();
     scroll->setWidget(tab);
     return scroll;
+}
+
+void WriterRibbon::ensureTabBuilt(int id) {
+    if (id < 0 || id >= m_tabBuilt.size() || m_tabBuilt[id]) return;
+    QWidget* built = nullptr;
+    switch (id) {
+    case 1: built = buildInsertTab();     break;
+    case 2: built = buildPageLayoutTab(); break;
+    case 3: built = buildReferencesTab(); break;
+    case 4: built = buildReviewTab();     break;
+    case 5: built = buildViewTab();       break;
+    case 6: built = buildToolsTab();      break;
+    case 7: built = buildTableTab();      break;
+    default: return;
+    }
+    QWidget* placeholder = m_stack->widget(id);
+    m_stack->removeWidget(placeholder);
+    placeholder->deleteLater();
+    m_stack->insertWidget(id, built);
+    m_tabBuilt[id] = true;
 }
 
 void WriterRibbon::refreshTableTab() {

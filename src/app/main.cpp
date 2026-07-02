@@ -14,10 +14,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "startscreen/StartScreen.h"
 #include "startscreen/SplashScreen.h"
+#include "auth/LoginGate.h"
+#include "auth/InstanceGuard.h"
 #include "core/theme/ThemeManager.h"
 #include "core/application/AppController.h"
 #include "core/application/RecentFilesManager.h"
 #include "core/application/FileRouter.h"
+#include "core/auth/AuthManager.h"
 
 #include "WriterModule.h"
 #include "CalcModule.h"
@@ -40,6 +43,7 @@
 #include <QMouseEvent>
 #include <QTime>
 #include <QDate>
+#include <QSettings>
 #include <QTabWidget>
 #include <QTabBar>
 #include <QToolButton>
@@ -613,6 +617,9 @@ protected:
             if (win && !win->requestClose()) { e->ignore(); return; }
         }
         e->accept();
+        // Quit-on-last-window-closed is off (see main()); closing the shell
+        // is the explicit "exit the app" action.
+        qApp->quit();
     }
 
 private:
@@ -1371,12 +1378,44 @@ int main(int argc, char* argv[]) {
 
     QApplication app(argc, argv);
 
+    // Quitting is explicit (gate cancelled, or the main shell closed). The
+    // default quit-on-last-window-closed misfires during the gate → splash →
+    // shell handoffs: Qt gives splash-type windows a transient parent, so
+    // closing the gate while only the splash is up would exit the app.
+    app.setQuitOnLastWindowClosed(false);
+
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
     app.setApplicationVersion("0.4.0");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
+
+    // ── Parse the command line up front ─────────────────────────────────────
+    // File paths open as tabs later (after the shell exists); a nativeoffice://
+    // URL is the browser's auth fast path and may mean this whole process only
+    // exists to deliver it to an already-running instance.
+    const QStringList cliArgs = app.arguments();
+    QStringList cliFiles;
+    QString protocolUrl;
+    for (int i = 1; i < cliArgs.size(); ++i) {
+        const QString arg = cliArgs.at(i);
+        if (arg.startsWith(QLatin1String("nativeoffice://")))
+            protocolUrl = arg;
+        else if (QFileInfo::exists(arg))
+            cliFiles << arg;
+    }
+
+    // If the browser launched us purely to deliver an auth callback and a
+    // primary instance is running, hand the URL over and exit immediately
+    // (before any threads or windows are created).
+    NativeOffice::InstanceGuard guard;
+    if (!protocolUrl.isEmpty() && cliFiles.isEmpty()
+        && guard.forwardToPrimary(protocolUrl)) {
+        return 0;
+    }
+    guard.startPrimary();
+    NativeOffice::InstanceGuard::registerProtocolScheme();
 
     // ── Warm Qt's font cache in the background ──────────────────────────────
     // The first document window builds a font picker; on font-heavy machines the
@@ -1438,36 +1477,63 @@ int main(int argc, char* argv[]) {
         openDocumentByPath(path);
     });
 
-    // ── Open any document passed on the command line (file association /
-    //    double-click-to-open). Each existing path is routed by content type
-    //    and opens as a tab inside the shell.
-    const QStringList cliArgs = app.arguments();
-    bool openedFromCli = false;
-    for (int i = 1; i < cliArgs.size(); ++i) {
-        const QString path = cliArgs.at(i);
-        if (QFileInfo::exists(path)) {
-            openDocumentByPath(path);
-            openedFromCli = true;
-        }
-    }
+    // ── Open documents passed on the command line (file association /
+    //    double-click-to-open). Each path is routed by content type and opens
+    //    as a tab inside the shell.
+    const bool openedFromCli = !cliFiles.isEmpty();
+    for (const QString& path : cliFiles)
+        openDocumentByPath(path);
 
+    auto& auth = NativeOffice::AuthManager::instance();
+    QObject::connect(&guard, &NativeOffice::InstanceGuard::urlReceived,
+                     &auth, [&auth, &shell](const QString&) {
+        auth.pollNow();                   // browser says approval landed
+        if (shell.isVisible()) { shell.raise(); shell.activateWindow(); }
+    });
+
+    // ── Reveal flow (after the sign-in gate) ───────────────────────────────
     // When launched to open a specific document, go straight to its tab (no
     // splash). Otherwise show the WPS-style startup splash, then reveal the
     // shell on the Home tab once it finishes.
-    if (openedFromCli) {
-        shell.show();
-        shell.raise();
-        shell.activateWindow();
-    } else {
-        auto* splash = new NativeOffice::SplashScreen;
-        QObject::connect(splash, &NativeOffice::SplashScreen::finished,
+    auto revealApp = [&shell, openedFromCli]() {
+        const bool showSplash = QSettings().value("app/showSplash", true).toBool();
+        if (openedFromCli || !showSplash) {
+            shell.show();
+            shell.raise();
+            shell.activateWindow();
+        } else {
+            auto* splash = new NativeOffice::SplashScreen;
+            QObject::connect(splash, &NativeOffice::SplashScreen::finished,
+                             &shell, [&shell]() {
+                shell.show();
+                shell.raise();
+                shell.activateWindow();
+            });
+            splash->start(2200);
+        }
+    };
+
+    // ── Sign-in gate: the app is gated until a session exists ─────────────
+    {
+        auto* gate = new NativeOffice::LoginGate;
+        QObject::connect(gate, &NativeOffice::LoginGate::proceed,
+                         &shell, [revealApp]() { revealApp(); });
+        gate->begin();
+    }
+
+    // Signing out (from Settings) hides the shell and re-gates.
+    QObject::connect(&auth, &NativeOffice::AuthManager::signedOut,
+                     &shell, [&shell]() {
+        shell.hide();
+        auto* gate = new NativeOffice::LoginGate;
+        QObject::connect(gate, &NativeOffice::LoginGate::proceed,
                          &shell, [&shell]() {
             shell.show();
             shell.raise();
             shell.activateWindow();
         });
-        splash->start(2200);
-    }
+        gate->begin();
+    });
 
     const int rc = app.exec();
     if (fontWarmup.joinable()) fontWarmup.join();

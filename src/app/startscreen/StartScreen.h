@@ -45,6 +45,7 @@ private:
 
     void openFileDialog();
     void showTemplatesDialog(int initialCategory = 0);  // 0 Word, 1 Sheet, 2 Slides
+    void showSettingsDialog();                          // real, QSettings-backed
 
     AppController* m_controller { nullptr };
 };

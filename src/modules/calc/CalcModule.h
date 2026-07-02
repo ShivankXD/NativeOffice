@@ -317,7 +317,7 @@ private:
     QVector<QToolButton*> m_ribbonTabBtns;   // tab strip buttons (one per page)
 
     // ── Formatting widgets ────────────────────────────────────────────────────
-    QFontComboBox* m_fontCombo     { nullptr };
+    QComboBox*     m_fontCombo     { nullptr };
     QComboBox*     m_sizeCombo     { nullptr };
     QToolButton*   m_boldBtn       { nullptr };
     QToolButton*   m_italicBtn     { nullptr };

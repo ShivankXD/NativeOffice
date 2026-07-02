@@ -3,6 +3,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "StartScreen.h"
 #include "core/application/RecentFilesManager.h"
+#include "core/auth/AuthManager.h"
+
+#include <QMessageBox>
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -25,6 +28,11 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QTime>
+#include <QSettings>
+#include <QSpinBox>
+#include <QCheckBox>
+#include <QFormLayout>
+#include <QDialogButtonBox>
 #include <functional>
 #include <utility>
 
@@ -215,8 +223,8 @@ QWidget* StartScreen::buildSidebar() {
     struct Nav { QString icon, label; int action; };  // action: -1 none, 0 home, see below
     const Nav items[] = {
         {"⌂","Home", 0}, {"📄","Documents", 1}, {"▦","Sheets", 2}, {"▤","Slides", 3},
-        {"⤓","PDF Tools", -1}, {"🗎","Templates", 4}, {"☁","Cloud Drive", -1},
-        {"👥","Shared with me", -1}, {"★","Favorites", -1}, {"🗑","Recycle Bin", -1},
+        {"⤓","PDF Tools", -1}, {"🗎","Templates", 4},
+        {"★","Favorites", -1}, {"🗑","Recycle Bin", -1},
     };
     for (const Nav& n : items) {
         auto* item = new ClickableFrame(bar);
@@ -287,7 +295,7 @@ QWidget* StartScreen::buildTopBar() {
     };
     h->addWidget(iconBtn("🔔", nullptr));
     h->addWidget(iconBtn("?", nullptr));
-    h->addWidget(iconBtn("⚙", [this]{ emit settingsRequested(); }));
+    h->addWidget(iconBtn("⚙", [this]{ showSettingsDialog(); }));
     h->addWidget(badge("S", "#2563EB", 38, bar));   // avatar
 
     bar->setStyleSheet(R"(
@@ -312,11 +320,12 @@ QWidget* StartScreen::buildCenterColumn() {
     auto* wl = new QHBoxLayout(welcome);
     wl->setContentsMargins(0, 0, 0, 0); wl->setSpacing(8);
     auto* wcol = new QVBoxLayout(); wcol->setSpacing(4);
+    const QString who = QSettings().value("user/name", "Shivank").toString();
     const int hr = QTime::currentTime().hour();
-    const QString greet = hr < 5  ? "Burning the midnight oil, Shivank 🌙"
-                        : hr < 12 ? "Good morning, Shivank ☀️"
-                        : hr < 17 ? "Good afternoon, Shivank 👋"
-                                  : "Good evening, Shivank 🌆";
+    const QString greet = hr < 5  ? QString("Burning the midnight oil, %1 🌙").arg(who)
+                        : hr < 12 ? QString("Good morning, %1 ☀️").arg(who)
+                        : hr < 17 ? QString("Good afternoon, %1 👋").arg(who)
+                                  : QString("Good evening, %1 🌆").arg(who);
     wcol->addWidget(heading(greet, 26, "#F0F2F7", true, welcome));
     wcol->addWidget(heading("What would you like to create today?", 14, "#8A93A6", false, welcome));
     wl->addLayout(wcol); wl->addStretch();
@@ -413,7 +422,7 @@ QWidget* StartScreen::buildQuickActions() {
         {"🗎","New from Template","#7C5CFC", 0},
         {"⤒","Import from Device","#2563EB", 1},
         {"📕","PDF to Word","#DC2626", 2},
-        {"✦","AI Document","#22C55E", 3},
+        {"👤","Resume Builder","#22C55E", 3},
         {"⋯","More Tools","#64748B", 4},
     };
     for (const QA& q : qas) {
@@ -432,7 +441,7 @@ QWidget* StartScreen::buildQuickActions() {
             case 0: showTemplatesDialog(0); break;            // New from template
             case 1: openFileDialog(); break;                  // Import from device
             case 2: openFileDialog(); break;                  // PDF to Word → import
-            case 3: emit newDocumentRequested(DocumentType::Writer); break;  // AI doc → Writer (AI tools live there)
+            case 3: emit templateChosen(DocumentType::Writer, "Professional Resume"); break;
             case 4: showTemplatesDialog(0); break;            // More tools → templates
             }
         };
@@ -536,6 +545,12 @@ QWidget* StartScreen::buildTemplatesPanel() {
         thumb->setStyleSheet(QString("background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
             "stop:0 %1,stop:1 %2);border-top-left-radius:10px;border-top-right-radius:10px;")
             .arg(t.grad1, t.grad2));
+        auto* tv = new QHBoxLayout(thumb);
+        tv->setContentsMargins(10, 4, 10, 2);
+        tv->addStretch();
+        tv->addWidget(svgArt(t.type == DocumentType::Calc ? kArtSpreadsheet
+                           : t.type == DocumentType::Impress ? kArtPresentation
+                           : kArtDocument, 64, thumb), 0, Qt::AlignRight | Qt::AlignVCenter);
         cv->addWidget(thumb);
         auto* foot = new QVBoxLayout(); foot->setContentsMargins(10, 8, 10, 8); foot->setSpacing(1);
         foot->addWidget(heading(t.title, 12, "#E2E6EE", true, c));
@@ -604,18 +619,137 @@ QWidget* StartScreen::buildRightColumn() {
       pv->addWidget(twoCol(p, "⏱", "Time spent", "—", "#E6E9F0"));
       v->addWidget(p); }
 
-    // Sync Status
-    { auto [p, pv] = makePanel("Sync Status");
-      auto* s = heading("All files are stored locally on this device.", 12, "#9AA4B8", false, p);
-      s->setWordWrap(true);
-      pv->addWidget(s);
-      v->addWidget(p); }
-
     v->addStretch();
     col->setStyleSheet(R"(
         QFrame#sidePanel { background:#12161F; border:1px solid #202836; border-radius:14px; }
     )");
     return col;
+}
+
+// ── Settings dialog (QSettings-backed; read by main.cpp and the modules) ─────
+void StartScreen::showSettingsDialog() {
+    QSettings st;
+
+    QDialog dlg(this);
+    dlg.setObjectName("tplDialog");
+    dlg.setWindowTitle("Settings");
+    dlg.setMinimumWidth(430);
+    auto* root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(24, 20, 24, 20); root->setSpacing(14);
+    root->addWidget(heading("Settings", 20, "#F0F2F7", true, &dlg));
+
+    auto* form = new QFormLayout();
+    form->setSpacing(10);
+    auto mkLbl = [&](const QString& t){ return heading(t, 13, "#C3CAD8", false, &dlg); };
+
+    auto* nameEdit = new QLineEdit(st.value("user/name", "Shivank").toString(), &dlg);
+    form->addRow(mkLbl("Your name"), nameEdit);
+
+    auto* splashChk = new QCheckBox("Show splash screen on startup", &dlg);
+    splashChk->setChecked(st.value("app/showSplash", true).toBool());
+    form->addRow(mkLbl("Startup"), splashChk);
+
+    auto* spellChk = new QCheckBox("Spell check on by default", &dlg);
+    spellChk->setChecked(st.value("writer/spellDefault", true).toBool());
+    form->addRow(mkLbl("Writer"), spellChk);
+
+    auto* autoChk = new QCheckBox("AutoCorrect as you type", &dlg);
+    autoChk->setChecked(st.value("writer/autoCorrect", true).toBool());
+    form->addRow(QString(), autoChk);
+
+    auto* autosaveSpin = new QSpinBox(&dlg);
+    autosaveSpin->setRange(5, 300); autosaveSpin->setSuffix(" s");
+    autosaveSpin->setValue(st.value("writer/autosaveSec", 20).toInt());
+    form->addRow(mkLbl("Autosave interval"), autosaveSpin);
+
+    auto* zoomSpin = new QSpinBox(&dlg);
+    zoomSpin->setRange(50, 300); zoomSpin->setSuffix(" %"); zoomSpin->setSingleStep(10);
+    zoomSpin->setValue(st.value("writer/defaultZoom", 100).toInt());
+    form->addRow(mkLbl("Default zoom"), zoomSpin);
+
+    auto* rulersChk = new QCheckBox("Show rulers in new documents", &dlg);
+    rulersChk->setChecked(st.value("writer/rulers", true).toBool());
+    form->addRow(QString(), rulersChk);
+
+    root->addLayout(form);
+    auto* note = heading("Changes apply to newly opened documents.", 11, "#7B8494", false, &dlg);
+    root->addWidget(note);
+
+    // ── Account & License ─────────────────────────────────────────────────
+    // Purchase and key activation live on nativeoffice.online — these buttons
+    // just open the browser; the entitlement syncs back automatically.
+    auto* sep = new QFrame(&dlg);
+    sep->setFrameShape(QFrame::HLine);
+    sep->setStyleSheet("color:#232A38; background:#232A38; max-height:1px;");
+    root->addWidget(sep);
+    root->addWidget(heading("Account & License", 15, "#F0F2F7", true, &dlg));
+
+    auto& auth = AuthManager::instance();
+    const bool premium = auth.premiumActive();
+    const QString who  = auth.userEmail().isEmpty()
+                             ? QStringLiteral("Not signed in")
+                             : auth.userEmail();
+    const QString plan = premium
+        ? (auth.premiumPlan() == QLatin1String("lifetime")
+               ? QStringLiteral("Premium · Lifetime")
+               : QStringLiteral("Premium"))
+        : QStringLiteral("Free plan");
+    root->addWidget(heading(QString("%1   ·   %2").arg(who, plan), 12,
+                            premium ? "#3FB68B" : "#8A93A6", false, &dlg));
+
+    auto* acctRow = new QHBoxLayout();
+    acctRow->setSpacing(8);
+    auto* buyBtn = new QPushButton(premium ? "Manage Account" : "✨ Buy Premium", &dlg);
+    auto* keyBtn = new QPushButton("🔑 Activate Key", &dlg);
+    auto* outBtn = new QPushButton("Sign Out", &dlg);
+    for (auto* b : { buyBtn, keyBtn, outBtn }) {
+        b->setCursor(Qt::PointingHandCursor);
+        acctRow->addWidget(b);
+    }
+    acctRow->addStretch();
+    root->addLayout(acctRow);
+
+    connect(buyBtn, &QPushButton::clicked, &dlg, [&auth, premium]() {
+        premium ? auth.openAccountPage() : auth.openPremiumPage();
+    });
+    connect(keyBtn, &QPushButton::clicked, &dlg, [&auth]() {
+        auth.openActivateKeyPage();
+    });
+    connect(outBtn, &QPushButton::clicked, &dlg, [&auth, &dlg]() {
+        const auto btn = QMessageBox::question(&dlg, "Sign Out",
+            "Sign out of NativeOffice on this computer?\n"
+            "You'll be asked to sign in again next time.",
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (btn != QMessageBox::Yes) return;
+        dlg.reject();          // close settings before the gate reappears
+        auth.signOut();
+    });
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dlg);
+    root->addWidget(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    dlg.setStyleSheet(R"(
+        QDialog#tplDialog { background:#0D1117; }
+        QLineEdit, QSpinBox { background:#161B26; border:1px solid #232A38; border-radius:8px;
+            color:#E2E6EE; padding:6px 10px; font:13px 'Segoe UI'; }
+        QCheckBox { color:#C3CAD8; font:13px 'Segoe UI'; }
+        QCheckBox::indicator { width:16px; height:16px; }
+        QPushButton { background:#17233B; border:1px solid #3B82F6; border-radius:8px;
+            color:#FFFFFF; font:13px 'Segoe UI'; padding:7px 20px; }
+        QPushButton:hover { background:#1E2E4D; }
+    )");
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    st.setValue("user/name",           nameEdit->text().trimmed().isEmpty()
+                                           ? "there" : nameEdit->text().trimmed());
+    st.setValue("app/showSplash",      splashChk->isChecked());
+    st.setValue("writer/spellDefault", spellChk->isChecked());
+    st.setValue("writer/autoCorrect",  autoChk->isChecked());
+    st.setValue("writer/autosaveSec",  autosaveSpin->value());
+    st.setValue("writer/defaultZoom",  zoomSpin->value());
+    st.setValue("writer/rulers",       rulersChk->isChecked());
 }
 
 // ── Templates gallery dialog ──────────────────────────────────────────────────
@@ -681,14 +815,20 @@ void StartScreen::showTemplatesDialog(int initialCategory) {
             cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(0);
             auto* thumb = new QFrame(c);
             thumb->setFixedHeight(96);
+            // Qt parses 8-digit hex as #AARGGBB, so the alpha goes FIRST —
+            // appending it ("#2563EB"+"33") silently shifted the channels and
+            // painted the Word thumbs green.
             thumb->setStyleSheet(QString("background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
                 "stop:0 %1,stop:1 #11151d);border-top-left-radius:10px;border-top-right-radius:10px;")
-                .arg(cat.accent + "33"));   // translucent accent
-            auto* tl = new QVBoxLayout(thumb); tl->setContentsMargins(12, 12, 12, 12);
+                .arg("#33" + cat.accent.mid(1)));   // translucent accent
+            auto* tl = new QHBoxLayout(thumb); tl->setContentsMargins(12, 10, 12, 6);
             tl->addWidget(badge(cat.type == DocumentType::Calc ? "S"
                               : cat.type == DocumentType::Impress ? "P" : "W",
                               cat.accent, 28, thumb), 0, Qt::AlignLeft | Qt::AlignTop);
             tl->addStretch();
+            tl->addWidget(svgArt(cat.type == DocumentType::Calc ? kArtSpreadsheet
+                               : cat.type == DocumentType::Impress ? kArtPresentation
+                               : kArtDocument, 74, thumb), 0, Qt::AlignRight | Qt::AlignBottom);
             cv->addWidget(thumb);
             auto* lbl = heading(name, 12, "#E2E6EE", false, c);
             lbl->setWordWrap(true);

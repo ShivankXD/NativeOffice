@@ -16,6 +16,7 @@
 #include <QScrollBar>
 #include <QResizeEvent>
 #include <QStandardPaths>
+#include <QSettings>
 #include <QMessageBox>
 #include <QDir>
 #include <QApplication>
@@ -284,10 +285,12 @@ void WriterModule::buildUi() {
     m_statusTimer->setInterval(220);
     connect(m_statusTimer, &QTimer::timeout, this, &WriterModule::updateStatus);
 
-    // Autosave: snapshot unsaved changes to a recovery file every 20s. A clean
+    // Autosave: snapshot unsaved changes to a recovery file periodically. A clean
     // app exit deletes it; a crash leaves it for recovery on next launch.
+    // Interval is user-configurable in Home → Settings.
+    const QSettings settings;
     m_autosaveTimer = new QTimer(this);
-    m_autosaveTimer->setInterval(20000);
+    m_autosaveTimer->setInterval(qBound(5, settings.value("writer/autosaveSec", 20).toInt(), 300) * 1000);
     connect(m_autosaveTimer, &QTimer::timeout, this, &WriterModule::writeRecovery);
     m_autosaveTimer->start();
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this]{ QFile::remove(recoveryFilePath()); });
@@ -342,9 +345,21 @@ void WriterModule::buildUi() {
     connect(m_statusBar, &WriterStatusBar::spellCheckToggled, this, [this](bool on){
         if (m_paper) m_paper->setSpellCheckEnabled(on);
     });
-    // Spell check on by default; sync the editor to the pill's initial state.
-    if (m_paper) m_paper->setSpellCheckEnabled(true);
-    m_statusBar->setSpellCheckActive(true);
+    // Spell check / AutoCorrect defaults come from Home → Settings.
+    const bool spellOn = settings.value("writer/spellDefault", true).toBool();
+    if (m_paper) {
+        m_paper->setSpellCheckEnabled(spellOn);
+        m_paper->setAutoCorrectEnabled(settings.value("writer/autoCorrect", true).toBool());
+    }
+    m_statusBar->setSpellCheckActive(spellOn);
+
+    // Rulers default + starting zoom, also from Settings.
+    setRulersVisible(settings.value("writer/rulers", true).toBool());
+    const int defZoom = qBound(50, settings.value("writer/defaultZoom", 100).toInt(), 300);
+    if (defZoom != 100) {
+        applyZoom(defZoom);
+        m_statusBar->setZoomPercent(defZoom);
+    }
 
     // Keep the {file} header/footer field in sync with the document name.
     connect(this, &WriterModule::filePathChanged, this, [this](const QString& p) {
