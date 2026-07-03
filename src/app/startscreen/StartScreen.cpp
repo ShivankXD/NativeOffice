@@ -4,6 +4,8 @@
 #include "StartScreen.h"
 #include "core/application/RecentFilesManager.h"
 #include "core/auth/AuthManager.h"
+#include "common/Avatars.h"
+#include "settings/SettingsDialog.h"
 
 #include <QMessageBox>
 
@@ -26,6 +28,7 @@
 #include <QEnterEvent>
 #include <QSvgRenderer>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QTime>
 #include <QSettings>
@@ -296,7 +299,28 @@ QWidget* StartScreen::buildTopBar() {
     h->addWidget(iconBtn("🔔", nullptr));
     h->addWidget(iconBtn("?", nullptr));
     h->addWidget(iconBtn("⚙", [this]{ showSettingsDialog(); }));
-    h->addWidget(badge("S", "#2563EB", 38, bar));   // avatar
+
+    // Account avatar — the real profile photo (cached by AuthManager), with a
+    // coloured-initial fallback. Clicking it opens Settings → Account.
+    auto* avatar = new QToolButton(bar);
+    avatar->setObjectName("avatarBtn");
+    avatar->setCursor(Qt::PointingHandCursor);
+    avatar->setFixedSize(38, 38);
+    avatar->setIconSize(QSize(38, 38));
+    avatar->setStyleSheet("QToolButton#avatarBtn { border:none; background:transparent; }");
+    auto refreshAvatar = [avatar]() {
+        auto& auth = AuthManager::instance();
+        avatar->setIcon(QIcon(roundAvatarPixmap(
+            38, avatar->devicePixelRatio())));
+        avatar->setToolTip(auth.userEmail().isEmpty()
+                               ? QStringLiteral("Account")
+                               : auth.userName() + QStringLiteral("\n") + auth.userEmail());
+    };
+    refreshAvatar();
+    connect(&AuthManager::instance(), &AuthManager::profileChanged,
+            avatar, refreshAvatar);
+    connect(avatar, &QToolButton::clicked, this, [this]{ showSettingsDialog(); });
+    h->addWidget(avatar);
 
     bar->setStyleSheet(R"(
         QWidget#topBar { background:#0D1117; border-bottom:1px solid #1B212C; }
@@ -320,13 +344,23 @@ QWidget* StartScreen::buildCenterColumn() {
     auto* wl = new QHBoxLayout(welcome);
     wl->setContentsMargins(0, 0, 0, 0); wl->setSpacing(8);
     auto* wcol = new QVBoxLayout(); wcol->setSpacing(4);
-    const QString who = QSettings().value("user/name", "Shivank").toString();
-    const int hr = QTime::currentTime().hour();
-    const QString greet = hr < 5  ? QString("Burning the midnight oil, %1 🌙").arg(who)
-                        : hr < 12 ? QString("Good morning, %1 ☀️").arg(who)
-                        : hr < 17 ? QString("Good afternoon, %1 👋").arg(who)
-                                  : QString("Good evening, %1 🌆").arg(who);
-    wcol->addWidget(heading(greet, 26, "#F0F2F7", true, welcome));
+    // Greeting uses the signed-in account's first name and refreshes when the
+    // profile syncs (the home page is built before sign-in completes).
+    auto* greetLabel = heading(QString(), 26, "#F0F2F7", true, welcome);
+    auto refreshGreeting = [greetLabel]() {
+        QString who = AuthManager::instance().displayName();
+        if (who.isEmpty()) who = QStringLiteral("there");
+        const int hr = QTime::currentTime().hour();
+        greetLabel->setText(
+              hr < 5  ? QString("Burning the midnight oil, %1 🌙").arg(who)
+            : hr < 12 ? QString("Good morning, %1 ☀️").arg(who)
+            : hr < 17 ? QString("Good afternoon, %1 👋").arg(who)
+                      : QString("Good evening, %1 🌆").arg(who));
+    };
+    refreshGreeting();
+    connect(&AuthManager::instance(), &AuthManager::profileChanged,
+            greetLabel, refreshGreeting);
+    wcol->addWidget(greetLabel);
     wcol->addWidget(heading("What would you like to create today?", 14, "#8A93A6", false, welcome));
     wl->addLayout(wcol); wl->addStretch();
     auto* importBtn = new QPushButton("⤒  Import File", welcome);
@@ -626,130 +660,10 @@ QWidget* StartScreen::buildRightColumn() {
     return col;
 }
 
-// ── Settings dialog (QSettings-backed; read by main.cpp and the modules) ─────
+// ── Settings ── the full sectioned window lives in settings/SettingsDialog ───────
 void StartScreen::showSettingsDialog() {
-    QSettings st;
-
-    QDialog dlg(this);
-    dlg.setObjectName("tplDialog");
-    dlg.setWindowTitle("Settings");
-    dlg.setMinimumWidth(430);
-    auto* root = new QVBoxLayout(&dlg);
-    root->setContentsMargins(24, 20, 24, 20); root->setSpacing(14);
-    root->addWidget(heading("Settings", 20, "#F0F2F7", true, &dlg));
-
-    auto* form = new QFormLayout();
-    form->setSpacing(10);
-    auto mkLbl = [&](const QString& t){ return heading(t, 13, "#C3CAD8", false, &dlg); };
-
-    auto* nameEdit = new QLineEdit(st.value("user/name", "Shivank").toString(), &dlg);
-    form->addRow(mkLbl("Your name"), nameEdit);
-
-    auto* splashChk = new QCheckBox("Show splash screen on startup", &dlg);
-    splashChk->setChecked(st.value("app/showSplash", true).toBool());
-    form->addRow(mkLbl("Startup"), splashChk);
-
-    auto* spellChk = new QCheckBox("Spell check on by default", &dlg);
-    spellChk->setChecked(st.value("writer/spellDefault", true).toBool());
-    form->addRow(mkLbl("Writer"), spellChk);
-
-    auto* autoChk = new QCheckBox("AutoCorrect as you type", &dlg);
-    autoChk->setChecked(st.value("writer/autoCorrect", true).toBool());
-    form->addRow(QString(), autoChk);
-
-    auto* autosaveSpin = new QSpinBox(&dlg);
-    autosaveSpin->setRange(5, 300); autosaveSpin->setSuffix(" s");
-    autosaveSpin->setValue(st.value("writer/autosaveSec", 20).toInt());
-    form->addRow(mkLbl("Autosave interval"), autosaveSpin);
-
-    auto* zoomSpin = new QSpinBox(&dlg);
-    zoomSpin->setRange(50, 300); zoomSpin->setSuffix(" %"); zoomSpin->setSingleStep(10);
-    zoomSpin->setValue(st.value("writer/defaultZoom", 100).toInt());
-    form->addRow(mkLbl("Default zoom"), zoomSpin);
-
-    auto* rulersChk = new QCheckBox("Show rulers in new documents", &dlg);
-    rulersChk->setChecked(st.value("writer/rulers", true).toBool());
-    form->addRow(QString(), rulersChk);
-
-    root->addLayout(form);
-    auto* note = heading("Changes apply to newly opened documents.", 11, "#7B8494", false, &dlg);
-    root->addWidget(note);
-
-    // ── Account & License ─────────────────────────────────────────────────
-    // Purchase and key activation live on nativeoffice.online — these buttons
-    // just open the browser; the entitlement syncs back automatically.
-    auto* sep = new QFrame(&dlg);
-    sep->setFrameShape(QFrame::HLine);
-    sep->setStyleSheet("color:#232A38; background:#232A38; max-height:1px;");
-    root->addWidget(sep);
-    root->addWidget(heading("Account & License", 15, "#F0F2F7", true, &dlg));
-
-    auto& auth = AuthManager::instance();
-    const bool premium = auth.premiumActive();
-    const QString who  = auth.userEmail().isEmpty()
-                             ? QStringLiteral("Not signed in")
-                             : auth.userEmail();
-    const QString plan = premium
-        ? (auth.premiumPlan() == QLatin1String("lifetime")
-               ? QStringLiteral("Premium · Lifetime")
-               : QStringLiteral("Premium"))
-        : QStringLiteral("Free plan");
-    root->addWidget(heading(QString("%1   ·   %2").arg(who, plan), 12,
-                            premium ? "#3FB68B" : "#8A93A6", false, &dlg));
-
-    auto* acctRow = new QHBoxLayout();
-    acctRow->setSpacing(8);
-    auto* buyBtn = new QPushButton(premium ? "Manage Account" : "✨ Buy Premium", &dlg);
-    auto* keyBtn = new QPushButton("🔑 Activate Key", &dlg);
-    auto* outBtn = new QPushButton("Sign Out", &dlg);
-    for (auto* b : { buyBtn, keyBtn, outBtn }) {
-        b->setCursor(Qt::PointingHandCursor);
-        acctRow->addWidget(b);
-    }
-    acctRow->addStretch();
-    root->addLayout(acctRow);
-
-    connect(buyBtn, &QPushButton::clicked, &dlg, [&auth, premium]() {
-        premium ? auth.openAccountPage() : auth.openPremiumPage();
-    });
-    connect(keyBtn, &QPushButton::clicked, &dlg, [&auth]() {
-        auth.openActivateKeyPage();
-    });
-    connect(outBtn, &QPushButton::clicked, &dlg, [&auth, &dlg]() {
-        const auto btn = QMessageBox::question(&dlg, "Sign Out",
-            "Sign out of NativeOffice on this computer?\n"
-            "You'll be asked to sign in again next time.",
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-        if (btn != QMessageBox::Yes) return;
-        dlg.reject();          // close settings before the gate reappears
-        auth.signOut();
-    });
-
-    auto* bb = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dlg);
-    root->addWidget(bb);
-    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-    dlg.setStyleSheet(R"(
-        QDialog#tplDialog { background:#0D1117; }
-        QLineEdit, QSpinBox { background:#161B26; border:1px solid #232A38; border-radius:8px;
-            color:#E2E6EE; padding:6px 10px; font:13px 'Segoe UI'; }
-        QCheckBox { color:#C3CAD8; font:13px 'Segoe UI'; }
-        QCheckBox::indicator { width:16px; height:16px; }
-        QPushButton { background:#17233B; border:1px solid #3B82F6; border-radius:8px;
-            color:#FFFFFF; font:13px 'Segoe UI'; padding:7px 20px; }
-        QPushButton:hover { background:#1E2E4D; }
-    )");
-
-    if (dlg.exec() != QDialog::Accepted) return;
-    st.setValue("user/name",           nameEdit->text().trimmed().isEmpty()
-                                           ? "there" : nameEdit->text().trimmed());
-    st.setValue("app/showSplash",      splashChk->isChecked());
-    st.setValue("writer/spellDefault", spellChk->isChecked());
-    st.setValue("writer/autoCorrect",  autoChk->isChecked());
-    st.setValue("writer/autosaveSec",  autosaveSpin->value());
-    st.setValue("writer/defaultZoom",  zoomSpin->value());
-    st.setValue("writer/rulers",       rulersChk->isChecked());
+    SettingsDialog dlg(this);
+    dlg.exec();
 }
 
 // ── Templates gallery dialog ──────────────────────────────────────────────────

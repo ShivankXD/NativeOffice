@@ -40,6 +40,14 @@ public:
     bool    hasToken() const;
     QString userEmail() const;
     QString userName() const;
+    QString firstName() const;        // from onboarding; may be empty
+    QString occupation() const;
+    QDateTime joinedAt() const;       // account creation date (invalid if unknown)
+    // Preferred short display name: onboarding first name, else the Google
+    // name's first word, else the email's local part.
+    QString displayName() const;
+    // Local path of the cached profile photo; empty until downloaded.
+    QString avatarPath() const;
     bool    premiumActive() const;
     QString premiumPlan() const;
 
@@ -70,6 +78,8 @@ signals:
     void authenticated();
     void deviceFlowFailed(const QString& message);
     void entitlementChanged(bool premiumActive);
+    // Identity data (name/photo/occupation) was refreshed from the backend.
+    void profileChanged();
     void signedOut();
 
 private:
@@ -78,6 +88,7 @@ private:
     void pollOnce();
     void handlePollReply(QNetworkReply* reply);
     void applyMe(const QByteArray& body);    // cache user + premium from /api/me JSON
+    void fetchAvatar(const QString& pictureUrl);
     QNetworkReply* getWithToken(const QString& path);
 
     QNetworkAccessManager* m_nam { nullptr };

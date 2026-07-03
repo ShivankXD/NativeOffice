@@ -5,12 +5,15 @@
 #include "SecureStore.h"
 
 #include <QDesktopServices>
+#include <QDir>
+#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
 
@@ -56,6 +59,37 @@ QString AuthManager::userName() const {
     return QSettings().value("account/name").toString();
 }
 
+QString AuthManager::firstName() const {
+    return QSettings().value("account/firstName").toString();
+}
+
+QString AuthManager::occupation() const {
+    return QSettings().value("account/occupation").toString();
+}
+
+QDateTime AuthManager::joinedAt() const {
+    const qint64 t = QSettings().value("account/createdAt", 0).toLongLong();
+    return t > 0 ? QDateTime::fromSecsSinceEpoch(t) : QDateTime();
+}
+
+QString AuthManager::displayName() const {
+    const QString first = firstName();
+    if (!first.isEmpty()) return first;
+    const QString name = userName().trimmed();
+    if (!name.isEmpty()) return name.section(QLatin1Char(' '), 0, 0);
+    return userEmail().section(QLatin1Char('@'), 0, 0);
+}
+
+static QString avatarFilePath() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+           + QStringLiteral("/avatar.img");
+}
+
+QString AuthManager::avatarPath() const {
+    const QString p = avatarFilePath();
+    return QFile::exists(p) ? p : QString();
+}
+
 bool AuthManager::premiumActive() const {
     // Locally enforce the expiry the server told us, so a lapsed subscription
     // doesn't stay unlocked between refreshes.
@@ -86,8 +120,17 @@ void AuthManager::applyMe(const QByteArray& body) {
     const QJsonObject premium = root.value("premium").toObject();
 
     QSettings st;
-    st.setValue("account/email", user.value("email").toString());
-    st.setValue("account/name",  user.value("name").toString());
+    const QString prevIdentity = st.value("account/name").toString()
+        + st.value("account/firstName").toString()
+        + st.value("account/occupation").toString();
+
+    st.setValue("account/email",      user.value("email").toString());
+    st.setValue("account/name",       user.value("name").toString());
+    st.setValue("account/firstName",  user.value("first_name").toString());
+    st.setValue("account/lastName",   user.value("last_name").toString());
+    st.setValue("account/occupation", user.value("occupation").toString());
+    st.setValue("account/createdAt",
+                static_cast<qint64>(user.value("created_at").toDouble(0)));
 
     const bool wasActive = premiumActive();
     st.setValue("license/premiumActive", premium.value("active").toBool());
@@ -97,6 +140,47 @@ void AuthManager::applyMe(const QByteArray& body) {
 
     if (wasActive != premiumActive())
         emit entitlementChanged(premiumActive());
+
+    const QString newIdentity = st.value("account/name").toString()
+        + st.value("account/firstName").toString()
+        + st.value("account/occupation").toString();
+    if (newIdentity != prevIdentity)
+        emit profileChanged();
+
+    // Keep the profile photo cached locally (photo URL changed, or no cache yet).
+    const QString picture = user.value("picture").toString();
+    if (!picture.isEmpty()
+        && (picture != st.value("account/pictureUrl").toString()
+            || avatarPath().isEmpty())) {
+        fetchAvatar(picture);
+    } else if (picture.isEmpty() && !avatarPath().isEmpty()) {
+        QFile::remove(avatarFilePath());
+        st.remove("account/pictureUrl");
+        emit profileChanged();
+    }
+}
+
+void AuthManager::fetchAvatar(const QString& pictureUrl) {
+    QNetworkRequest req{ QUrl(pictureUrl) };
+    req.setTransferTimeout(10000);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                     QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = m_nam->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, pictureUrl]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) return;   // retry next refresh
+        const QByteArray img = reply->readAll();
+        if (img.isEmpty()) return;
+        QDir().mkpath(QStandardPaths::writableLocation(
+            QStandardPaths::AppLocalDataLocation));
+        QFile f(avatarFilePath());
+        if (f.open(QIODevice::WriteOnly)) {
+            f.write(img);
+            f.close();
+            QSettings().setValue("account/pictureUrl", pictureUrl);
+            emit profileChanged();
+        }
+    });
 }
 
 // ── Startup validation ────────────────────────────────────────────────────────
@@ -230,9 +314,12 @@ void AuthManager::handlePollReply(QNetworkReply* reply) {
                                      "not be stored securely on this device."));
             return;
         }
-        // The poll response carries user + premium in the same shape as /api/me.
+        // The poll response carries user + premium in the same shape as
+        // /api/me; refresh immediately anyway in case this server's poll
+        // payload is older/slimmer than the /api/me contract.
         applyMe(QJsonDocument(o).toJson());
         m_entitlementTimer->start();
+        refreshEntitlement();
         emit authenticated();
         return;
     }
@@ -267,11 +354,11 @@ void AuthManager::signOut() {
     m_entitlementTimer->stop();
     SecureStore::remove(kTokenKey);
     QSettings st;
-    st.remove("account/email");
-    st.remove("account/name");
+    st.remove("account");          // email/name/firstName/occupation/pictureUrl/…
     st.remove("license/premiumActive");
     st.remove("license/premiumPlan");
     st.remove("license/premiumUntil");
+    QFile::remove(avatarFilePath());
     emit signedOut();
 }
 
