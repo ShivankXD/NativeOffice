@@ -20,7 +20,9 @@
 namespace NativeOffice {
 
 static const QString kTokenKey       = QStringLiteral("appToken");
-static const int     kEntitlementMin = 30;             // refresh cadence
+// Profile/entitlement refresh cadence. Short enough that edits made on the
+// website (name, photo, plan) show up in a running app within a few minutes.
+static const int     kEntitlementMin = 5;
 
 AuthManager& AuthManager::instance() {
     static AuthManager s;
