@@ -14,7 +14,8 @@ namespace NativeOffice {
 enum class DocumentType {
     Writer,    // Word processor
     Calc,      // Spreadsheet
-    Impress    // Presentation
+    Impress,   // Presentation
+    Pdf        // PDF tool hub
 };
 
 class AppController : public QObject {

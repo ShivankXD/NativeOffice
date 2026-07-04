@@ -19,6 +19,8 @@
 #include <QVBoxLayout>
 #include <vector>
 
+class QFrame;
+
 namespace NativeOffice {
 
 class SlideScene;
@@ -56,9 +58,12 @@ signals:
     void reorderRequested(int fromIndex, int toIndex);
 
 private:
+    void applyTheme();
+
     QScrollArea*                          m_scroll    { nullptr };
     QWidget*                              m_listWidget{ nullptr };
     QVBoxLayout*                          m_listLayout{ nullptr };
+    QFrame*                               m_sep       { nullptr };
     std::vector<SlideThumbnailWidget*>    m_thumbnails;
     int                                   m_activeIdx { 0 };
 };

@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "ImpressRibbon.h"
 #include "ImpressModule.h"   // ImpressViewMode
+#include "core/theme/ThemeManager.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -575,6 +576,8 @@ ImpressRibbon::ImpressRibbon(QWidget* parent)
     root->addWidget(m_stack);
 
     applyStyles();
+    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+            this, [this](ThemeMode) { applyStyles(); });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1320,13 +1323,15 @@ void ImpressRibbon::applyStyles() {
     // The pure-CSS border-triangle for ::down-arrow renders inconsistently
     // across Qt styles (it showed as a solid square), so generate a real
     // arrow PNG once and reference it from the stylesheet.
-    const QString arrowPath = QDir(QDir::tempPath()).filePath("nativeoffice_combo_arrow.png");
+    const bool dark = ThemeManager::instance().isDark();
+    const QString arrowPath = QDir(QDir::tempPath()).filePath(
+        dark ? "nativeoffice_combo_arrow_dark.png" : "nativeoffice_combo_arrow.png");
     {
         QPixmap pm(20, 12);
         pm.fill(Qt::transparent);
         QPainter p(&pm);
         p.setRenderHint(QPainter::Antialiasing);
-        p.setBrush(QColor(90, 96, 110));
+        p.setBrush(dark ? QColor(154, 164, 184) : QColor(90, 96, 110));
         p.setPen(Qt::NoPen);
         QPolygonF tri;
         tri << QPointF(5, 4) << QPointF(15, 4) << QPointF(10, 10);
@@ -1335,6 +1340,177 @@ void ImpressRibbon::applyStyles() {
         pm.save(arrowPath, "PNG");
     }
 
+    if (dark) {
+    setStyleSheet(QString(R"(
+QWidget#impressRibbon {
+    background-color: #12161F;
+    border-bottom: 1px solid #2A3344;
+}
+QWidget#ribbonTabRow {
+    background-color: #0D1117;
+    border-bottom: 1px solid #2A3344;
+}
+QToolButton#ribbonTabBtn {
+    color: #9AA4B8;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 6px 16px;
+    font-size: 12px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-weight: 500;
+}
+QToolButton#ribbonTabBtn:hover {
+    color: #E6E9F0;
+    background: #1E2737;
+}
+QToolButton#ribbonTabBtn:checked {
+    color: #E6E9F0;
+    background-color: #12161F;
+    border-bottom: 2px solid #E8372A;
+    font-weight: 700;
+}
+QStackedWidget#ribbonStack {
+    background-color: #12161F;
+}
+QLabel#ribbonGroupLabel {
+    color: #9AA4B8;
+    font-size: 10px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+}
+QToolButton#ribbonToolBtn {
+    color: #E6E9F0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-weight: 500;
+}
+QToolButton#ribbonToolBtn:hover {
+    background: #1E2737;
+    color: #E6E9F0;
+    border-color: #2A3344;
+}
+QToolButton#ribbonToolBtn:checked {
+    background-color: #3A1F1F;
+    color: #FF9A8C;
+    border-color: #E8372A;
+    font-weight: 700;
+}
+QToolButton#ribbonToolBtn:pressed {
+    background-color: #4A2620;
+}
+QToolButton#ribbonToolBtn:disabled {
+    color: #565F70;
+}
+QToolButton#ribbonBigBtn {
+    color: #E6E9F0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 4px;
+    font-size: 11px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-weight: 500;
+}
+QToolButton#ribbonBigBtn:hover {
+    background: #1E2737;
+    color: #E6E9F0;
+    border-color: #2A3344;
+}
+QToolButton#ribbonBigBtn:checked {
+    background-color: #3A1F1F;
+    color: #FF9A8C;
+    border-color: #E8372A;
+    font-weight: 700;
+}
+QToolButton#ribbonBigBtn:pressed {
+    background-color: #4A2620;
+}
+QToolButton#ribbonThemeBtn {
+    background: #12161F;
+    border: 1px solid #2A3344;
+    border-radius: 6px;
+    padding: 2px;
+}
+QToolButton#ribbonThemeBtn:hover {
+    border: 2px solid #E8372A;
+}
+QToolButton#ribbonCmdBtn {
+    color: #E6E9F0;
+    background: #17233B;
+    border: 1px solid #2A3344;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 13px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-weight: 500;
+}
+QToolButton#ribbonCmdBtn:hover {
+    background: #1E2737;
+    color: #E6E9F0;
+    border-color: #3A4456;
+}
+QToolButton#ribbonCmdBtn:checked {
+    background-color: #3A1F1F;
+    color: #FF9A8C;
+    border-color: #E8372A;
+    font-weight: 600;
+}
+QToolButton#ribbonCmdBtn:pressed {
+    background-color: #4A2620;
+}
+QComboBox#ribbonCombo {
+    background-color: #12161F;
+    color: #E6E9F0;
+    border: 1px solid #2A3344;
+    border-radius: 6px;
+    padding: 4px 6px;
+    min-height: 22px;
+    font-size: 12px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+}
+QComboBox#ribbonCombo:hover {
+    border-color: #3A4456;
+    background-color: #17233B;
+}
+QComboBox#ribbonCombo:focus {
+    border-color: #E8372A;
+}
+QComboBox#ribbonCombo::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    border: none;
+    width: 16px;
+}
+QComboBox#ribbonCombo::down-arrow {
+    image: url("%1");
+    width: 10px;
+    height: 6px;
+}
+QComboBox QAbstractItemView {
+    background-color: #12161F;
+    color: #E6E9F0;
+    border: 1px solid #2A3344;
+    border-radius: 6px;
+    selection-background-color: #E8372A;
+    selection-color: #FFFFFF;
+    outline: none;
+    padding: 4px;
+}
+QComboBox QAbstractItemView::item {
+    height: 26px;
+    padding-left: 6px;
+    border-radius: 4px;
+}
+QFrame#ribbonSep {
+    background-color: #2A3344;
+    border: none;
+    margin: 6px 2px 18px 2px;
+}
+)").arg(arrowPath));
+    } else {
     setStyleSheet(QString(R"(
 QWidget#impressRibbon {
     background-color: #FFFFFF;
@@ -1504,6 +1680,7 @@ QFrame#ribbonSep {
     margin: 6px 2px 18px 2px;
 }
 )").arg(arrowPath));
+    }
 }
 
 } // namespace NativeOffice

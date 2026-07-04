@@ -1,0 +1,3 @@
+// Windows app icon — used for the .exe itself, the taskbar, and any
+// shortcut (desktop/Start Menu) pointing at NativeOffice.exe.
+IDI_ICON1 ICON "nativeoffice.ico"

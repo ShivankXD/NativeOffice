@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "OutlineWidget.h"
 #include "SlideData.h"
+#include "core/theme/ThemeManager.h"
 
 #include <QVBoxLayout>
 #include <QTreeWidget>
@@ -31,7 +32,47 @@ OutlineWidget::OutlineWidget(QWidget* parent)
 
     layout->addWidget(m_tree);
 
-    setStyleSheet(R"(
+    applyTheme();
+    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+            this, [this](ThemeMode) { applyTheme(); });
+
+    connect(m_tree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
+        if (!item) return;
+        emit slideSelected(item->data(0, kRoleSlide).toInt());
+    });
+
+    connect(m_tree, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int) {
+        if (m_ignoreEdits || !item) return;
+        const int slideIdx = item->data(0, kRoleSlide).toInt();
+        const int itemIdx  = item->data(0, kRoleItem).toInt();
+        emit textEdited(slideIdx, itemIdx, item->text(0));
+    });
+}
+
+void OutlineWidget::applyTheme() {
+    if (ThemeManager::instance().isDark()) {
+        setStyleSheet(R"(
+QTreeWidget {
+    background-color: #0D1117;
+    color: #E6E9F0;
+    border: none;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-size: 13px;
+}
+QTreeWidget::item {
+    padding: 4px 2px;
+    border-radius: 4px;
+}
+QTreeWidget::item:hover {
+    background-color: #1E2737;
+}
+QTreeWidget::item:selected {
+    background-color: #E8372A;
+    color: #FFFFFF;
+}
+)");
+    } else {
+        setStyleSheet(R"(
 QTreeWidget {
     background-color: #F3F4F6;
     color: #2F3440;
@@ -51,18 +92,7 @@ QTreeWidget::item:selected {
     color: #FFFFFF;
 }
 )");
-
-    connect(m_tree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
-        if (!item) return;
-        emit slideSelected(item->data(0, kRoleSlide).toInt());
-    });
-
-    connect(m_tree, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int) {
-        if (m_ignoreEdits || !item) return;
-        const int slideIdx = item->data(0, kRoleSlide).toInt();
-        const int itemIdx  = item->data(0, kRoleItem).toInt();
-        emit textEdited(slideIdx, itemIdx, item->text(0));
-    });
+    }
 }
 
 void OutlineWidget::rebuild(const std::vector<SlideData>& deck) {

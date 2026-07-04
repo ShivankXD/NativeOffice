@@ -4,8 +4,10 @@
 #include "StartScreen.h"
 #include "core/application/RecentFilesManager.h"
 #include "core/auth/AuthManager.h"
+#include "core/theme/ThemeManager.h"
 #include "common/Avatars.h"
 #include "settings/SettingsDialog.h"
+#include "LucideIcons.h"
 
 #include <QMessageBox>
 
@@ -31,6 +33,8 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QTime>
+#include <QDateTime>
+#include <QTimer>
 #include <QSettings>
 #include <QSpinBox>
 #include <QCheckBox>
@@ -66,6 +70,20 @@ QLabel* badge(const QString& text, const QString& color, int size = 30, QWidget*
     b->setStyleSheet(QString("background:%1;border-radius:8px;color:#FFFFFF;"
                              "font:700 %2px 'Segoe UI';").arg(color).arg(size <= 24 ? 11 : 14));
     return b;
+}
+
+// The real, transparent brand mark at a crisp hi-dpi size (same
+// device-pixel-ratio trick as Avatars.h's roundAvatarPixmap()).
+QLabel* logoMark(int h, QWidget* parent) {
+    auto* l = new QLabel(parent);
+    const qreal dpr = parent ? parent->devicePixelRatio() : 1.0;
+    QPixmap src(":/assets/nativeoffice-logo-mark.png");
+    QPixmap scaled = src.scaledToHeight(int(h * dpr), Qt::SmoothTransformation);
+    scaled.setDevicePixelRatio(dpr);
+    l->setPixmap(scaled);
+    l->setStyleSheet("background:transparent;");
+    l->setFixedSize(scaled.deviceIndependentSize().toSize());
+    return l;
 }
 
 QLabel* heading(const QString& text, int px, const QString& color, bool bold, QWidget* p = nullptr) {
@@ -147,6 +165,17 @@ constexpr const char* kArtOpenFile = R"SVG(
         fill="#8b6df0" stroke="#a78bfa" stroke-width="1.5" stroke-linejoin="round"/>
 </svg>)SVG";
 
+constexpr const char* kArtPdf = R"SVG(
+<svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
+  <rect x="46" y="12" width="70" height="90" rx="6" fill="#3a1414" stroke="#f87171" stroke-width="2"/>
+  <rect x="42" y="30" width="50" height="4" rx="2" fill="#fca5a5"/>
+  <rect x="42" y="44" width="50" height="4" rx="2" fill="#c9807e"/>
+  <rect x="42" y="58" width="34" height="4" rx="2" fill="#c9807e"/>
+  <rect x="55" y="70" width="34" height="18" rx="3" fill="#ef4444"/>
+  <path d="M64 74 v10 M60 78 h8" stroke="#3a1414" stroke-width="2" stroke-linecap="round"/>
+  <path d="M72 74 v10 h4 a4 4 0 0 0 0 -10 z" fill="none" stroke="#3a1414" stroke-width="2"/>
+</svg>)SVG";
+
 } // namespace
 
 StartScreen::StartScreen(AppController* controller, QWidget* parent)
@@ -217,17 +246,22 @@ QWidget* StartScreen::buildSidebar() {
     auto* logoRow = new QWidget(bar);
     auto* lh = new QHBoxLayout(logoRow);
     lh->setContentsMargins(6, 0, 0, 8); lh->setSpacing(10);
-    lh->addWidget(badge("N", "#3B82F6", 30, logoRow));
+    lh->addWidget(logoMark(30, logoRow));
     lh->addWidget(heading("NativeOffice", 16, "#E6E9F0", true, logoRow));
     lh->addStretch();
     v->addWidget(logoRow);
     v->addSpacing(8);
 
-    struct Nav { QString icon, label; int action; };  // action: -1 none, 0 home, see below
+    struct Nav { const char* icon; QString label; int action; };  // action: -1 none, 0 home, see below
     const Nav items[] = {
-        {"⌂","Home", 0}, {"📄","Documents", 1}, {"▦","Sheets", 2}, {"▤","Slides", 3},
-        {"⤓","PDF Tools", -1}, {"🗎","Templates", 4},
-        {"★","Favorites", -1}, {"🗑","Recycle Bin", -1},
+        {Lucide::kHome,         "Home",      0},
+        {Lucide::kFileText,     "Documents", 1},
+        {Lucide::kTable,        "Sheets",    2},
+        {Lucide::kPresentation, "Slides",    3},
+        {Lucide::kDownload,     "PDF",       5},
+        {Lucide::kFolderOpen,   "Templates", 4},
+        {Lucide::kStar,         "Favorites", -1},
+        {Lucide::kTrash,        "Recycle Bin", -1},
     };
     for (const Nav& n : items) {
         auto* item = new ClickableFrame(bar);
@@ -235,8 +269,7 @@ QWidget* StartScreen::buildSidebar() {
         auto* il = new QHBoxLayout(item);
         il->setContentsMargins(12, 0, 12, 0); il->setSpacing(12);
         item->setFixedHeight(40);
-        auto* ic = new QLabel(n.icon, item);
-        ic->setStyleSheet("font:15px 'Segoe UI Emoji';background:transparent;color:#9AA4B8;");
+        auto* ic = Lucide::label(n.icon, n.action == 0 ? "#FFFFFF" : "#9AA4B8", 16, item);
         auto* tx = new QLabel(n.label, item);
         tx->setStyleSheet(QString("background:transparent;font:13px 'Segoe UI';color:%1;")
                               .arg(n.action == 0 ? "#FFFFFF" : "#AEB6C6"));
@@ -248,6 +281,7 @@ QWidget* StartScreen::buildSidebar() {
             case 2: emit newDocumentRequested(DocumentType::Calc);    break;
             case 3: emit newDocumentRequested(DocumentType::Impress); break;
             case 4: showTemplatesDialog(0); break;
+            case 5: emit newDocumentRequested(DocumentType::Pdf);     break;
             default: break;
             }
         };
@@ -276,29 +310,55 @@ QWidget* StartScreen::buildTopBar() {
     search->setObjectName("searchBox");
     search->setPlaceholderText("   Search files, templates, tools…");
     search->setFixedHeight(40);
-    search->setMaximumWidth(520);
+    search->setFixedWidth(320);
     auto* kbd = new QLabel("Ctrl + K", search);
     kbd->setStyleSheet("background:#1B2230;border-radius:5px;color:#8A93A6;"
                        "font:11px 'Segoe UI';padding:2px 8px;");
     auto* sl = new QHBoxLayout(search);
     sl->setContentsMargins(0, 0, 8, 0); sl->addStretch(); sl->addWidget(kbd);
 
-    h->addStretch();
     h->addWidget(search);
+
+    // Live clock — fills the space the search box vacated at top-center.
+    // Reads the system clock (not a server) and repaints once a second.
+    auto* clock = new QLabel(bar);
+    clock->setObjectName("liveClock");
+    clock->setAlignment(Qt::AlignCenter);
+    auto refreshClock = [clock]() {
+        clock->setText(QDateTime::currentDateTime().toString("ddd, MMM d · h:mm AP"));
+    };
+    refreshClock();
+    auto* clockTimer = new QTimer(clock);
+    connect(clockTimer, &QTimer::timeout, clock, refreshClock);
+    clockTimer->start(1000);
+
+    h->addStretch();
+    h->addWidget(clock);
     h->addStretch();
 
-    auto iconBtn = [&](const QString& glyph, std::function<void()> cb) {
+    auto iconBtn = [&](const char* svg, std::function<void()> cb) {
         auto* b = new QToolButton(bar);
-        b->setText(glyph);
+        b->setIcon(Lucide::icon(svg, "#AEB6C6", 17, bar->devicePixelRatio()));
+        b->setIconSize(QSize(17, 17));
         b->setObjectName("topIcon");
         b->setCursor(Qt::PointingHandCursor);
         b->setFixedSize(38, 38);
         if (cb) connect(b, &QToolButton::clicked, this, cb);
         return b;
     };
-    h->addWidget(iconBtn("🔔", nullptr));
-    h->addWidget(iconBtn("?", nullptr));
-    h->addWidget(iconBtn("⚙", [this]{ showSettingsDialog(); }));
+    // Light/dark chrome toggle — Home has no menu bar, so it lives here.
+    auto* themeBtn = iconBtn(ThemeManager::instance().isDark() ? Lucide::kSun : Lucide::kMoon, nullptr);
+    themeBtn->setToolTip("Toggle light / dark mode");
+    connect(themeBtn, &QToolButton::clicked, this, [themeBtn]() {
+        auto& tm = ThemeManager::instance();
+        tm.toggleMode();
+        themeBtn->setIcon(Lucide::icon(tm.isDark() ? Lucide::kSun : Lucide::kMoon,
+                                        "#AEB6C6", 17, themeBtn->devicePixelRatio()));
+    });
+    h->addWidget(themeBtn);
+    h->addWidget(iconBtn(Lucide::kBell, nullptr));
+    h->addWidget(iconBtn(Lucide::kHelp, nullptr));
+    h->addWidget(iconBtn(Lucide::kSettings, [this]{ showSettingsDialog(); }));
 
     // Account avatar — the real profile photo (cached by AuthManager), with a
     // coloured-initial fallback. Clicking it opens Settings → Account.
@@ -326,6 +386,7 @@ QWidget* StartScreen::buildTopBar() {
         QWidget#topBar { background:#0D1117; border-bottom:1px solid #1B212C; }
         QLineEdit#searchBox { background:#161B26; border:1px solid #232A38;
             border-radius:10px; color:#C7CEDC; padding-left:10px; font:13px 'Segoe UI'; }
+        QLabel#liveClock { background:transparent; color:#AEB6C6; font:600 13px 'Segoe UI'; }
         QToolButton#topIcon { background:#161B26; border:1px solid #232A38; border-radius:10px;
             color:#AEB6C6; font:15px 'Segoe UI Emoji'; }
         QToolButton#topIcon:hover { background:#1E2737; }
@@ -372,8 +433,6 @@ QWidget* StartScreen::buildCenterColumn() {
     v->addWidget(welcome);
 
     v->addWidget(buildCreateCards());
-    v->addWidget(heading("Quick Actions", 16, "#E6E9F0", true, col));
-    v->addWidget(buildQuickActions());
 
     auto* row = new QWidget(col);
     auto* rl = new QHBoxLayout(row);
@@ -401,6 +460,7 @@ QWidget* StartScreen::buildCreateCards() {
         {"W","Document","Create a new document","#2563EB","#21314f","#16203a", 1, kArtDocument},
         {"S","Spreadsheet","Create a new spreadsheet","#16A34A","#16352a","#102a20", 2, kArtSpreadsheet},
         {"P","Presentation","Create a new presentation","#EA580C","#3a2418","#2a1810", 3, kArtPresentation},
+        {"P","PDF","Merge, split & compress PDFs","#DC2626","#3a1414","#2a1010", 4, kArtPdf},
         {"📁","Open File","Browse and open files","#7C5CFC","#2a2440","#1d1a33", 0, kArtOpenFile},
     };
     for (const Card& c : cards) {
@@ -435,55 +495,14 @@ QWidget* StartScreen::buildCreateCards() {
             if (action == 0) openFileDialog();
             else emit newDocumentRequested(action == 1 ? DocumentType::Writer
                                           : action == 2 ? DocumentType::Calc
-                                                        : DocumentType::Impress);
+                                          : action == 3 ? DocumentType::Impress
+                                                        : DocumentType::Pdf);
         };
         g->addWidget(card, 1);
     }
     w->setStyleSheet(R"(
         #createCard { background:#141A24; border:1px solid #222A38; border-radius:14px; }
         #createCard:hover { border:1px solid #3B82F6; background:#161D29; }
-    )");
-    return w;
-}
-
-QWidget* StartScreen::buildQuickActions() {
-    auto* w = new QWidget(this);
-    auto* h = new QHBoxLayout(w);
-    h->setContentsMargins(0, 0, 0, 0); h->setSpacing(14);
-
-    struct QA { QString icon, label, color; int action; };  // action: see lambda
-    const QA qas[] = {
-        {"🗎","New from Template","#7C5CFC", 0},
-        {"⤒","Import from Device","#2563EB", 1},
-        {"📕","PDF to Word","#DC2626", 2},
-        {"👤","Resume Builder","#22C55E", 3},
-        {"⋯","More Tools","#64748B", 4},
-    };
-    for (const QA& q : qas) {
-        auto* a = new ClickableFrame(w);
-        a->setObjectName("quickAction");
-        a->setFixedHeight(46);
-        auto* al = new QHBoxLayout(a);
-        al->setContentsMargins(13, 0, 12, 0); al->setSpacing(9);
-        al->addWidget(badge(q.icon, q.color, 26, a));
-        auto* lbl = heading(q.label, 12, "#CCD3E0", false, a);
-        lbl->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);  // let the row compress
-        al->addWidget(lbl, 1);
-        const int action = q.action;
-        a->onClick = [this, action]{
-            switch (action) {
-            case 0: showTemplatesDialog(0); break;            // New from template
-            case 1: openFileDialog(); break;                  // Import from device
-            case 2: openFileDialog(); break;                  // PDF to Word → import
-            case 3: emit templateChosen(DocumentType::Writer, "Professional Resume"); break;
-            case 4: showTemplatesDialog(0); break;            // More tools → templates
-            }
-        };
-        h->addWidget(a, 1);
-    }
-    w->setStyleSheet(R"(
-        #quickAction { background:#141A24; border:1px solid #222A38; border-radius:10px; }
-        #quickAction:hover { background:#1A2230; border:1px solid #2E3950; }
     )");
     return w;
 }
@@ -625,13 +644,11 @@ QWidget* StartScreen::buildRightColumn() {
         if (!title.isEmpty()) pv->addWidget(heading(title, 14, "#E6E9F0", true, p));
         return std::make_pair(p, pv);
     };
-    auto twoCol = [&](QWidget* parent, const QString& icon, const QString& left,
+    auto twoCol = [&](QWidget* parent, const char* icon, const QString& left,
                       const QString& right, const QString& rightColor) {
         auto* row = new QWidget(parent);
         auto* h = new QHBoxLayout(row); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(10);
-        auto* ic = new QLabel(icon, row);
-        ic->setStyleSheet("font:14px 'Segoe UI Emoji';background:transparent;color:#9AA4B8;");
-        h->addWidget(ic);
+        h->addWidget(Lucide::label(icon, "#9AA4B8", 14, row));
         h->addWidget(heading(left, 12, "#C3CAD8", false, row));
         h->addStretch();
         h->addWidget(heading(right, 12, rightColor, false, row));
@@ -640,17 +657,17 @@ QWidget* StartScreen::buildRightColumn() {
 
     // Get Started
     { auto [p, pv] = makePanel("Get Started");
-      pv->addWidget(twoCol(p, "▶", "Take a tour", "3 min", "#7B8494"));
-      pv->addWidget(twoCol(p, "⌨", "Keyboard shortcuts", "View all", "#3B82F6"));
-      pv->addWidget(twoCol(p, "✦", "What's new", "See updates", "#3B82F6"));
+      pv->addWidget(twoCol(p, Lucide::kPlay, "Take a tour", "3 min", "#7B8494"));
+      pv->addWidget(twoCol(p, Lucide::kKeyboard, "Keyboard shortcuts", "View all", "#3B82F6"));
+      pv->addWidget(twoCol(p, Lucide::kSparkles, "What's new", "See updates", "#3B82F6"));
       v->addWidget(p); }
 
     // Your Activity
     { auto [p, pv] = makePanel("Your Activity");
       const int recent = int(RecentFilesManager::instance().recentFiles().size());
-      pv->addWidget(twoCol(p, "🗎", "Documents opened", QString::number(recent), "#E6E9F0"));
-      pv->addWidget(twoCol(p, "✎", "Files edited", QString::number(recent), "#E6E9F0"));
-      pv->addWidget(twoCol(p, "⏱", "Time spent", "—", "#E6E9F0"));
+      pv->addWidget(twoCol(p, Lucide::kFileText, "Documents opened", QString::number(recent), "#E6E9F0"));
+      pv->addWidget(twoCol(p, Lucide::kPencil, "Files edited", QString::number(recent), "#E6E9F0"));
+      pv->addWidget(twoCol(p, Lucide::kTimer, "Time spent", "—", "#E6E9F0"));
       v->addWidget(p); }
 
     v->addStretch();

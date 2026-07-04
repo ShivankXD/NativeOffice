@@ -54,6 +54,12 @@ struct Theme {
     int radiusLarge  = 16;
 };
 
+// Chrome-only light/dark mode: affects ribbons, menu bars, status bars,
+// sidebars, and the Home page. Document/sheet/slide canvases are
+// intentionally excluded — they stay white/paper-like, matching how
+// Word/Excel/PowerPoint's own dark mode behaves.
+enum class ThemeMode { Light, Dark };
+
 class ThemeManager : public QObject {
     Q_OBJECT
 
@@ -74,6 +80,26 @@ public:
     // Helper: build a CSS color string from a QColor
     [[nodiscard]] static QString cssColor(const QColor& c);
 
+    // ── Chrome-only dark mode ──────────────────────────────────────────────
+    [[nodiscard]] ThemeMode mode() const noexcept { return m_mode; }
+    [[nodiscard]] bool isDark() const noexcept { return m_mode == ThemeMode::Dark; }
+    void setMode(ThemeMode mode);
+    void toggleMode() { setMode(isDark() ? ThemeMode::Light : ThemeMode::Dark); }
+
+    // Chrome color helpers — return the right hex for the current mode, so
+    // call sites (ribbons, status bars, menu bars, Home) don't duplicate
+    // light/dark branching themselves.
+    [[nodiscard]] QString chromeBg()        const { return isDark() ? "#0D1117" : "#FFFFFF"; }
+    [[nodiscard]] QString chromePanelBg()   const { return isDark() ? "#12161F" : "#F3F4F6"; }
+    [[nodiscard]] QString chromeActiveBg()  const { return isDark() ? "#17233B" : "#FFFFFF"; }
+    [[nodiscard]] QString chromeHoverBg()   const { return isDark() ? "#1E2737" : "#ECEEF2"; }
+    [[nodiscard]] QString chromeBorder()    const { return isDark() ? "#1B212C" : "#E2E4E9"; }
+    [[nodiscard]] QString chromeText()      const { return isDark() ? "#E6E9F0" : "#2C3140"; }
+    [[nodiscard]] QString chromeTextMuted() const { return isDark() ? "#9AA4B8" : "#5A6071"; }
+
+signals:
+    void modeChanged(ThemeMode mode);
+
 private:
     explicit ThemeManager(QObject* parent = nullptr);
     ~ThemeManager() override = default;
@@ -82,6 +108,7 @@ private:
     ThemeManager& operator=(const ThemeManager&) = delete;
 
     Theme m_theme;
+    ThemeMode m_mode { ThemeMode::Dark };
 };
 
 } // namespace NativeOffice

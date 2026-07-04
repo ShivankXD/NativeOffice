@@ -3,8 +3,11 @@
     <qresource prefix="/assets">
        <!-- Existing small banner badge (used by Impress). Aliased to the
             renamed file so existing :/assets/logo.jpg references keep working. -->
-       <file alias="logo.jpg">logo-old.jpg</file>
+       <file alias="logo.jpg">logo_dark_sheet.png</file>
        <!-- New full NativeOffice brand logo, used on the startup splash. -->
-       <file alias="nativeoffice-logo.png">nativeoffice-logo-new.jpeg.png</file>
+       <file alias="nativeoffice-logo.png">logo_light_bg.png</file>
+       <!-- Transparent brand mark (RGBA), used for the sidebar logo lockup
+            and as the source for the Windows app icon. -->
+       <file alias="nativeoffice-logo-mark.png">logo_white_bg.png</file>
     </qresource>
 </RCC>

@@ -970,6 +970,8 @@ CalcModule::CalcModule(QWidget* parent)
     buildUi();
     buildActions();
     applyStyles();
+    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+            this, [this](ThemeMode) { applyStyles(); });
     setObjectName("calcModule");
 
     // Selection + marching-ants overlays, both tracking scroll & resize.
@@ -4360,7 +4362,167 @@ bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
 // Styling
 // ─────────────────────────────────────────────────────────────────────────────
 void CalcModule::applyStyles() {
-    setStyleSheet(QString(R"(
+    const bool dark = ThemeManager::instance().isDark();
+    const QString chromeA = dark ? QStringLiteral(R"CSSA_D(
+/* ── Module root ─────────────────────────────────────────────────── */
+QWidget#calcModule {
+    background-color: #12161F;
+}
+
+/* ── Ribbon (tabbed toolbar) ─────────────────────────────────────── */
+QWidget#calcRibbon {
+    background-color: #0D1117;
+    border-bottom: 1px solid #2A3344;
+}
+/* Tab strip */
+QWidget#ribbonTabs {
+    background-color: #0D1117;
+    border-bottom: 1px solid #2A3344;
+}
+QWidget#ribbonTabs QToolButton#ribbonTab {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: #9AA4B8;
+    font-size: 13px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    font-weight: 500;
+    padding: 6px 18px;
+}
+QWidget#ribbonTabs QToolButton#ribbonTab:hover {
+    background: #1E2737;
+    color: #E6E9F0;
+}
+QWidget#ribbonTabs QToolButton#ribbonTab:checked {
+    background: #12161F;
+    color: #E6E9F0;
+    font-weight: 700;
+    border-bottom: 2px solid #107C41;
+}
+/* Tool buttons inside the ribbon pages (base) */
+QWidget#calcRibbon QToolButton {
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: #E6E9F0;
+    font-size: 11px;
+}
+QWidget#calcRibbon QToolButton:hover {
+    background: #123322;
+    border: 1px solid #1F5C3C;
+}
+QWidget#calcRibbon QToolButton:checked {
+    background: #164A30;
+    border: 1px solid #107C41;
+}
+/* Large icon-over-text buttons (primary actions) */
+QToolButton#ribbonBig {
+    padding: 3px 5px 2px 5px;
+    font-size: 11px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+    color: #E6E9F0;
+}
+QToolButton#ribbonBig::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: bottom center;
+    bottom: 1px;
+    width: 7px; height: 7px;
+}
+/* Small icon-only buttons in dense clusters */
+QToolButton#ribbonSmall { padding: 0; }
+/* B / I / U / S letter toggles */
+QToolButton#ribbonLetter {
+    color: #E6E9F0;
+    font-family: "Segoe UI", "Calibri", serif;
+}
+QWidget#calcRibbon QComboBox,
+QWidget#calcRibbon QFontComboBox {
+    background: #12161F;
+    border: 1px solid #2A3344;
+    border-radius: 3px;
+    padding: 2px 4px;
+    color: #E6E9F0;
+    font-size: 12px;
+}
+QWidget#calcRibbon QComboBox:focus,
+QWidget#calcRibbon QFontComboBox:focus {
+    border: 1px solid #107C41;
+}
+QLabel#groupLabel {
+    color: #9AA4B8;
+    font-size: 9px;
+    font-family: "Segoe UI", sans-serif;
+}
+QWidget#calcRibbon QCheckBox {
+    color: #C3CAD8;
+    font-size: 11px;
+    font-family: "Segoe UI", sans-serif;
+    spacing: 4px;
+}
+QScrollArea#ribbonScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#ribbonScroll > QWidget > QWidget { background: transparent; }
+QFrame#ribbonSep {
+    color: #2A3344;
+    background-color: #2A3344;
+    max-width: 1px;
+    margin: 4px 2px;
+}
+
+/* ── Formula bar row (clean white) ───────────────────────────────── */
+QWidget#formulaBarRow {
+    background-color: #12161F;
+    border-bottom: 1px solid #2A3344;
+}
+
+/* ── Name box ───────────────────────────────────────────────────── */
+QLabel#nameBox {
+    color: #E6E9F0;
+    font-size: 12px;
+    font-weight: 700;
+    font-family: "Segoe UI", "Inter", monospace;
+    background: #17233B;
+    border: 1px solid #2A3344;
+    border-radius: 4px;
+    padding: 0 8px;
+}
+
+/* ── fx label ───────────────────────────────────────────────────── */
+QLabel#fxLabel {
+    color: #9AA4B8;
+    font-size: 12px;
+    font-style: italic;
+    font-family: "Segoe UI", serif;
+    background: transparent;
+}
+
+/* ── Separators ─────────────────────────────────────────────────── */
+QFrame#fbarSep {
+    background-color: #2A3344;
+    border: none;
+}
+
+/* ── Formula bar input ──────────────────────────────────────────── */
+QLineEdit#formulaBar {
+    background-color: #12161F;
+    color: #E6E9F0;
+    border: none;
+    border-left: none;
+    padding: 4px 10px;
+    font-size: 13px;
+    font-family: "Segoe UI", "Consolas", monospace;
+    selection-background-color: #107C41;
+    selection-color: #FFFFFF;
+}
+QLineEdit#formulaBar:focus {
+    background-color: #12161F;
+}
+QLineEdit#formulaBar::placeholder {
+    color: #6B7688;
+}
+)CSSA_D") : QStringLiteral(R"CSSA_L(
 /* ── Module root ─────────────────────────────────────────────────── */
 QWidget#calcModule {
     background-color: #FFFFFF;
@@ -4519,7 +4681,11 @@ QLineEdit#formulaBar:focus {
 QLineEdit#formulaBar::placeholder {
     color: #AEB4C0;
 }
-
+)CSSA_L");
+    // Grid (QTableView) — Excel look. Intentionally NOT theme-dependent:
+    // the sheet canvas stays white/paper-like in both modes, same as
+    // Writer's page and Impress's slide canvas.
+    const QString canvas = QStringLiteral(R"CSSB(
 /* ── Grid (QTableView) — Excel look ──────────────────────────────── */
 QTableView#calcGrid {
     background-color: #FFFFFF;
@@ -4546,7 +4712,50 @@ QTableView#calcGrid QAbstractButton {
 QTableView#calcGrid QAbstractButton:hover {
     background-color: #ECECEC;
 }
-
+)CSSB");
+    const QString chromeC = dark ? QStringLiteral(R"CSSC_D(
+/* ── Sheet tab bar (bottom, Excel style) ─────────────────────────── */
+QWidget#calcTabBar {
+    background-color: #0D1117;
+    border-top: 1px solid #2A3344;
+}
+QToolButton#sheetTab, QToolButton#sheetTabActive {
+    border: 1px solid #2A3344;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    padding: 3px 14px;
+    margin-top: 4px;
+    color: #C3CAD8;
+    font-size: 12px;
+    font-family: "Segoe UI", sans-serif;
+}
+QToolButton#sheetTab {
+    background-color: #0D1117;
+}
+QToolButton#sheetTabActive {
+    background-color: #12161F;
+    color: #107C41;
+    font-weight: 700;
+    border-top: 2px solid #107C41;
+}
+QToolButton#sheetTab:hover {
+    background-color: #17233B;
+}
+QToolButton#sheetAddBtn {
+    border: none;
+    background: transparent;
+    color: #107C41;
+    font-size: 16px;
+    font-weight: 700;
+    padding: 2px 8px;
+    margin-top: 4px;
+}
+QToolButton#sheetAddBtn:hover {
+    background-color: #123322;
+    border-radius: 4px;
+}
+)CSSC_D") : QStringLiteral(R"CSSC_L(
 /* ── Sheet tab bar (bottom, Excel style) ─────────────────────────── */
 QWidget#calcTabBar {
     background-color: #F0F0F0;
@@ -4588,8 +4797,8 @@ QToolButton#sheetAddBtn:hover {
     background-color: #E2E8E4;
     border-radius: 4px;
 }
-)")
-    );
+)CSSC_L");
+    setStyleSheet(chromeA + canvas + chromeC);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -38,7 +38,6 @@ private:
     QWidget* buildTopBar();
     QWidget* buildCenterColumn();
     QWidget* buildCreateCards();
-    QWidget* buildQuickActions();
     QWidget* buildRecentPanel();
     QWidget* buildTemplatesPanel();
     QWidget* buildRightColumn();

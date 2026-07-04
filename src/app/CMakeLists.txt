@@ -1,7 +1,13 @@
+if(WIN32)
+    set(NATIVEOFFICE_APP_ICON ${CMAKE_SOURCE_DIR}/resources/nativeoffice.rc)
+endif()
+
 qt_add_executable(NativeOffice
     main.cpp
+    ${NATIVEOFFICE_APP_ICON}
     startscreen/StartScreen.cpp
     startscreen/StartScreen.h
+    startscreen/LucideIcons.h
     startscreen/SidebarWidget.cpp
     startscreen/SidebarWidget.h
     startscreen/TemplateBarWidget.cpp
@@ -25,6 +31,7 @@ target_include_directories(NativeOffice PRIVATE
     ${CMAKE_SOURCE_DIR}/src/modules/writer
     ${CMAKE_SOURCE_DIR}/src/modules/calc
     ${CMAKE_SOURCE_DIR}/src/modules/impress
+    ${CMAKE_SOURCE_DIR}/src/modules/pdf
 )
 
 target_link_libraries(NativeOffice PRIVATE
@@ -32,6 +39,7 @@ target_link_libraries(NativeOffice PRIVATE
     WriterModule
     CalcModule
     ImpressModule
+    PdfModule
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets

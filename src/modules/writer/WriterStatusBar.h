@@ -39,6 +39,8 @@ signals:
     void webLayoutToggled(bool web);
 
 private:
+    void applyTheme();
+
     QLabel*      m_pageLabel  { nullptr };
     QLabel*      m_wordLabel  { nullptr };
     QToolButton* m_spellPill  { nullptr };

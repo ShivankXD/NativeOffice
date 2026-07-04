@@ -54,6 +54,7 @@ add_subdirectory(src/core)
 add_subdirectory(src/modules/writer)
 add_subdirectory(src/modules/calc)
 add_subdirectory(src/modules/impress)
+add_subdirectory(src/modules/pdf)
 add_subdirectory(src/app)
 
 # ─────────────────────────────────────────────────────────────────────────────

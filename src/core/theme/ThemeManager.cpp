@@ -4,6 +4,7 @@
 #include "ThemeManager.h"
 
 #include <QStringBuilder>
+#include <QSettings>
 
 namespace NativeOffice {
 
@@ -15,7 +16,17 @@ ThemeManager& ThemeManager::instance() {
 ThemeManager::ThemeManager(QObject* parent)
     : QObject(parent)
     , m_theme{}
-{}
+{
+    const QString saved = QSettings().value("app/themeMode", "dark").toString();
+    m_mode = (saved == QLatin1String("light")) ? ThemeMode::Light : ThemeMode::Dark;
+}
+
+void ThemeManager::setMode(ThemeMode mode) {
+    if (mode == m_mode) return;
+    m_mode = mode;
+    QSettings().setValue("app/themeMode", mode == ThemeMode::Dark ? "dark" : "light");
+    emit modeChanged(m_mode);
+}
 
 QString ThemeManager::cssColor(const QColor& c) {
     return c.name(QColor::HexRgb);

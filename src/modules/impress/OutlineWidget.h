@@ -34,6 +34,8 @@ signals:
     void textEdited(int slideIndex, int itemIndex, const QString& newText);
 
 private:
+    void applyTheme();
+
     QTreeWidget* m_tree { nullptr };
     bool         m_ignoreEdits { false };
 };

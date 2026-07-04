@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "ImpressStatusBar.h"
 #include "ImpressModule.h"   // ImpressViewMode definition
+#include "core/theme/ThemeManager.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
@@ -82,7 +83,58 @@ ImpressStatusBar::ImpressStatusBar(QWidget* parent)
     layout->addWidget(m_zoomSlider);
     layout->addWidget(m_zoomLabel);
 
-    setStyleSheet(R"(
+    applyTheme();
+    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+            this, [this](ThemeMode) { applyTheme(); });
+}
+
+void ImpressStatusBar::applyTheme() {
+    if (ThemeManager::instance().isDark()) {
+        setStyleSheet(R"(
+QWidget#impressStatusBar {
+    background-color: #0D1117;
+    border-top: 1px solid #2A3344;
+}
+QLabel#statusLabel {
+    color: #9AA4B8;
+    font-size: 11px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+}
+QToolButton#statusViewBtn {
+    color: #9AA4B8;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+}
+QToolButton#statusViewBtn:hover {
+    background: #1E2737;
+    color: #E6E9F0;
+}
+QToolButton#statusViewBtn:checked {
+    background: #3A1F1F;
+    color: #FF9A8C;
+}
+QSlider#statusZoomSlider::groove:horizontal {
+    height: 4px;
+    background: #2A3344;
+    border-radius: 2px;
+}
+QSlider#statusZoomSlider::handle:horizontal {
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    background: #E8372A;
+    border-radius: 6px;
+}
+QSlider#statusZoomSlider::handle:horizontal:hover {
+    background: #FF5247;
+}
+)");
+    } else {
+        setStyleSheet(R"(
 QWidget#impressStatusBar {
     background-color: #F3F4F6;
     border-top: 1px solid #D7DAE0;
@@ -125,6 +177,7 @@ QSlider#statusZoomSlider::handle:horizontal:hover {
     background: #FF5247;
 }
 )");
+    }
 }
 
 void ImpressStatusBar::setSlideInfo(int currentIndex, int total) {

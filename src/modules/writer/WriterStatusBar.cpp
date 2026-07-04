@@ -2,6 +2,7 @@
 // WriterStatusBar.cpp  (Sprint 14)
 // ─────────────────────────────────────────────────────────────────────────────
 #include "WriterStatusBar.h"
+#include "core/theme/ThemeManager.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
@@ -100,7 +101,75 @@ WriterStatusBar::WriterStatusBar(QWidget* parent)
     layout->addWidget(m_zoomSlider);
     layout->addWidget(m_zoomLabel);
 
-    setStyleSheet(R"(
+    applyTheme();
+    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+            this, [this](ThemeMode) { applyTheme(); });
+}
+
+void WriterStatusBar::applyTheme() {
+    if (ThemeManager::instance().isDark()) {
+        setStyleSheet(R"(
+QWidget#writerStatusBar {
+    background-color: #12161F;
+    border-top: 1px solid #2A3344;
+}
+QLabel#statusLabel {
+    color: #9AA4B8;
+    font-size: 11px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+}
+QToolButton#statusSpellPill {
+    color: #9AA4B8;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-size: 11px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+}
+QToolButton#statusSpellPill:hover {
+    background: #1E2737;
+}
+QToolButton#statusSpellPill:checked {
+    color: #4ADE80;
+    background: #123322;
+    border-color: #1F5C3C;
+}
+QToolButton#statusViewBtn {
+    color: #9AA4B8;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 2px 9px;
+    font-size: 13px;
+    font-family: "Segoe UI", "Inter", sans-serif;
+}
+QToolButton#statusViewBtn:hover {
+    background: #1E2737;
+    color: #E6E9F0;
+}
+QToolButton#statusViewBtn:checked {
+    background: #3A1F1F;
+    color: #FF9A8C;
+}
+QSlider#statusZoomSlider::groove:horizontal {
+    height: 4px;
+    background: #2A3344;
+    border-radius: 2px;
+}
+QSlider#statusZoomSlider::handle:horizontal {
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    background: #E8372A;
+    border-radius: 6px;
+}
+QSlider#statusZoomSlider::handle:horizontal:hover {
+    background: #FF5247;
+}
+)");
+    } else {
+        setStyleSheet(R"(
 QWidget#writerStatusBar {
     background-color: #FFFFFF;
     border-top: 1px solid #E1E3E8;
@@ -160,6 +229,7 @@ QSlider#statusZoomSlider::handle:horizontal:hover {
     background: #FF5247;
 }
 )");
+    }
 }
 
 void WriterStatusBar::setPageInfo(int current, int total) {

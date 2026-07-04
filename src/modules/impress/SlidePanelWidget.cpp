@@ -4,6 +4,7 @@
 #include "SlidePanelWidget.h"
 #include "SlideThumbnailWidget.h"
 #include "SlideScene.h"
+#include "core/theme/ThemeManager.h"
 
 #include <QPushButton>
 #include <QFrame>
@@ -60,10 +61,9 @@ SlidePanelWidget::SlidePanelWidget(QWidget* parent)
     connect(addBtn, &QPushButton::clicked, this, &SlidePanelWidget::addSlideRequested);
 
     // ── Thin separator ───────────────────────────────────────────────────
-    auto* sep = new QFrame(this);
-    sep->setFrameShape(QFrame::HLine);
-    sep->setFixedHeight(1);
-    sep->setStyleSheet("background: #E2E4E9; border: none;");
+    m_sep = new QFrame(this);
+    m_sep->setFrameShape(QFrame::HLine);
+    m_sep->setFixedHeight(1);
 
     // ── Scroll area of thumbnails ─────────────────────────────────────────
     m_scroll = new QScrollArea(this);
@@ -82,12 +82,21 @@ SlidePanelWidget::SlidePanelWidget(QWidget* parent)
     m_scroll->setWidget(m_listWidget);
 
     rootLayout->addWidget(addBtn);
-    rootLayout->addWidget(sep);
+    rootLayout->addWidget(m_sep);
     rootLayout->addWidget(m_scroll, 1);
 
-    setStyleSheet(R"(
+    applyTheme();
+    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+            this, [this](ThemeMode) { applyTheme(); });
+}
+
+void SlidePanelWidget::applyTheme() {
+    const bool dark = ThemeManager::instance().isDark();
+    m_sep->setStyleSheet(QString("background: %1; border: none;")
+                             .arg(dark ? "#2A3344" : "#E2E4E9"));
+    setStyleSheet(QString(R"(
 QWidget#slidePanelWidget {
-    background-color: #F3F4F6;
+    background-color: %1;
 }
 QPushButton#addSlideBtn {
     background-color: #E8372A;
@@ -112,7 +121,7 @@ QScrollArea#thumbScrollArea {
 QWidget#thumbListWidget {
     background: transparent;
 }
-)");
+)").arg(dark ? "#0D1117" : "#F3F4F6"));
 }
 
 void SlidePanelWidget::addSlide(int slideIndex, SlideScene* scene) {

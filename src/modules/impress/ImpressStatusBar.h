@@ -30,6 +30,8 @@ signals:
     void viewModeChanged(ImpressViewMode mode);
 
 private:
+    void applyTheme();
+
     QLabel*      m_slideLabel { nullptr };
     QLabel*      m_themeLabel { nullptr };
     QSlider*     m_zoomSlider { nullptr };

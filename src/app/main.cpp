@@ -26,6 +26,7 @@
 #include "CalcModule.h"
 #include "SpreadsheetModel.h"
 #include "ImpressModule.h"
+#include "PdfModule.h"
 
 #include <QApplication>
 #include <QMainWindow>
@@ -113,6 +114,7 @@ public:
 static class WriterWindow* createWriterWindow(const QString& filePath = {});
 static class CalcWindow*   createCalcWindow(const QString& filePath = {});
 static class ImpressWindow* createImpressWindow(const QString& filePath = {});
+static class PdfWindow*    createPdfWindow(const QString& filePath = {});
 
 // Adds an editor window as a new tab in the main shell (defined after MainShell).
 static void presentEditor(EditorWindow* win);
@@ -418,6 +420,45 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PdfWindow — the PDF tool-hub tab. Unlike the other three, it has no
+// unsaved-document concept (each tool writes its own output immediately), so
+// requestClose() never blocks.
+// ─────────────────────────────────────────────────────────────────────────────
+class PdfWindow : public EditorWindow {
+    Q_OBJECT
+public:
+    explicit PdfWindow(QWidget* parent = nullptr)
+        : EditorWindow(parent)
+    {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setMinimumSize(960, 640);
+        resize(1200, 800);
+    }
+
+    void setPdf(NativeOffice::PdfModule* pdf) {
+        m_pdf = pdf;
+        setCentralWidget(pdf);
+        updateTitle();
+        connect(pdf, &NativeOffice::PdfModule::filePathChanged,
+                this, [this](const QString&) { updateTitle(); });
+    }
+
+    NativeOffice::PdfModule* pdf() const { return m_pdf; }
+
+public slots:
+    void updateTitle() { setWindowTitle(m_pdf ? m_pdf->titleString() : "NativeOffice PDF Tools"); }
+
+public:
+    QString docKindName()    const override { return QStringLiteral("PDF"); }
+    QString currentDocPath() const override { return m_pdf ? m_pdf->currentFilePath() : QString(); }
+    bool    docDirty()       const override { return false; }
+    bool    requestClose()   override { return true; }
+
+private:
+    NativeOffice::PdfModule* m_pdf { nullptr };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ShellTabBar — custom-painted tab bar: a white strip, the first ("Home") tab
 // violet, every other tab white. (Native QTabBar ignores per-tab background, so
 // we paint it ourselves for an exact, style-independent look.)
@@ -435,8 +476,8 @@ public:
         setElideMode(Qt::ElideRight);
         setMovable(false);
         setMouseTracking(true);
-        // Overflow scroll arrows: keep them on the white strip.
-        setStyleSheet("QTabBar QToolButton { background:#FFFFFF; border:none; }");
+        // Overflow scroll arrows: keep them on the dark strip.
+        setStyleSheet("QTabBar QToolButton { background:#0D1117; border:none; }");
     }
 
 protected:
@@ -458,7 +499,7 @@ protected:
 
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
-        p.fillRect(rect(), QColor("#FFFFFF"));      // white strip
+        p.fillRect(rect(), QColor("#0D1117"));      // dark strip, matches Home's background
 
         for (int i = 0; i < count(); ++i) {
             const QRect r   = tabRect(i);
@@ -467,13 +508,13 @@ protected:
 
             const bool hov = (i == m_hover);
             const QColor bg = home ? QColor(sel ? "#6D28D9" : hov ? "#8B5CF6" : "#7C3AED")
-                                   : QColor(hov && !sel ? "#F6F3FD" : "#FFFFFF");
+                                   : QColor(sel ? "#12161F" : hov ? "#17233B" : "#0D1117");
             const QColor fg = home ? QColor("#FFFFFF")
-                                   : QColor(sel ? "#6D28D9" : "#2C3140");
+                                   : QColor(sel ? "#FFFFFF" : "#AEB6C6");
             p.fillRect(r, bg);
 
             if (!home) {
-                p.setPen(QColor("#E6E8ED"));
+                p.setPen(QColor("#1B212C"));
                 p.drawLine(r.topRight(), r.bottomRight());
                 if (sel)
                     p.fillRect(QRect(r.left(), r.bottom() - 2, r.width(), 2),
@@ -490,8 +531,8 @@ protected:
                        fontMetrics().elidedText(tabText(i), Qt::ElideRight, tr.width()));
         }
 
-        // Bottom hairline so the white strip reads as a proper bar.
-        p.setPen(QColor("#E6E8ED"));
+        // Bottom hairline so the dark strip reads as a proper bar.
+        p.setPen(QColor("#1B212C"));
         p.drawLine(0, height() - 1, width(), height() - 1);
     }
 
@@ -530,10 +571,10 @@ public:
         v->setContentsMargins(0, 0, 0, 0);
         v->setSpacing(0);
 
-        // White top strip: tab bar on the left, "+" right after the last tab.
+        // Dark top strip: tab bar on the left, "+" right after the last tab.
         auto* topBar = new QWidget(central);
         topBar->setObjectName("shellTopBar");
-        topBar->setStyleSheet("#shellTopBar { background:#FFFFFF; }");
+        topBar->setStyleSheet("#shellTopBar { background:#0D1117; }");
         auto* hb = new QHBoxLayout(topBar);
         hb->setContentsMargins(0, 0, 0, 0);
         hb->setSpacing(0);
@@ -547,9 +588,9 @@ public:
         plus->setCursor(Qt::PointingHandCursor);
         plus->setFixedHeight(36);
         plus->setStyleSheet(
-            "QToolButton { font-size:20px; font-weight:600; color:#6D28D9;"
-            "  background:#FFFFFF; padding:0 16px; border:none; }"
-            "QToolButton:hover { color:#7C3AED; background:#F3F0FB; }");
+            "QToolButton { font-size:20px; font-weight:600; color:#A78BFA;"
+            "  background:#0D1117; padding:0 16px; border:none; }"
+            "QToolButton:hover { color:#C4B5FD; background:#17233B; }");
         connect(plus, &QToolButton::clicked, this, [this]() { openHomeTab(); });
 
         hb->addWidget(m_bar, 0);
@@ -592,21 +633,31 @@ public:
         win->setAttribute(Qt::WA_DeleteOnClose, false);
         win->setWindowFlags(Qt::Widget);   // behave as a plain child widget
 
-        // Assign a per-type sequential name ("Document 1", "Spreadsheet 1", …).
-        const QString kind = win->docKindName();
-        int n = 0;
-        if      (kind == QLatin1String("Spreadsheet"))  n = ++m_nSheet;
-        else if (kind == QLatin1String("Presentation")) n = ++m_nPres;
-        else                                             n = ++m_nDoc;
-        win->setProperty("autoName", QStringLiteral("%1 %2").arg(kind).arg(n));
-
+        assignAutoName(win);
         addPage(win, labelFor(win));
+        watchTitle(win);
+    }
 
-        // Keep the tab label in sync with the document's save/dirty state.
-        connect(win, &QWidget::windowTitleChanged, this, [this, win](const QString&) {
-            const int i = m_stack->indexOf(win);
-            if (i >= 0) m_bar->setTabText(i, labelFor(win));
-        });
+    // Convert an ephemeral "+"-tab's Home page into a document tab IN PLACE
+    // (browser-style: a new-tab page navigating to a URL becomes that page,
+    // rather than opening a second tab). The pinned first Home tab never
+    // routes through here — main() only wires this into ephemeral Home pages
+    // created via the "+" button, so it keeps opening new tabs as before.
+    void presentInHomeTab(QWidget* homeWidget, EditorWindow* win) {
+        const int idx = m_stack->indexOf(homeWidget);
+        if (idx <= 0) { addEditorTab(win); return; }   // not an ephemeral tab: fall back
+
+        win->setAttribute(Qt::WA_DeleteOnClose, false);
+        win->setWindowFlags(Qt::Widget);
+        assignAutoName(win);
+
+        m_stack->removeWidget(homeWidget);
+        homeWidget->deleteLater();
+        m_stack->insertWidget(idx, win);
+        m_bar->setTabText(idx, labelFor(win));
+        m_bar->setCurrentIndex(idx);
+        m_stack->setCurrentIndex(idx);
+        watchTitle(win);
     }
 
 protected:
@@ -655,6 +706,25 @@ private:
         return idx;
     }
 
+    // Assign a per-type sequential name ("Document 1", "Spreadsheet 1", "PDF 1", …).
+    void assignAutoName(EditorWindow* win) {
+        const QString kind = win->docKindName();
+        int n = 0;
+        if      (kind == QLatin1String("Spreadsheet"))  n = ++m_nSheet;
+        else if (kind == QLatin1String("Presentation")) n = ++m_nPres;
+        else if (kind == QLatin1String("PDF"))          n = ++m_nPdf;
+        else                                             n = ++m_nDoc;
+        win->setProperty("autoName", QStringLiteral("%1 %2").arg(kind).arg(n));
+    }
+
+    // Keep the tab label in sync with the document's save/dirty state.
+    void watchTitle(EditorWindow* win) {
+        connect(win, &QWidget::windowTitleChanged, this, [this, win](const QString&) {
+            const int i = m_stack->indexOf(win);
+            if (i >= 0) m_bar->setTabText(i, labelFor(win));
+        });
+    }
+
     // Tab label: the auto-assigned name while untitled ("Document 1"), or the
     // file name once saved, prefixed "* " when a saved file has unsaved edits.
     QString labelFor(EditorWindow* win) const {
@@ -690,6 +760,7 @@ private:
     int m_nDoc   { 0 };
     int m_nSheet { 0 };
     int m_nPres  { 0 };
+    int m_nPdf   { 0 };
 };
 
 // The single shell instance; document windows route their tabs through it.
@@ -1112,6 +1183,23 @@ QMenuBar::item:pressed {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper: build the PDF tool-hub window  (no menu bar — it's a utility tab,
+// not a document editor; File/Edit actions don't apply to it)
+// ─────────────────────────────────────────────────────────────────────────────
+static PdfWindow* createPdfWindow(const QString& filePath) {
+    auto* win = new PdfWindow;
+    auto* pdf = new NativeOffice::PdfModule;
+    win->setPdf(pdf);
+
+    const QScreen* screen = QApplication::primaryScreen();
+    win->move(screen->availableGeometry().center() - win->rect().center());
+
+    if (!filePath.isEmpty()) pdf->setInitialFile(filePath);
+
+    return win;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Home-screen templates — real starter content per template name.
 // ─────────────────────────────────────────────────────────────────────────────
 static QString writerTemplateHtml(const QString& name) {
@@ -1317,56 +1405,68 @@ static void applyCalcTemplate(NativeOffice::CalcModule* calc, const QString& nam
     calc->markClean();
 }
 
-// Open a document pre-filled from a Home-screen template.
-static void openFromTemplate(NativeOffice::DocumentType type, const QString& name) {
+// Build (but do not present) a document window pre-filled from a Home-screen
+// template. Separated from presentation so callers can either open it as a
+// new tab (presentEditor) or drop it into an ephemeral Home tab in place
+// (MainShell::presentInHomeTab).
+static EditorWindow* createWindowForTemplate(NativeOffice::DocumentType type, const QString& name) {
     using NativeOffice::DocumentType;
     switch (type) {
     case DocumentType::Writer: {
         auto* w = createWriterWindow();
         w->writer()->setContent(writerTemplateHtml(name));
-        presentEditor(w);
-        break;
+        return w;
     }
     case DocumentType::Calc: {
         auto* w = createCalcWindow();
         applyCalcTemplate(w->calc(), name);
-        presentEditor(w);
-        break;
+        return w;
     }
     case DocumentType::Impress: {
         auto* w = createImpressWindow();
         w->impress()->applyDeckTemplate(name);
-        presentEditor(w);
-        break;
+        return w;
     }
+    case DocumentType::Pdf:
+        return createPdfWindow();
     }
+    return createWriterWindow();
+}
+
+// Open a document pre-filled from a Home-screen template, as a new tab.
+static void openFromTemplate(NativeOffice::DocumentType type, const QString& name) {
+    presentEditor(createWindowForTemplate(type, name));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: open any document via smart content-based routing  (Sprint 7)
-//
-// Uses FileRouter::detectFileType() to read the file content first and
-// dispatch to the correct module (Writer, Calc, Impress) regardless of
-// file extension.
+// Helper: build (but do not present) the right editor window for a path via
+// smart content-based routing (Sprint 7). A .pdf extension routes straight to
+// the PDF tool hub (pre-loaded with that file); everything else is classified
+// by FileRouter::detectFileType(), which reads the content itself.
 // ─────────────────────────────────────────────────────────────────────────────
-static void openDocumentByPath(const QString& path) {
+static EditorWindow* createWindowForPath(const QString& path) {
     using NativeOffice::DetectedFileType;
+
+    if (path.endsWith(".pdf", Qt::CaseInsensitive))
+        return createPdfWindow(path);
 
     const auto fileType = NativeOffice::FileRouter::detectFileType(path);
 
     switch (fileType) {
     case DetectedFileType::SpreadsheetData:
-        presentEditor(createCalcWindow(path));
-        break;
+        return createCalcWindow(path);
     case DetectedFileType::PresentationData:
-        presentEditor(createImpressWindow(path));
-        break;
+        return createImpressWindow(path);
     case DetectedFileType::WriterDocument:
     default:
         // createWriterWindow already calls addFile(path, "Writer") on success
-        presentEditor(createWriterWindow(path));
-        break;
+        return createWriterWindow(path);
     }
+}
+
+// Open any document via smart content-based routing, as a new tab.
+static void openDocumentByPath(const QString& path) {
+    presentEditor(createWindowForPath(path));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1442,9 +1542,13 @@ int main(int argc, char* argv[]) {
     shell.resize(1480, 900);
     shell.move(screen->availableGeometry().center() - shell.rect().center());
 
-    // Factory for Home pages (StartScreen wired to the controller). Used for the
-    // pinned first tab and for every extra Home page opened via the "+" button.
-    auto makeHome = [&controller]() -> QWidget* {
+    // Home factories: the PINNED first tab always opens results as new tabs
+    // (unchanged behavior), routing through AppController like before. Every
+    // "+"-tab Home page is EPHEMERAL — picking a format converts that same
+    // tab into the resulting document in place (browser-style new-tab-page
+    // navigation), via MainShell::presentInHomeTab, instead of opening an
+    // additional tab.
+    auto makePinnedHome = [&controller]() -> QWidget* {
         auto* s = new NativeOffice::StartScreen(&controller);
         QObject::connect(s, &NativeOffice::StartScreen::newDocumentRequested,
                          &controller, &NativeOffice::AppController::newDocument);
@@ -1458,8 +1562,36 @@ int main(int argc, char* argv[]) {
         });
         return s;
     };
-    shell.setHomeFactory(makeHome);
-    shell.setHomePage(makeHome());   // pinned first tab
+
+    auto makeEphemeralHome = [&controller, &shell]() -> QWidget* {
+        auto* s = new NativeOffice::StartScreen(&controller);
+        QObject::connect(s, &NativeOffice::StartScreen::newDocumentRequested,
+                         s, [s, &shell](NativeOffice::DocumentType type) {
+            using NativeOffice::DocumentType;
+            EditorWindow* win = nullptr;
+            switch (type) {
+            case DocumentType::Writer:  win = createWriterWindow();  break;
+            case DocumentType::Calc:    win = createCalcWindow();    break;
+            case DocumentType::Impress: win = createImpressWindow(); break;
+            case DocumentType::Pdf:     win = createPdfWindow();     break;
+            }
+            shell.presentInHomeTab(s, win);
+        });
+        QObject::connect(s, &NativeOffice::StartScreen::fileOpenRequested,
+                         s, [s, &shell](const QString& path) {
+            shell.presentInHomeTab(s, createWindowForPath(path));
+        });
+        QObject::connect(s, &NativeOffice::StartScreen::templateChosen,
+                         s, [s, &shell](NativeOffice::DocumentType type, const QString& name) {
+            shell.presentInHomeTab(s, createWindowForTemplate(type, name));
+        });
+        QObject::connect(s, &NativeOffice::StartScreen::settingsRequested,
+                         &controller, &NativeOffice::AppController::openSettings);
+        return s;
+    };
+
+    shell.setHomeFactory(makeEphemeralHome);
+    shell.setHomePage(makePinnedHome());   // pinned first tab
 
     // ── AppController → open new documents / files as tabs ────────────────
     QObject::connect(&controller, &NativeOffice::AppController::newDocumentRequested,
@@ -1469,6 +1601,7 @@ int main(int argc, char* argv[]) {
         case DocumentType::Writer:  presentEditor(createWriterWindow());  break;
         case DocumentType::Calc:    presentEditor(createCalcWindow());    break;
         case DocumentType::Impress: presentEditor(createImpressWindow()); break;
+        case DocumentType::Pdf:     presentEditor(createPdfWindow());     break;
         }
     });
 
