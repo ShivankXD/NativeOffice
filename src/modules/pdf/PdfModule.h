@@ -1,22 +1,40 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// PdfModule.h — the "PDF" tab: a tool hub (not a page-renderer/viewer, since
-// the app has no PDF rendering surface today). Each tool card opens file
-// picker(s), runs the operation via PdfOps, and shows a result panel.
+// PdfModule.h — the PDF editor: a WPS-style ribbon-tabbed PDF application
+// (viewer + page organizer + structural editing), replacing the old
+// tool-hub-with-cards layout.
 //
-// Mirrors the file-state interface WriterModule/CalcModule/ImpressModule
-// expose (currentFilePath/isDirty/titleString) so PdfWindow in main.cpp can
-// wrap it exactly like the other three EditorWindow subclasses.
+// Composition:
+//   PdfRibbon (8 tabs) ─ emits PdfAction values
+//   Sidebar (bookmarks / thumbnails / comments) │ center stack:
+//       • Pdf::Viewer     — continuous page canvas (all tabs except Page)
+//       • PageOrganizer   — thumbnail grid with drag-reorder (Page tab)
+//   StatusBar — page navigation + zoom
+//
+// Document state lives in Pdf::EditSession (whole-file revisions with
+// undo/redo). Exposes the same file-state interface the other modules give
+// their EditorWindow wrapper (currentFilePath/isDirty/titleString/saveToPath).
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include <QWidget>
-#include <functional>
+#include "PdfRibbon.h"
 
-class QLabel;
-class QVBoxLayout;
-class QPushButton;
+#include <QColor>
+#include <QPolygonF>
+#include <QRectF>
+#include <QWidget>
+
+class QStackedWidget;
 
 namespace NativeOffice {
+
+namespace Pdf {
+class EditSession;
+class Viewer;
+class Sidebar;
+class StatusBar;
+}
+class PageOrganizer;
+class PdfFindBar;
 
 class PdfModule : public QWidget {
     Q_OBJECT
@@ -24,38 +42,78 @@ class PdfModule : public QWidget {
 public:
     explicit PdfModule(QWidget* parent = nullptr);
 
-    [[nodiscard]] QString currentFilePath() const noexcept { return m_currentPath; }
-    [[nodiscard]] bool    isDirty()         const noexcept { return false; }  // tool hub: nothing to save
+    [[nodiscard]] QString currentFilePath() const noexcept;
+    [[nodiscard]] bool    isDirty()         const noexcept;
     [[nodiscard]] QString titleString()     const;
 
-    // Pre-loads a path as the working file (e.g. a .pdf opened from Home/CLI).
+    // Opens a .pdf (from Home, CLI, or the File menu). Prompts for a
+    // password if the file is encrypted.
     void setInitialFile(const QString& path);
 
+    bool saveToPath(const QString& path);   // EditorWindow save pipeline
+
 signals:
-    void documentModified();               // never emitted; kept for interface symmetry
+    void documentModified();
     void filePathChanged(const QString& newPath);
 
 private:
-    void buildUi();
-    QWidget* buildToolCard(const QString& title, const QString& subtitle, const QString& color,
-                           const char* icon, bool enabled, std::function<void()> onClick);
-    void applyTheme();
+    void dispatch(PdfAction a);
+    void openInteractive();                 // file picker + password loop
+    bool openPath(const QString& path);
 
-    void runMerge();
-    void runSplit();
-    void runCompress();
-    void showComingSoon(const QString& toolName);
+    // action helpers (implemented across the feature files)
+    void doSave(bool saveAs);
+    void doPrint();
+    void doMerge();
+    void doSplit();
+    void doCompress();
+    void doRotate(int degreesCW, bool allPages);
+    void doDeletePages();
+    void doExtractPages();
+    void doInsertBlank();
+    void doInsertFromFile();
+    void doReplacePages();
+    void doPageSize();
+    void doCropPages();
+    void doFind();
+    void doExtractText();
+    void toast(const QString& message);     // transient status message
+    void comingSoon(const QString& feature);
 
-    void reportResult(const QString& opLabel, bool ok, const QString& message, const QString& outputPath);
-    void setCurrentPath(const QString& path);
+    // ── comment / annotation tools ──────────────────────────────────────
+    // m_pendingAnnot >= 0 holds an AnnotSpec::Kind cast to int while a tool
+    // is armed; -1 means no comment tool is active.
+    void startCommentTool(int kind, const QColor& color);
+    void onRectPlaced(const QString& tag, int page, const QRectF& rectPt);
+    void onClickPlaced(const QString& tag, int page, const QPointF& posPt);
+    void onInkDrawn(const QString& tag, int page, const QPolygonF& strokePt);
+    void refreshComments();                 // repopulate the comments pane
+    void doExportComments();
+    void doImportComments();
+    void doAddBookmark();
+    void doAddLink(int page, const QRectF& rectPt);
 
-    QString      m_currentPath;
-    QWidget*     m_root        { nullptr };
-    QLabel*      m_titleLabel  { nullptr };
-    QWidget*     m_resultPanel { nullptr };
-    QLabel*      m_resultLabel { nullptr };
-    QPushButton* m_revealBtn   { nullptr };
-    QString      m_lastOutputFolder;
+    [[nodiscard]] std::vector<int> selectedOrCurrentPages() const;
+
+    Pdf::EditSession* m_session   { nullptr };
+    PdfRibbon*        m_ribbon    { nullptr };
+    Pdf::Viewer*      m_viewer    { nullptr };
+    Pdf::Sidebar*     m_sidebar   { nullptr };
+    Pdf::StatusBar*   m_status    { nullptr };
+    PageOrganizer*    m_organizer { nullptr };
+    QStackedWidget*   m_center    { nullptr };
+    PdfFindBar*       m_findBar   { nullptr };
+    bool m_readMode = false;
+
+    // find state (search continues from the last hit)
+    QString m_lastFindNeedle;
+    int     m_lastFindPage = -1;
+
+    // comment-tool state
+    int     m_pendingAnnot = -1;            // AnnotSpec::Kind as int, or -1
+    QColor  m_pendingAnnotColor;
+    QString m_pendingAnnotImage;            // image/attachment path for the pending tool
+    bool    m_commentsHidden = false;
 };
 
 } // namespace NativeOffice

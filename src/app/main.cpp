@@ -420,9 +420,9 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PdfWindow — the PDF tool-hub tab. Unlike the other three, it has no
-// unsaved-document concept (each tool writes its own output immediately), so
-// requestClose() never blocks.
+// PdfWindow — the PDF editor tab (ribbon-tabbed viewer/editor). A real
+// document window since the PDF module became an editor: edits accumulate in
+// its EditSession and requestClose() prompts to save, same as the others.
 // ─────────────────────────────────────────────────────────────────────────────
 class PdfWindow : public EditorWindow {
     Q_OBJECT
@@ -439,20 +439,51 @@ public:
         m_pdf = pdf;
         setCentralWidget(pdf);
         updateTitle();
-        connect(pdf, &NativeOffice::PdfModule::filePathChanged,
-                this, [this](const QString&) { updateTitle(); });
+        connect(pdf, &NativeOffice::PdfModule::documentModified,
+                this, &PdfWindow::updateTitle);
+        connect(pdf, &NativeOffice::PdfModule::filePathChanged, this,
+                [this](const QString& path) {
+                    updateTitle();
+                    if (!path.isEmpty())
+                        NativeOffice::RecentFilesManager::instance().addFile(path, "PDF");
+                });
     }
 
     NativeOffice::PdfModule* pdf() const { return m_pdf; }
 
+    bool save() {
+        if (!m_pdf) return true;
+        if (m_pdf->currentFilePath().isEmpty()) return false;   // nothing open
+        return m_pdf->saveToPath(m_pdf->currentFilePath());
+    }
+
 public slots:
-    void updateTitle() { setWindowTitle(m_pdf ? m_pdf->titleString() : "NativeOffice PDF Tools"); }
+    void updateTitle() { setWindowTitle(m_pdf ? m_pdf->titleString() : "NativeOffice PDF"); }
 
 public:
     QString docKindName()    const override { return QStringLiteral("PDF"); }
     QString currentDocPath() const override { return m_pdf ? m_pdf->currentFilePath() : QString(); }
-    bool    docDirty()       const override { return false; }
-    bool    requestClose()   override { return true; }
+    bool    docDirty()       const override { return m_pdf && m_pdf->isDirty(); }
+
+    bool requestClose() override {
+        if (m_pdf && m_pdf->isDirty()) {
+            const auto btn = QMessageBox::question(
+                this, "Unsaved Changes",
+                QString("\"%1\" has unsaved changes.\nDo you want to save before closing?")
+                    .arg(QFileInfo(m_pdf->currentFilePath()).fileName()),
+                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                QMessageBox::Save);
+            if (btn == QMessageBox::Cancel)          return false;
+            if (btn == QMessageBox::Save && !save()) return false;
+        }
+        return true;
+    }
+
+protected:
+    void closeEvent(QCloseEvent* e) override {
+        if (requestClose()) e->accept();
+        else                e->ignore();
+    }
 
 private:
     NativeOffice::PdfModule* m_pdf { nullptr };

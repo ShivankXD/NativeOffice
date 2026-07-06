@@ -1,279 +1,1155 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// PdfModule.cpp — see PdfModule.h.
+// PdfModule.cpp — see PdfModule.h. Wires PdfRibbon actions to EditSession
+// operations and owns the small interaction dialogs (page ranges, page size,
+// find bar, print). Feature areas that live in their own files (watermarks,
+// annotations, crypto, converters…) hook in through dispatch() as they land.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "PdfModule.h"
+#include "PdfAnnots.h"
+#include "PdfDecorUi.h"
+#include "PdfEditSession.h"
 #include "PdfOps.h"
+#include "PdfOrganizer.h"
+#include "PdfPanels.h"
+#include "PdfViewer.h"
 #include "core/theme/ThemeManager.h"
-#include "app/startscreen/LucideIcons.h"
 
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QGridLayout>
-#include <QLabel>
-#include <QPushButton>
-#include <QFrame>
+#include <QApplication>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QDir>
-#include <QDesktopServices>
-#include <QUrl>
-#include <QDialog>
-#include <QSpinBox>
 #include <QFormLayout>
-#include <QDialogButtonBox>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
-#include <QMouseEvent>
-#include <QEnterEvent>
+#include <QPainter>
+#include <QPrintDialog>
+#include <QPrinter>
+#include <QPushButton>
+#include <QShortcut>
+#include <QStackedWidget>
+#include <QTimer>
+#include <QToolButton>
+#include <QVBoxLayout>
+
+#include <algorithm>
+#include <functional>
+#include <memory>
 
 namespace NativeOffice {
 
+using Pdf::AnnotSpec;
+using Pdf::EditSession;
+using Pdf::OpResult;
+
 namespace {
 
-// A frame the whole of which responds to a left click — same pattern
-// StartScreen's create-cards use, kept local since PdfModule lives in a
-// different module target.
-class ClickableFrame : public QFrame {
-public:
-    using QFrame::QFrame;
-    std::function<void()> onClick;
-protected:
-    void enterEvent(QEnterEvent*) override { if (onClick) setCursor(Qt::PointingHandCursor); }
-    void mousePressEvent(QMouseEvent* e) override {
-        if (e->button() == Qt::LeftButton && onClick) { onClick(); e->accept(); return; }
-        QFrame::mousePressEvent(e);
+// "1-3,5,9-12" → sorted unique 0-based indices; empty vector on parse error.
+std::vector<int> parsePageRanges(const QString& text, int pageCount, bool* ok) {
+    std::vector<int> pages;
+    *ok = false;
+    const QStringList parts = text.split(',', Qt::SkipEmptyParts);
+    if (parts.isEmpty()) return pages;
+    for (const QString& rawPart : parts) {
+        const QString part = rawPart.trimmed();
+        const qsizetype dash = part.indexOf('-');
+        bool aOk = false, bOk = false;
+        int a = 0, b = 0;
+        if (dash < 0) {
+            a = b = part.toInt(&aOk);
+            bOk = aOk;
+        } else {
+            a = part.left(dash).trimmed().toInt(&aOk);
+            b = part.mid(dash + 1).trimmed().toInt(&bOk);
+        }
+        if (!aOk || !bOk || a < 1 || b > pageCount || a > b) return {};
+        for (int p = a; p <= b; ++p) pages.push_back(p - 1);
     }
-};
+    std::sort(pages.begin(), pages.end());
+    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+    *ok = true;
+    return pages;
+}
 
 } // namespace
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PdfFindBar — small floating find widget over the viewer (Ctrl+F).
+// ─────────────────────────────────────────────────────────────────────────────
+class PdfFindBar : public QWidget {
+public:
+    std::function<void(const QString&, int direction)> onFind;   // ±1
+    std::function<void()> onClosed;
+
+    explicit PdfFindBar(QWidget* parent)
+        : QWidget(parent)
+    {
+        setObjectName("pdfFindBar");
+        auto* h = new QHBoxLayout(this);
+        h->setContentsMargins(10, 6, 6, 6);
+        h->setSpacing(4);
+
+        m_edit = new QLineEdit(this);
+        m_edit->setPlaceholderText(tr("Find in document…"));
+        m_edit->setFixedWidth(200);
+        m_count = new QLabel(this);
+        m_count->setObjectName("pdfFindCount");
+
+        auto mk = [this](const QString& t, const QString& tip) {
+            auto* b = new QToolButton(this);
+            b->setText(t);
+            b->setToolTip(tip);
+            b->setAutoRaise(true);
+            return b;
+        };
+        auto* prev  = mk(QStringLiteral("‹"), tr("Previous match"));
+        auto* next  = mk(QStringLiteral("›"), tr("Next match (Enter)"));
+        auto* close = mk(QStringLiteral("✕"), tr("Close (Esc)"));
+
+        connect(m_edit, &QLineEdit::returnPressed, this, [this] { if (onFind) onFind(m_edit->text(), +1); });
+        connect(prev,  &QToolButton::clicked, this, [this] { if (onFind) onFind(m_edit->text(), -1); });
+        connect(next,  &QToolButton::clicked, this, [this] { if (onFind) onFind(m_edit->text(), +1); });
+        connect(close, &QToolButton::clicked, this, [this] { hide(); if (onClosed) onClosed(); });
+
+        h->addWidget(m_edit);
+        h->addWidget(prev);
+        h->addWidget(next);
+        h->addWidget(m_count);
+        h->addWidget(close);
+
+        applyTheme();
+        connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+                this, [this](ThemeMode) { applyTheme(); });
+        hide();
+    }
+
+    void open() {
+        show();
+        raise();
+        m_edit->setFocus();
+        m_edit->selectAll();
+    }
+
+    void setCountText(const QString& t) { m_count->setText(t); }
+
+protected:
+    void keyPressEvent(QKeyEvent* ev) override {
+        if (ev->key() == Qt::Key_Escape) { hide(); if (onClosed) onClosed(); return; }
+        QWidget::keyPressEvent(ev);
+    }
+
+private:
+    void applyTheme() {
+        const auto& tm = ThemeManager::instance();
+        setStyleSheet(QString(R"(
+QWidget#pdfFindBar { background: %1; border: 1px solid %2; border-radius: 8px; }
+QWidget#pdfFindBar QLineEdit { background: %3; border: 1px solid %2; border-radius: 4px;
+    padding: 3px 6px; color: %4; font: 9pt "Segoe UI"; }
+QWidget#pdfFindBar QToolButton { color: %4; border: none; border-radius: 4px; padding: 3px 6px; }
+QWidget#pdfFindBar QToolButton:hover { background: %5; }
+QLabel#pdfFindCount { color: %6; font: 8.5pt "Segoe UI"; }
+)")
+            .arg(tm.chromePanelBg(), tm.chromeBorder(), tm.chromeBg(),
+                 tm.chromeText(), tm.chromeHoverBg(), tm.chromeTextMuted()));
+    }
+
+    QLineEdit* m_edit  { nullptr };
+    QLabel*    m_count { nullptr };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// construction
+// ─────────────────────────────────────────────────────────────────────────────
 
 PdfModule::PdfModule(QWidget* parent)
     : QWidget(parent)
 {
     setObjectName("pdfModule");
-    buildUi();
-    applyTheme();
-    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
-            this, [this](ThemeMode) { applyTheme(); });
+    m_session = new EditSession(this);
+
+    m_ribbon    = new PdfRibbon(this);
+    m_viewer    = new Pdf::Viewer(m_session, this);
+    m_sidebar   = new Pdf::Sidebar(m_session, this);
+    m_status    = new Pdf::StatusBar(this);
+    m_organizer = new PageOrganizer(m_session, this);
+
+    m_center = new QStackedWidget(this);
+    m_center->addWidget(m_viewer);      // 0 — all tabs except Page
+    m_center->addWidget(m_organizer);   // 1 — Page tab
+
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    root->addWidget(m_ribbon);
+
+    auto* body = new QWidget(this);
+    auto* bodyLayout = new QHBoxLayout(body);
+    bodyLayout->setContentsMargins(0, 0, 0, 0);
+    bodyLayout->setSpacing(0);
+    bodyLayout->addWidget(m_sidebar);
+    bodyLayout->addWidget(m_center, 1);
+    root->addWidget(body, 1);
+    root->addWidget(m_status);
+
+    m_findBar = new PdfFindBar(m_viewer);
+
+    // ── ribbon → module ─────────────────────────────────────────────────
+    connect(m_ribbon, &PdfRibbon::action, this, &PdfModule::dispatch);
+    connect(m_ribbon, &PdfRibbon::zoomPercentRequested, this,
+            [this](int pct) { m_viewer->setZoom(pct / 100.0); });
+    connect(m_ribbon, &PdfRibbon::tabChanged, this, [this](int idx) {
+        m_center->setCurrentIndex(idx == 2 ? 1 : 0);   // 2 == Page tab
+    });
+    connect(m_ribbon, &PdfRibbon::stampSelected, this,
+            [this](const QString& s) { comingSoon(tr("Stamp \"%1\"").arg(s)); });
+
+    // ── viewer/status/sidebar sync ──────────────────────────────────────
+    connect(m_viewer, &Pdf::Viewer::currentPageChanged, this, [this](int p) {
+        m_status->setPageInfo(p, m_session->pageCount());
+        m_sidebar->setCurrentPage(p);
+    });
+    connect(m_viewer, &Pdf::Viewer::zoomChanged, this, [this](qreal z) {
+        const int pct = int(z * 100 + 0.5);
+        m_status->setZoomPercent(pct);
+        m_ribbon->setZoomPercent(pct);
+    });
+    connect(m_status, &Pdf::StatusBar::pageJumpRequested, m_viewer, &Pdf::Viewer::goToPage);
+    connect(m_status, &Pdf::StatusBar::prevPageRequested, this,
+            [this] { m_viewer->goToPage(m_viewer->currentPage() - 1); });
+    connect(m_status, &Pdf::StatusBar::nextPageRequested, this,
+            [this] { m_viewer->goToPage(m_viewer->currentPage() + 1); });
+    connect(m_status, &Pdf::StatusBar::zoomChanged, this,
+            [this](int pct) { m_viewer->setZoom(pct / 100.0); });
+    connect(m_status, &Pdf::StatusBar::zoomInRequested,  m_viewer, &Pdf::Viewer::zoomIn);
+    connect(m_status, &Pdf::StatusBar::zoomOutRequested, m_viewer, &Pdf::Viewer::zoomOut);
+    connect(m_status, &Pdf::StatusBar::fitWidthRequested, m_viewer, &Pdf::Viewer::fitWidth);
+    connect(m_status, &Pdf::StatusBar::fitPageRequested,  m_viewer, &Pdf::Viewer::fitPage);
+    connect(m_sidebar, &Pdf::Sidebar::pageActivated, m_viewer, &Pdf::Viewer::goToPage);
+
+    // ── annotation placement (comment tools) ────────────────────────────
+    connect(m_viewer, &Pdf::Viewer::rectPlaced,  this, &PdfModule::onRectPlaced);
+    connect(m_viewer, &Pdf::Viewer::clickPlaced, this, &PdfModule::onClickPlaced);
+    connect(m_viewer, &Pdf::Viewer::inkDrawn,    this, &PdfModule::onInkDrawn);
+    connect(m_session, &EditSession::documentChanged, this, &PdfModule::refreshComments);
+    // Clicking a comment in the pane jumps to its page.
+    connect(m_sidebar->commentsList(), &QListWidget::itemClicked, this, [this](QListWidgetItem* it) {
+        const int page = it->data(Qt::UserRole).toInt();
+        m_center->setCurrentIndex(0);
+        m_viewer->goToPage(page);
+    });
+
+    // ── organizer → structural ops ──────────────────────────────────────
+    connect(m_organizer, &PageOrganizer::reorderRequested, this, [this](const std::vector<int>& order) {
+        const OpResult r = m_session->apply(tr("Reorder pages"),
+            [&order](const QString& in, const QString& out) {
+                return Pdf::reorderPages(in, order, out);
+            });
+        if (!r.ok) toast(r.message);
+    });
+    connect(m_organizer, &PageOrganizer::rotateRequested, this, [this](const std::vector<int>& pages, int deg) {
+        const OpResult r = m_session->apply(tr("Rotate pages"),
+            [&pages, deg](const QString& in, const QString& out) {
+                return Pdf::rotatePages(in, pages, deg, out);
+            });
+        if (!r.ok) toast(r.message);
+    });
+    connect(m_organizer, &PageOrganizer::deleteRequested, this, [this](const std::vector<int>& pages) {
+        const OpResult r = m_session->apply(tr("Delete pages"),
+            [&pages](const QString& in, const QString& out) {
+                return Pdf::deletePages(in, pages, out);
+            });
+        if (!r.ok) toast(r.message);
+    });
+    connect(m_organizer, &PageOrganizer::extractRequested, this, [this](const std::vector<int>& pages) {
+        const QString out = QFileDialog::getSaveFileName(this, tr("Extract Pages"),
+            QFileInfo(currentFilePath()).path() + "/extracted.pdf", tr("PDF files (*.pdf)"));
+        if (out.isEmpty()) return;
+        const OpResult r = Pdf::extractPages(m_session->currentRevisionPath(), pages, out);
+        toast(r.ok ? tr("Extracted %1 page(s) to \"%2\".")
+                         .arg(pages.size()).arg(QFileInfo(out).fileName())
+                   : r.message);
+    });
+    connect(m_organizer, &PageOrganizer::insertBlankAfterRequested, this, [this](int after) {
+        const QSizeF sz = m_session->renderer()->pageSizePt(std::max(0, after));
+        const OpResult r = m_session->apply(tr("Insert blank page"),
+            [after, sz](const QString& in, const QString& out) {
+                return Pdf::insertBlankPage(in, after + 1, sz.width(), sz.height(), out);
+            });
+        if (!r.ok) toast(r.message);
+    });
+    connect(m_organizer, &PageOrganizer::pageActivated, this, [this](int page) {
+        m_center->setCurrentIndex(0);
+        m_viewer->goToPage(page);
+    });
+
+    // ── session → interface signals ─────────────────────────────────────
+    connect(m_session, &EditSession::dirtyChanged, this, [this](bool) { emit documentModified(); });
+    connect(m_session, &EditSession::filePathChanged, this, &PdfModule::filePathChanged);
+    connect(m_session, &EditSession::documentChanged, this, [this] {
+        m_status->setPageInfo(m_viewer->currentPage(), m_session->pageCount());
+    });
+
+    // ── shortcuts ───────────────────────────────────────────────────────
+    auto addSc = [this](const QKeySequence& seq, std::function<void()> fn) {
+        auto* sc = new QShortcut(seq, this);
+        sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(sc, &QShortcut::activated, this, std::move(fn));
+    };
+    addSc(QKeySequence::Open,   [this] { dispatch(PdfAction::OpenFile); });
+    addSc(QKeySequence::Save,   [this] { dispatch(PdfAction::SaveFile); });
+    addSc(QKeySequence::SaveAs, [this] { dispatch(PdfAction::SaveFileAs); });
+    addSc(QKeySequence::Undo,   [this] { dispatch(PdfAction::UndoEdit); });
+    addSc(QKeySequence::Redo,   [this] { dispatch(PdfAction::RedoEdit); });
+    addSc(QKeySequence::Find,   [this] { doFind(); });
+    addSc(QKeySequence::Print,  [this] { doPrint(); });
+    addSc(QKeySequence(Qt::Key_Escape), [this] {
+        if (m_readMode) dispatch(PdfAction::ReadMode);
+    });
+
+    const auto& tm = ThemeManager::instance();
+    setStyleSheet(QString("QWidget#pdfModule { background: %1; }").arg(tm.chromeBg()));
+
+    // Dev-only capture hook: PrintWindow-based external captures drop
+    // drawPixmap content on this machine, so verification screenshots come
+    // from Qt's own render path instead. Set NATIVEOFFICE_PDF_GRAB to a .png
+    // path to have the module grab itself a few seconds after startup.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_PDF_GRAB")) {
+        const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_PDF_GRAB");
+        QTimer::singleShot(8000, this, [this, grabPath] {
+            grab().save(grabPath, "PNG");
+        });
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// interface for PdfWindow
+// ─────────────────────────────────────────────────────────────────────────────
+
+QString PdfModule::currentFilePath() const noexcept {
+    return m_session->filePath();
+}
+
+bool PdfModule::isDirty() const noexcept {
+    return m_session->isDirty();
 }
 
 QString PdfModule::titleString() const {
-    return m_currentPath.isEmpty() ? QStringLiteral("PDF Tools")
-                                    : QFileInfo(m_currentPath).fileName() + " — PDF Tools";
+    if (!m_session->hasDocument()) return tr("NativeOffice PDF");
+    const QString name = QFileInfo(m_session->filePath()).fileName();
+    return (m_session->isDirty() ? QStringLiteral("● ") : QString())
+           + name + tr(" — NativeOffice PDF");
 }
 
 void PdfModule::setInitialFile(const QString& path) {
-    setCurrentPath(path);
+    if (!path.isEmpty()) openPath(path);
 }
 
-void PdfModule::setCurrentPath(const QString& path) {
-    m_currentPath = path;
-    emit filePathChanged(path);
-    if (m_titleLabel)
-        m_titleLabel->setText(path.isEmpty() ? "PDF Tools"
-                                              : "PDF Tools — " + QFileInfo(path).fileName());
+bool PdfModule::saveToPath(const QString& path) {
+    QString err;
+    if (!m_session->saveAs(path, &err)) {
+        if (!err.isEmpty()) toast(err);
+        return false;
+    }
+    emit documentModified();
+    return true;
 }
 
-void PdfModule::buildUi() {
-    auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(0, 0, 0, 0);
-    outer->setSpacing(0);
+// ─────────────────────────────────────────────────────────────────────────────
+// open
+// ─────────────────────────────────────────────────────────────────────────────
 
-    m_root = new QWidget(this);
-    m_root->setObjectName("pdfRoot");
-    outer->addWidget(m_root);
-
-    auto* v = new QVBoxLayout(m_root);
-    v->setContentsMargins(36, 28, 36, 28);
-    v->setSpacing(20);
-
-    m_titleLabel = new QLabel("PDF Tools", m_root);
-    m_titleLabel->setObjectName("pdfTitle");
-    v->addWidget(m_titleLabel);
-
-    auto* sub = new QLabel(
-        "Merge, split, and compress PDFs — no file ever leaves this machine.", m_root);
-    sub->setObjectName("pdfSubtitle");
-    v->addWidget(sub);
-
-    auto* grid = new QGridLayout();
-    grid->setSpacing(18);
-    grid->addWidget(buildToolCard("Merge PDFs", "Combine multiple PDFs into one",
-                                   "#2563EB", Lucide::kMerge, true, [this] { runMerge(); }), 0, 0);
-    grid->addWidget(buildToolCard("Split PDF", "Extract a page range into a new file",
-                                   "#16A34A", Lucide::kSplit, true, [this] { runSplit(); }), 0, 1);
-    grid->addWidget(buildToolCard("Compress PDF", "Shrink file size losslessly",
-                                   "#EA580C", Lucide::kFileArchive, true, [this] { runCompress(); }), 0, 2);
-    grid->addWidget(buildToolCard("Convert", "PDF ↔ Word / Excel / Image — coming soon",
-                                   "#64748B", Lucide::kRepeat, false,
-                                   [this] { showComingSoon("Convert"); }), 0, 3);
-    v->addLayout(grid);
-
-    m_resultPanel = new QFrame(m_root);
-    m_resultPanel->setObjectName("pdfResultPanel");
-    m_resultPanel->setVisible(false);
-    auto* rl = new QHBoxLayout(m_resultPanel);
-    rl->setContentsMargins(16, 12, 16, 12);
-    m_resultLabel = new QLabel(m_resultPanel);
-    m_resultLabel->setObjectName("pdfResultLabel");
-    m_resultLabel->setWordWrap(true);
-    rl->addWidget(m_resultLabel, 1);
-    m_revealBtn = new QPushButton("Open Folder", m_resultPanel);
-    m_revealBtn->setCursor(Qt::PointingHandCursor);
-    m_revealBtn->setVisible(false);
-    connect(m_revealBtn, &QPushButton::clicked, this, [this] {
-        if (!m_lastOutputFolder.isEmpty())
-            QDesktopServices::openUrl(QUrl::fromLocalFile(m_lastOutputFolder));
-    });
-    rl->addWidget(m_revealBtn, 0, Qt::AlignVCenter);
-    v->addWidget(m_resultPanel);
-
-    v->addStretch();
+bool PdfModule::openPath(const QString& path) {
+    QString password;
+    for (;;) {
+        QString err;
+        bool needsPassword = false;
+        if (m_session->openFile(path, password, &err, &needsPassword)) {
+            m_viewer->fitWidthWhenReady();
+            m_status->setPageInfo(0, m_session->pageCount());
+            return true;
+        }
+        if (!needsPassword) {
+            QMessageBox::warning(this, tr("Open PDF"), err);
+            return false;
+        }
+        bool ok = false;
+        password = QInputDialog::getText(this, tr("Password Required"),
+            tr("\"%1\" is password-protected.\nEnter the password to open it:")
+                .arg(QFileInfo(path).fileName()),
+            QLineEdit::Password, {}, &ok);
+        if (!ok) return false;
+    }
 }
 
-QWidget* PdfModule::buildToolCard(const QString& title, const QString& subtitle, const QString& color,
-                                  const char* icon, bool enabled, std::function<void()> onClick) {
-    auto* card = new ClickableFrame(m_root);
-    card->setObjectName(enabled ? "pdfToolCard" : "pdfToolCardDisabled");
-    card->setMinimumSize(160, 130);
-    auto* cv = new QVBoxLayout(card);
-    cv->setContentsMargins(16, 16, 16, 14);
-    cv->setSpacing(10);
-
-    auto* iconLabel = new QLabel(card);
-    iconLabel->setPixmap(Lucide::pixmap(icon, enabled ? color : "#7B8494", 28, card->devicePixelRatio()));
-    iconLabel->setFixedSize(28, 28);
-    iconLabel->setStyleSheet("background:transparent;");
-    cv->addWidget(iconLabel);
-
-    auto* titleLbl = new QLabel(title, card);
-    titleLbl->setObjectName("pdfCardTitle");
-    cv->addWidget(titleLbl);
-
-    auto* subLbl = new QLabel(subtitle, card);
-    subLbl->setObjectName("pdfCardSubtitle");
-    subLbl->setWordWrap(true);
-    cv->addWidget(subLbl);
-    cv->addStretch();
-
-    card->onClick = std::move(onClick);   // disabled cards still click through to "coming soon"
-    return card;
+void PdfModule::openInteractive() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Open PDF"), QDir::homePath(), tr("PDF files (*.pdf)"));
+    if (!path.isEmpty()) openPath(path);
 }
 
-void PdfModule::applyTheme() {
-    const bool dark = ThemeManager::instance().isDark();
-    const QString bg       = dark ? "#0D1117" : "#F5F6FA";
-    const QString panelBg  = dark ? "#12161F" : "#FFFFFF";
-    const QString border   = dark ? "#202836" : "#E5E7EB";
-    const QString text     = dark ? "#EAEDF3" : "#1C1E26";
-    const QString muted    = dark ? "#7B8494" : "#6B7280";
-    const QString hover    = dark ? "#161D29" : "#F3F4F6";
+// ─────────────────────────────────────────────────────────────────────────────
+// dispatch
+// ─────────────────────────────────────────────────────────────────────────────
 
-    setStyleSheet(QString(R"(
-QWidget#pdfRoot { background: %1; }
-QLabel#pdfTitle { color: %2; font: 700 22px 'Segoe UI'; background: transparent; }
-QLabel#pdfSubtitle { color: %3; font: 13px 'Segoe UI'; background: transparent; }
-QFrame#pdfToolCard, QFrame#pdfToolCardDisabled {
-    background: %4; border: 1px solid %5; border-radius: 14px;
-}
-QFrame#pdfToolCard:hover { border: 1px solid #3B82F6; background: %6; }
-QLabel#pdfCardTitle { color: %2; font: 700 14px 'Segoe UI'; background: transparent; }
-QLabel#pdfCardSubtitle { color: %3; font: 12px 'Segoe UI'; background: transparent; }
-QFrame#pdfResultPanel { background: %4; border: 1px solid %5; border-radius: 10px; }
-QLabel#pdfResultLabel { color: %2; font: 13px 'Segoe UI'; background: transparent; }
-)").arg(bg, text, muted, panelBg, border, hover));
+std::vector<int> PdfModule::selectedOrCurrentPages() const {
+    if (m_center->currentIndex() == 1) {
+        auto sel = m_organizer->selectedPages();
+        if (!sel.empty()) return sel;
+    }
+    if (m_session->hasDocument())
+        return { m_viewer->currentPage() };
+    return {};
 }
 
-// ── Tools ──────────────────────────────────────────────────────────────────
-void PdfModule::runMerge() {
-    const QStringList inputs = QFileDialog::getOpenFileNames(
-        this, "Select PDFs to merge (in order)", QDir::homePath(), "PDF Files (*.pdf)");
-    if (inputs.size() < 2) return;
+void PdfModule::dispatch(PdfAction a) {
+    using A = PdfAction;
 
-    const QString suggested = QFileInfo(inputs.first()).absolutePath() + "/Merged.pdf";
-    const QString output = QFileDialog::getSaveFileName(this, "Save Merged PDF As", suggested, "PDF Files (*.pdf)");
-    if (output.isEmpty()) return;
+    // Actions that work without a document.
+    switch (a) {
+    case A::OpenFile:  openInteractive(); return;
+    case A::MergePdf:  doMerge(); return;
+    case A::Translate: comingSoon(tr("Parallel Translate")); return;
+    default: break;
+    }
 
-    const auto result = Pdf::mergePdfs(inputs, output);
-    reportResult("Merge", result.ok, result.message, output);
+    if (!m_session->hasDocument()) {
+        toast(tr("Open a PDF first."));
+        return;
+    }
+
+    switch (a) {
+    // ── tools / view ────────────────────────────────────────────────────
+    case A::PanTool:
+        m_viewer->setMode(Pdf::Viewer::Mode::Pan);
+        m_ribbon->syncToolMode(true);
+        break;
+    case A::SelectTool:
+        m_viewer->setMode(Pdf::Viewer::Mode::Select);
+        m_ribbon->syncToolMode(false);
+        break;
+    case A::ZoomIn:  m_viewer->zoomIn();  break;
+    case A::ZoomOut: m_viewer->zoomOut(); break;
+    case A::ReadMode:
+        m_readMode = !m_readMode;
+        m_ribbon->setVisible(!m_readMode);
+        m_sidebar->setVisible(!m_readMode);
+        if (m_readMode) toast(tr("Read mode — press Esc to exit"));
+        break;
+    case A::Find: doFind(); break;
+
+    // ── file ────────────────────────────────────────────────────────────
+    case A::SaveFile:   doSave(false); break;
+    case A::SaveFileAs: doSave(true);  break;
+    case A::UndoEdit:
+        if (!m_session->undo()) toast(tr("Nothing to undo."));
+        break;
+    case A::RedoEdit:
+        if (!m_session->redo()) toast(tr("Nothing to redo."));
+        break;
+    case A::Print: doPrint(); break;
+
+    // ── page structure ──────────────────────────────────────────────────
+    case A::SplitPdf:        doSplit(); break;
+    case A::Compress:        doCompress(); break;
+    case A::RotateLeft:      doRotate(270, false); break;
+    case A::RotateRight:     doRotate(90, false);  break;
+    case A::RotateAllPages:  doRotate(90, true);   break;
+    case A::DeletePages:     doDeletePages(); break;
+    case A::ExtractPageBtn:  doExtractPages(); break;
+    case A::InsertBlankPage: doInsertBlank(); break;
+    case A::InsertFromFile:  doInsertFromFile(); break;
+    case A::ReplacePages:    doReplacePages(); break;
+    case A::PageSizeDlg:     doPageSize(); break;
+    case A::CropPages:       doCropPages(); break;
+
+    // ── text ────────────────────────────────────────────────────────────
+    case A::ExtractText:     doExtractText(); break;
+
+    // ── content edit (annotation-based) ─────────────────────────────────
+    case A::AddText:    startCommentTool(int(AnnotSpec::Kind::PlainText), QColor("#1C1E26")); break;
+    case A::AddPicture: {
+        const QString img = QFileDialog::getOpenFileName(this, tr("Add Picture"),
+            QDir::homePath(), tr("Images (*.png *.jpg *.jpeg *.bmp)"));
+        if (img.isEmpty()) break;
+        m_pendingAnnotImage = img;
+        startCommentTool(int(AnnotSpec::Kind::Picture), Qt::transparent);
+        toast(tr("Drag a box on the page to place the picture."));
+        break;
+    }
+    case A::WipeOff:    startCommentTool(int(AnnotSpec::Kind::WipeOff), Qt::white); break;
+
+    // ── comment tools ───────────────────────────────────────────────────
+    case A::HighlightText:  startCommentTool(int(AnnotSpec::Kind::Highlight),  QColor("#FFD400")); break;
+    case A::HighlightArea:  startCommentTool(int(AnnotSpec::Kind::Highlight),  QColor("#FFD400")); break;
+    case A::Underline:      startCommentTool(int(AnnotSpec::Kind::Underline),  QColor("#E8372A")); break;
+    case A::Strikethrough:  startCommentTool(int(AnnotSpec::Kind::StrikeOut),  QColor("#E8372A")); break;
+    case A::TextComment:    startCommentTool(int(AnnotSpec::Kind::FreeText),   QColor("#1C1E26")); break;
+    case A::TextBox:        startCommentTool(int(AnnotSpec::Kind::FreeText),   QColor("#1C1E26")); break;
+    case A::Callout:        startCommentTool(int(AnnotSpec::Kind::Callout),    QColor("#1C1E26")); break;
+    case A::NoteAnnot:      startCommentTool(int(AnnotSpec::Kind::Note),       QColor("#FFCC33")); break;
+    case A::InkDraw:        startCommentTool(int(AnnotSpec::Kind::Ink),        QColor("#E8372A")); break;
+    case A::ShapeRect:      startCommentTool(int(AnnotSpec::Kind::Square),     QColor("#E8372A")); break;
+    case A::ShapeEllipse:   startCommentTool(int(AnnotSpec::Kind::Circle),     QColor("#E8372A")); break;
+    case A::ShapeLine:      startCommentTool(int(AnnotSpec::Kind::Line),       QColor("#E8372A")); break;
+    case A::ShapeArrow:     startCommentTool(int(AnnotSpec::Kind::Arrow),      QColor("#E8372A")); break;
+    case A::ReplaceTextAnnot: startCommentTool(int(AnnotSpec::Kind::StrikeOut), QColor("#2563EB")); break;
+    case A::InsertTextAnnot:  startCommentTool(int(AnnotSpec::Kind::Caret),     QColor("#2563EB")); break;
+    case A::AttachFile: {
+        const QString file = QFileDialog::getOpenFileName(this, tr("Attach File"), QDir::homePath());
+        if (file.isEmpty()) break;
+        m_pendingAnnotImage = file;   // reuse the "pending file" slot
+        startCommentTool(int(AnnotSpec::Kind::FileAttachment), QColor("#2563EB"));
+        toast(tr("Click on the page to place the attachment."));
+        break;
+    }
+    case A::HideComments:
+        m_commentsHidden = !m_commentsHidden;
+        toast(m_commentsHidden ? tr("Comments hidden in the viewer.")
+                               : tr("Comments shown."));
+        break;
+    case A::ManageComments:
+        toast(tr("Open the Comments panel from the left sidebar to manage comments."));
+        break;
+    case A::ExportComments: doExportComments(); break;
+    case A::ImportComments: doImportComments(); break;
+    case A::AddLink:
+        startCommentTool(int(AnnotSpec::Kind::Link), QColor("#2563EB"));
+        toast(tr("Drag a box, then enter the URL it should open."));
+        break;
+    case A::AddBookmark:    doAddBookmark(); break;
+    case A::Watermark:
+        Pdf::runWatermarkUi(this, m_session, [this](const QString& m) { toast(m); });
+        break;
+    case A::Background:
+        Pdf::runBackgroundUi(this, m_session, [this](const QString& m) { toast(m); });
+        break;
+    case A::PageNumber:
+        Pdf::runPageNumberUi(this, m_session, [this](const QString& m) { toast(m); });
+        break;
+    case A::HeaderFooter:
+        Pdf::runHeaderFooterUi(this, m_session, [this](const QString& m) { toast(m); });
+        break;
+    case A::FillForm:
+    case A::HighlightFields: comingSoon(tr("Form filling")); break;
+    case A::AddSignature:
+    case A::AddInitials:     comingSoon(tr("Signatures")); break;
+    case A::Encrypt:         comingSoon(tr("Encrypt")); break;
+    case A::CertSign:
+    case A::Timestamp:
+    case A::ManageCerts:
+    case A::ValidateSigs:    comingSoon(tr("Certificate signatures")); break;
+    case A::ToWord:
+    case A::ToExcel:
+    case A::ToPpt:
+    case A::ToPicture:
+    case A::ToText:
+    case A::PictureToPdf:
+    case A::ToImageOnlyPdf:
+    case A::ExtractPicture:  comingSoon(tr("Convert")); break;
+    case A::OcrPdf:          comingSoon(tr("OCR")); break;
+    case A::EditContent:     break;   // disabled button; unreachable
+    default: break;
+    }
 }
 
-void PdfModule::runSplit() {
-    const QString input = QFileDialog::getOpenFileName(
-        this, "Select a PDF to split", QDir::homePath(), "PDF Files (*.pdf)");
-    if (input.isEmpty()) return;
+// ─────────────────────────────────────────────────────────────────────────────
+// file actions
+// ─────────────────────────────────────────────────────────────────────────────
 
-    QString countError;
-    const int total = Pdf::pdfPageCountOrError(input, countError);
-    if (total < 0) { reportResult("Split", false, countError, {}); return; }
+void PdfModule::doSave(bool saveAs) {
+    QString target = m_session->filePath();
+    if (saveAs || target.isEmpty()) {
+        target = QFileDialog::getSaveFileName(this, tr("Save PDF"),
+            target.isEmpty() ? QDir::homePath() + "/document.pdf" : target,
+            tr("PDF files (*.pdf)"));
+        if (target.isEmpty()) return;
+        if (QFileInfo(target).suffix().isEmpty()) target += ".pdf";
+    }
+    if (saveToPath(target))
+        toast(tr("Saved \"%1\".").arg(QFileInfo(target).fileName()));
+}
 
+void PdfModule::doPrint() {
+    if (!m_session->hasDocument()) { toast(tr("Open a PDF first.")); return; }
+
+    QPrinter printer(QPrinter::HighResolution);
+    QPrintDialog dlg(&printer, this);
+    dlg.setWindowTitle(tr("Print PDF"));
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const int n = m_session->pageCount();
+    int from = printer.fromPage() > 0 ? printer.fromPage() - 1 : 0;
+    int to   = printer.toPage()   > 0 ? printer.toPage()   - 1 : n - 1;
+    from = std::clamp(from, 0, n - 1);
+    to   = std::clamp(to,   from, n - 1);
+
+    QPainter painter(&printer);
+    if (!painter.isActive()) { toast(tr("Could not start the print job.")); return; }
+
+    for (int i = from; i <= to; ++i) {
+        if (i > from) printer.newPage();
+        const QSizeF pagePt = m_session->renderer()->pageSizePt(i);
+        const QRectF target = printer.pageRect(QPrinter::DevicePixel);
+        const qreal scale = std::min(target.width()  / pagePt.width(),
+                                     target.height() / pagePt.height());
+        const QImage img = m_session->renderer()->renderPage(i, scale);
+        if (img.isNull()) continue;
+        painter.drawImage(QPointF(0, 0), img);
+    }
+    painter.end();
+    toast(tr("Sent %1 page(s) to the printer.").arg(to - from + 1));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// structural ops (dialog + session apply)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PdfModule::doMerge() {
+    const QStringList files = QFileDialog::getOpenFileNames(
+        this, tr("Pick PDFs to merge (in order)"), QDir::homePath(), tr("PDF files (*.pdf)"));
+    if (files.size() < 2) {
+        if (!files.isEmpty()) toast(tr("Pick at least two PDF files to merge."));
+        return;
+    }
+    const QString out = QFileDialog::getSaveFileName(this, tr("Save merged PDF"),
+        QFileInfo(files.first()).path() + "/merged.pdf", tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+
+    const OpResult r = Pdf::mergePdfs(files, out);
+    if (!r.ok) { toast(r.message); return; }
+    if (QMessageBox::question(this, tr("Merge PDFs"),
+            tr("Merged %1 files.\nOpen the result?").arg(files.size()))
+        == QMessageBox::Yes)
+        openPath(out);
+}
+
+void PdfModule::doSplit() {
+    const int n = m_session->pageCount();
+    bool ok = false;
+    const QString range = QInputDialog::getText(this, tr("Split PDF"),
+        tr("Extract pages (e.g. 1-3) of %1 into a new file:").arg(n),
+        QLineEdit::Normal, QStringLiteral("1-%1").arg(n), &ok);
+    if (!ok) return;
+    bool parsed = false;
+    const std::vector<int> pages = parsePageRanges(range, n, &parsed);
+    if (!parsed || pages.empty()) { toast(tr("That page range isn't valid.")); return; }
+
+    const QString out = QFileDialog::getSaveFileName(this, tr("Save split PDF"),
+        QFileInfo(currentFilePath()).path() + "/split.pdf", tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+    const OpResult r = Pdf::extractPages(m_session->currentRevisionPath(), pages, out);
+    toast(r.ok ? tr("Wrote %1 page(s) to \"%2\".").arg(pages.size()).arg(QFileInfo(out).fileName())
+               : r.message);
+}
+
+void PdfModule::doCompress() {
+    const QString out = QFileDialog::getSaveFileName(this, tr("Save compressed PDF"),
+        QFileInfo(currentFilePath()).path() + "/"
+            + QFileInfo(currentFilePath()).completeBaseName() + "-compressed.pdf",
+        tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+    const qint64 before = QFileInfo(m_session->currentRevisionPath()).size();
+    const OpResult r = Pdf::compressPdf(m_session->currentRevisionPath(), out);
+    if (!r.ok) { toast(r.message); return; }
+    const qint64 after = QFileInfo(out).size();
+    toast(tr("Compressed: %1 KB → %2 KB.").arg(before / 1024).arg(after / 1024));
+}
+
+void PdfModule::doRotate(int degreesCW, bool allPages) {
+    std::vector<int> pages;
+    if (!allPages) pages = selectedOrCurrentPages();
+    const OpResult r = m_session->apply(tr("Rotate"),
+        [&pages, degreesCW](const QString& in, const QString& out) {
+            return Pdf::rotatePages(in, pages, degreesCW, out);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::doDeletePages() {
+    const int n = m_session->pageCount();
+    std::vector<int> pages = selectedOrCurrentPages();
+    const QString preset = pages.size() == 1 ? QString::number(pages[0] + 1) : QString();
+    bool ok = false;
+    const QString range = QInputDialog::getText(this, tr("Delete Pages"),
+        tr("Pages to delete (e.g. 2 or 1-3,5) of %1:").arg(n),
+        QLineEdit::Normal, preset, &ok);
+    if (!ok) return;
+    bool parsed = false;
+    pages = parsePageRanges(range, n, &parsed);
+    if (!parsed || pages.empty()) { toast(tr("That page range isn't valid.")); return; }
+
+    const OpResult r = m_session->apply(tr("Delete pages"),
+        [&pages](const QString& in, const QString& out) {
+            return Pdf::deletePages(in, pages, out);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::doExtractPages() {
+    const int n = m_session->pageCount();
+    bool ok = false;
+    const QString range = QInputDialog::getText(this, tr("Extract Pages"),
+        tr("Pages to extract (e.g. 2 or 1-3,5) of %1:").arg(n),
+        QLineEdit::Normal, QString::number(m_viewer->currentPage() + 1), &ok);
+    if (!ok) return;
+    bool parsed = false;
+    const std::vector<int> pages = parsePageRanges(range, n, &parsed);
+    if (!parsed || pages.empty()) { toast(tr("That page range isn't valid.")); return; }
+
+    const QString out = QFileDialog::getSaveFileName(this, tr("Extract Pages"),
+        QFileInfo(currentFilePath()).path() + "/extracted.pdf", tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+    const OpResult r = Pdf::extractPages(m_session->currentRevisionPath(), pages, out);
+    toast(r.ok ? tr("Extracted %1 page(s).").arg(pages.size()) : r.message);
+}
+
+void PdfModule::doInsertBlank() {
+    const int cur = m_viewer->currentPage();
+    bool ok = false;
+    const int after = QInputDialog::getInt(this, tr("Insert Blank Page"),
+        tr("Insert after page (0 = at the beginning):"),
+        cur + 1, 0, m_session->pageCount(), 1, &ok);
+    if (!ok) return;
+    const QSizeF sz = m_session->renderer()->pageSizePt(
+        std::clamp(cur, 0, m_session->pageCount() - 1));
+    const OpResult r = m_session->apply(tr("Insert blank page"),
+        [after, sz](const QString& in, const QString& out) {
+            return Pdf::insertBlankPage(in, after, sz.width(), sz.height(), out);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::doInsertFromFile() {
+    const QString src = QFileDialog::getOpenFileName(this, tr("Insert Pages From PDF"),
+        QDir::homePath(), tr("PDF files (*.pdf)"));
+    if (src.isEmpty()) return;
+    bool ok = false;
+    const int after = QInputDialog::getInt(this, tr("Insert Pages"),
+        tr("Insert after page (0 = at the beginning):"),
+        m_viewer->currentPage() + 1, 0, m_session->pageCount(), 1, &ok);
+    if (!ok) return;
+    const OpResult r = m_session->apply(tr("Insert pages"),
+        [&src, after](const QString& in, const QString& out) {
+            return Pdf::insertPdfAt(in, src, after, out);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::doReplacePages() {
+    const int n = m_session->pageCount();
+    bool ok = false;
+    const QString range = QInputDialog::getText(this, tr("Replace Pages"),
+        tr("Pages to replace (a contiguous range, e.g. 2-4) of %1:").arg(n),
+        QLineEdit::Normal, QString::number(m_viewer->currentPage() + 1), &ok);
+    if (!ok) return;
+    bool parsed = false;
+    const std::vector<int> pages = parsePageRanges(range, n, &parsed);
+    if (!parsed || pages.empty()) { toast(tr("That page range isn't valid.")); return; }
+    for (size_t i = 1; i < pages.size(); ++i)
+        if (pages[i] != pages[i - 1] + 1) { toast(tr("Pick a contiguous range.")); return; }
+
+    const QString src = QFileDialog::getOpenFileName(this, tr("Replacement PDF"),
+        QDir::homePath(), tr("PDF files (*.pdf)"));
+    if (src.isEmpty()) return;
+
+    const int from = pages.front(), to = pages.back();
+    const OpResult r = m_session->apply(tr("Replace pages"),
+        [from, to, &src](const QString& in, const QString& out) {
+            return Pdf::replacePages(in, from, to, src, out);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::doPageSize() {
     QDialog dlg(this);
-    dlg.setWindowTitle("Extract Page Range");
+    dlg.setWindowTitle(tr("Page Size"));
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
     auto* form = new QFormLayout(&dlg);
-    auto* fromBox = new QSpinBox(&dlg); fromBox->setRange(1, total); fromBox->setValue(1);
-    auto* toBox   = new QSpinBox(&dlg); toBox->setRange(1, total);   toBox->setValue(total);
-    form->addRow(QString("This PDF has %1 pages. From:").arg(total), fromBox);
-    form->addRow("To:", toBox);
+
+    auto* preset = new QComboBox(&dlg);
+    struct Size { const char* name; double w, h; };
+    static const Size kSizes[] = {
+        { "A4 (210 × 297 mm)",    595.28, 841.89  },
+        { "Letter (8.5 × 11 in)", 612.0,  792.0   },
+        { "Legal (8.5 × 14 in)",  612.0,  1008.0  },
+        { "A3 (297 × 420 mm)",    841.89, 1190.55 },
+        { "A5 (148 × 210 mm)",    419.53, 595.28  },
+    };
+    for (const auto& s : kSizes) preset->addItem(s.name);
+    preset->addItem(tr("Custom…"));
+
+    auto* wSpin = new QDoubleSpinBox(&dlg);
+    wSpin->setRange(18, 14400); wSpin->setValue(595.28); wSpin->setSuffix(" pt");
+    auto* hSpin = new QDoubleSpinBox(&dlg);
+    hSpin->setRange(18, 14400); hSpin->setValue(841.89); hSpin->setSuffix(" pt");
+    wSpin->setEnabled(false); hSpin->setEnabled(false);
+
+    connect(preset, &QComboBox::currentIndexChanged, &dlg, [&](int idx) {
+        const bool custom = idx >= int(std::size(kSizes));
+        wSpin->setEnabled(custom);
+        hSpin->setEnabled(custom);
+        if (!custom) { wSpin->setValue(kSizes[idx].w); hSpin->setValue(kSizes[idx].h); }
+    });
+
+    auto* scope = new QComboBox(&dlg);
+    scope->addItem(tr("All pages"));
+    scope->addItem(tr("Current page"));
+
+    form->addRow(tr("Size:"), preset);
+    form->addRow(tr("Width:"), wSpin);
+    form->addRow(tr("Height:"), hSpin);
+    form->addRow(tr("Apply to:"), scope);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
     connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     form->addRow(buttons);
+
     if (dlg.exec() != QDialog::Accepted) return;
 
-    const int from = fromBox->value(), to = toBox->value();
-    if (from > to) { reportResult("Split", false, "\"From\" must be less than or equal to \"To\".", {}); return; }
-
-    const QString suggested = QFileInfo(input).absolutePath() + "/"
-        + QFileInfo(input).completeBaseName() + QString("_p%1-%2.pdf").arg(from).arg(to);
-    const QString output = QFileDialog::getSaveFileName(this, "Save Extracted Pages As", suggested, "PDF Files (*.pdf)");
-    if (output.isEmpty()) return;
-
-    const auto result = Pdf::splitPdf(input, from, to, output);
-    reportResult("Split", result.ok, result.message, output);
+    std::vector<int> pages;
+    if (scope->currentIndex() == 1) pages = { m_viewer->currentPage() };
+    const double w = wSpin->value(), h = hSpin->value();
+    const OpResult r = m_session->apply(tr("Page size"),
+        [&pages, w, h](const QString& in, const QString& out) {
+            return Pdf::resizePages(in, pages, w, h, out);
+        });
+    if (!r.ok) toast(r.message);
 }
 
-void PdfModule::runCompress() {
-    const QString input = QFileDialog::getOpenFileName(
-        this, "Select a PDF to compress", QDir::homePath(), "PDF Files (*.pdf)");
-    if (input.isEmpty()) return;
+void PdfModule::doCropPages() {
+    m_center->setCurrentIndex(0);
+    m_viewer->setMode(Pdf::Viewer::Mode::PlaceRect, QStringLiteral("crop"));
+    toast(tr("Drag an area on a page to crop to it."));
 
-    const QString suggested = QFileInfo(input).absolutePath() + "/"
-        + QFileInfo(input).completeBaseName() + "_compressed.pdf";
-    const QString output = QFileDialog::getSaveFileName(this, "Save Compressed PDF As", suggested, "PDF Files (*.pdf)");
-    if (output.isEmpty()) return;
+    // One-shot connection; reset to Select afterwards.
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(m_viewer, &Pdf::Viewer::rectPlaced, this,
+        [this, conn](const QString& tag, int page, const QRectF& rectPt) {
+            if (tag != QStringLiteral("crop")) return;
+            QObject::disconnect(*conn);
+            m_viewer->setMode(Pdf::Viewer::Mode::Select);
+            m_ribbon->syncToolMode(false);
 
-    const qint64 beforeSize = QFileInfo(input).size();
-    const auto result = Pdf::compressPdf(input, output);
-    if (result.ok) {
-        const qint64 afterSize = QFileInfo(output).size();
-        const qint64 saved = beforeSize - afterSize;
-        const QString note = saved > 0
-            ? QString(" (%1% smaller)").arg(int(100.0 * saved / qMax<qint64>(1, beforeSize)))
-            : QString(" (already well-compressed — size unchanged)");
-        reportResult("Compress", true, note, output);
-    } else {
-        reportResult("Compress", false, result.message, output);
+            QMessageBox box(this);
+            box.setWindowTitle(tr("Crop Pages"));
+            box.setText(tr("Crop to the selected area?"));
+            auto* thisPageBtn = box.addButton(tr("This Page"), QMessageBox::YesRole);
+            auto* allPagesBtn = box.addButton(tr("All Pages"), QMessageBox::AcceptRole);
+            box.addButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() != thisPageBtn && box.clickedButton() != allPagesBtn)
+                return;
+
+            std::vector<int> pages;
+            if (box.clickedButton() == thisPageBtn) pages = { page };
+
+            // top-left origin → PDF bottom-left coordinates
+            const qreal pageH = m_session->renderer()->pageSizePt(page).height();
+            const double x0 = rectPt.left();
+            const double x1 = rectPt.right();
+            const double y1 = pageH - rectPt.top();
+            const double y0 = pageH - rectPt.bottom();
+
+            const OpResult r = m_session->apply(tr("Crop pages"),
+                [&pages, x0, y0, x1, y1](const QString& in, const QString& out) {
+                    return Pdf::setCropBox(in, pages, x0, y0, x1, y1, out);
+                });
+            if (!r.ok) toast(r.message);
+        });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// find / text
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PdfModule::doFind() {
+    if (!m_session->hasDocument()) { toast(tr("Open a PDF first.")); return; }
+
+    m_findBar->adjustSize();
+    m_findBar->move(m_viewer->width() - m_findBar->width() - 24, 12);
+    m_findBar->open();
+
+    m_findBar->onClosed = [this] { m_viewer->clearHighlights(); };
+    m_findBar->onFind = [this](const QString& needle, int dir) {
+        if (needle.isEmpty()) return;
+        m_viewer->clearHighlights();
+
+        // Search from the current page outward in `dir`, wrapping once.
+        const int n = m_session->pageCount();
+        int start = m_viewer->currentPage();
+        if (needle == m_lastFindNeedle && m_lastFindPage >= 0)
+            start = m_lastFindPage + dir;
+
+        for (int k = 0; k < n; ++k) {
+            int page = (start + dir * k) % n;
+            if (page < 0) page += n;
+            const auto rects = m_session->renderer()->searchPage(page, needle);
+            if (rects.empty()) continue;
+            m_viewer->setHighlightRects(page, rects);
+            m_viewer->goToPage(page);
+            m_findBar->setCountText(tr("%1 hit(s) on page %2").arg(rects.size()).arg(page + 1));
+            m_lastFindNeedle = needle;
+            m_lastFindPage = page;
+            return;
+        }
+        m_findBar->setCountText(tr("Not found"));
+        m_lastFindNeedle.clear();
+        m_lastFindPage = -1;
+    };
+}
+
+void PdfModule::doExtractText() {
+    const QString out = QFileDialog::getSaveFileName(this, tr("Extract Text"),
+        QFileInfo(currentFilePath()).path() + "/"
+            + QFileInfo(currentFilePath()).completeBaseName() + ".txt",
+        tr("Text files (*.txt)"));
+    if (out.isEmpty()) return;
+
+    QFile f(out);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        toast(tr("Could not write \"%1\".").arg(out));
+        return;
     }
-}
-
-void PdfModule::showComingSoon(const QString& toolName) {
-    QMessageBox::information(this, toolName,
-        toolName + " isn't available yet — it needs a full PDF parser (for text/layout extraction) "
-                   "that would meaningfully increase NativeOffice's install size, so it's on hold "
-                   "pending that decision.");
-}
-
-void PdfModule::reportResult(const QString& opLabel, bool ok, const QString& message, const QString& outputPath) {
-    m_resultPanel->setVisible(true);
-    if (ok) {
-        setCurrentPath(outputPath);
-        m_lastOutputFolder = QFileInfo(outputPath).absolutePath();
-        m_resultLabel->setText(QString("✓ %1 complete%2 — saved to %3")
-                                    .arg(opLabel, message, outputPath));
-        m_revealBtn->setVisible(true);
-    } else {
-        m_resultLabel->setText(QString("✕ %1 failed: %2").arg(opLabel, message));
-        m_revealBtn->setVisible(false);
+    const int n = m_session->pageCount();
+    for (int i = 0; i < n; ++i) {
+        f.write(m_session->renderer()->pageText(i).toUtf8());
+        if (i + 1 < n) f.write("\n\n");
     }
+    f.close();
+    toast(tr("Extracted text from %1 page(s).").arg(n));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// comment / annotation tools
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PdfModule::startCommentTool(int kind, const QColor& color) {
+    m_center->setCurrentIndex(0);   // annotations live on the viewer, not the organizer
+    m_pendingAnnot = kind;
+    m_pendingAnnotColor = color;
+
+    using K = AnnotSpec::Kind;
+    const K k = K(kind);
+    if (k == K::Note)
+        m_viewer->setMode(Pdf::Viewer::Mode::PlaceClick, QStringLiteral("annot"));
+    else if (k == K::FileAttachment)
+        m_viewer->setMode(Pdf::Viewer::Mode::PlaceClick, QStringLiteral("annot"));
+    else if (k == K::Ink)
+        m_viewer->setMode(Pdf::Viewer::Mode::Ink, QStringLiteral("annot"));
+    else
+        m_viewer->setMode(Pdf::Viewer::Mode::PlaceRect, QStringLiteral("annot"));
+
+    m_ribbon->syncToolMode(false);
+}
+
+void PdfModule::onRectPlaced(const QString& tag, int page, const QRectF& rectPt) {
+    if (tag != QStringLiteral("annot") || m_pendingAnnot < 0) return;
+    using K = AnnotSpec::Kind;
+    const K kind = K(m_pendingAnnot);
+    const int pending = m_pendingAnnot;
+    m_pendingAnnot = -1;
+    m_viewer->setMode(Pdf::Viewer::Mode::Select);
+
+    if (kind == K::Link) { doAddLink(page, rectPt); return; }
+
+    AnnotSpec spec;
+    spec.kind = kind;
+    spec.pageIndex = page;
+    spec.rect = rectPt;
+    spec.color = m_pendingAnnotColor;
+
+    // Text-markup snaps to the actual glyphs under the drag; "Highlight Area"
+    // (which also uses Highlight kind) falls back to the raw rect if the drag
+    // covered no text.
+    if (kind == K::Highlight || kind == K::Underline || kind == K::StrikeOut ||
+        kind == K::Caret) {
+        auto quads = m_session->renderer()->snapTextRects(page, rectPt);
+        if (!quads.empty()) spec.quads = quads;
+        else if (kind == K::Highlight) spec.quads = { rectPt };  // area highlight
+        else { toast(tr("Drag across some text to mark it.")); return; }
+    }
+
+    // Text-bearing kinds prompt for their content.
+    if (kind == K::FreeText || kind == K::Callout || kind == K::PlainText) {
+        bool ok = false;
+        const QString text = QInputDialog::getMultiLineText(this, tr("Comment Text"),
+            tr("Enter the text:"), {}, &ok);
+        if (!ok || text.isEmpty()) return;
+        spec.contents = text;
+    }
+    if (kind == K::StrikeOut && pending == int(K::StrikeOut)) {
+        // Replace-text mark carries a suggested replacement note (optional).
+    }
+    if (kind == K::Picture) {
+        spec.kind = K::Picture;
+        spec.filePath = m_pendingAnnotImage;
+        m_pendingAnnotImage.clear();
+    }
+
+    const OpResult r = m_session->apply(tr("Add annotation"),
+        [&spec](const QString& in, const QString& out) {
+            return Pdf::addAnnotation(in, out, spec);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::onClickPlaced(const QString& tag, int page, const QPointF& posPt) {
+    if (tag != QStringLiteral("annot") || m_pendingAnnot < 0) return;
+    using K = AnnotSpec::Kind;
+    const K kind = K(m_pendingAnnot);
+    m_pendingAnnot = -1;
+    m_viewer->setMode(Pdf::Viewer::Mode::Select);
+
+    AnnotSpec spec;
+    spec.kind = kind;
+    spec.pageIndex = page;
+    spec.rect = QRectF(posPt, QSizeF(20, 20));
+    spec.color = m_pendingAnnotColor;
+
+    if (kind == K::Note) {
+        bool ok = false;
+        const QString text = QInputDialog::getMultiLineText(this, tr("Note"),
+            tr("Note text:"), {}, &ok);
+        if (!ok) return;
+        spec.contents = text;
+    } else if (kind == K::FileAttachment) {
+        spec.filePath = m_pendingAnnotImage;
+        m_pendingAnnotImage.clear();
+    }
+
+    const OpResult r = m_session->apply(tr("Add annotation"),
+        [&spec](const QString& in, const QString& out) {
+            return Pdf::addAnnotation(in, out, spec);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::onInkDrawn(const QString& tag, int page, const QPolygonF& strokePt) {
+    if (tag != QStringLiteral("annot") || m_pendingAnnot < 0) return;
+    m_pendingAnnot = -1;
+    m_viewer->setMode(Pdf::Viewer::Mode::Select);
+
+    AnnotSpec spec;
+    spec.kind = AnnotSpec::Kind::Ink;
+    spec.pageIndex = page;
+    spec.ink = strokePt;
+    spec.rect = strokePt.boundingRect();
+    spec.color = m_pendingAnnotColor;
+    spec.borderWidth = 2.0;
+
+    const OpResult r = m_session->apply(tr("Draw"),
+        [&spec](const QString& in, const QString& out) {
+            return Pdf::addAnnotation(in, out, spec);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::doAddLink(int page, const QRectF& rectPt) {
+    bool ok = false;
+    const QString url = QInputDialog::getText(this, tr("Add Link"),
+        tr("URL to open when clicked:"), QLineEdit::Normal,
+        QStringLiteral("https://"), &ok);
+    if (!ok || url.isEmpty()) return;
+
+    AnnotSpec spec;
+    spec.kind = AnnotSpec::Kind::Link;
+    spec.pageIndex = page;
+    spec.rect = rectPt;
+    spec.url = url;
+
+    const OpResult r = m_session->apply(tr("Add link"),
+        [&spec](const QString& in, const QString& out) {
+            return Pdf::addAnnotation(in, out, spec);
+        });
+    if (!r.ok) toast(r.message);
+}
+
+void PdfModule::doAddBookmark() {
+    bool ok = false;
+    const QString title = QInputDialog::getText(this, tr("Add Bookmark"),
+        tr("Bookmark title:"), QLineEdit::Normal,
+        tr("Page %1").arg(m_viewer->currentPage() + 1), &ok);
+    if (!ok || title.isEmpty()) return;
+    const int page = m_viewer->currentPage();
+    const OpResult r = m_session->apply(tr("Add bookmark"),
+        [&title, page](const QString& in, const QString& out) {
+            return Pdf::addOutlineBookmark(in, out, title, page);
+        });
+    if (!r.ok) toast(r.message);
+    else toast(tr("Bookmark added — see the Bookmarks panel."));
+}
+
+void PdfModule::refreshComments() {
+    QListWidget* list = m_sidebar->commentsList();
+    list->clear();
+    if (!m_session->hasDocument()) return;
+
+    const auto annots = Pdf::listAnnotations(m_session->currentRevisionPath());
+    for (const auto& a : annots) {
+        QString label = QStringLiteral("p.%1  %2").arg(a.pageIndex + 1).arg(a.subtype);
+        if (!a.contents.isEmpty())
+            label += QStringLiteral("\n%1").arg(a.contents.left(80));
+        auto* item = new QListWidgetItem(label, list);
+        item->setData(Qt::UserRole, a.pageIndex);
+        if (!a.author.isEmpty())
+            item->setToolTip(tr("%1 — %2").arg(a.author, a.contents));
+    }
+    if (annots.empty())
+        new QListWidgetItem(tr("No comments yet."), list);
+}
+
+void PdfModule::doExportComments() {
+    const auto annots = Pdf::listAnnotations(m_session->currentRevisionPath());
+    if (annots.empty()) { toast(tr("This document has no comments to export.")); return; }
+    const QString out = QFileDialog::getSaveFileName(this, tr("Export Comments"),
+        QFileInfo(currentFilePath()).path() + "/comments.xfdf", tr("XFDF files (*.xfdf)"));
+    if (out.isEmpty()) return;
+    const OpResult r = Pdf::exportXfdf(m_session->currentRevisionPath(), out);
+    toast(r.ok ? tr("Exported %1 comment(s).").arg(annots.size()) : r.message);
+}
+
+void PdfModule::doImportComments() {
+    const QString src = QFileDialog::getOpenFileName(this, tr("Import Comments"),
+        QDir::homePath(), tr("XFDF files (*.xfdf)"));
+    if (src.isEmpty()) return;
+    const OpResult r = m_session->apply(tr("Import comments"),
+        [&src](const QString& in, const QString& out) {
+            return Pdf::importXfdf(in, src, out);
+        });
+    toast(r.ok ? tr("Comments imported.") : r.message);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notices
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PdfModule::toast(const QString& message) {
+    auto* label = new QLabel(message, m_viewer);
+    label->setObjectName("pdfToast");
+    const auto& tm = ThemeManager::instance();
+    label->setStyleSheet(QString(
+        "QLabel#pdfToast { background: %1; color: %2; border: 1px solid %3;"
+        " border-radius: 8px; padding: 8px 16px; font: 9.5pt 'Segoe UI'; }")
+        .arg(tm.chromePanelBg(), tm.chromeText(), tm.chromeBorder()));
+    label->adjustSize();
+    label->move((m_viewer->width() - label->width()) / 2,
+                m_viewer->height() - label->height() - 32);
+    label->show();
+    label->raise();
+    QTimer::singleShot(3200, label, &QLabel::deleteLater);
+}
+
+void PdfModule::comingSoon(const QString& feature) {
+    toast(tr("%1 — coming soon.").arg(feature));
 }
 
 } // namespace NativeOffice

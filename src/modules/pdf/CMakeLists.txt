@@ -6,6 +6,25 @@ add_library(PdfModule STATIC
     PdfWriter.h
     PdfOps.cpp
     PdfOps.h
+    PdfRenderer.cpp
+    PdfRenderer.h
+    PdfEditSession.cpp
+    PdfEditSession.h
+    PdfViewer.cpp
+    PdfViewer.h
+    PdfPanels.cpp
+    PdfPanels.h
+    PdfRibbon.cpp
+    PdfRibbon.h
+    PdfOrganizer.cpp
+    PdfOrganizer.h
+    PdfRebuild.h
+    PdfDecor.cpp
+    PdfDecor.h
+    PdfDecorUi.cpp
+    PdfDecorUi.h
+    PdfAnnots.cpp
+    PdfAnnots.h
     PdfModule.cpp
     PdfModule.h
 )
@@ -24,4 +43,6 @@ target_link_libraries(PdfModule PUBLIC
     Qt6::Gui
     Qt6::Widgets
     Qt6::Svg
+    Qt6::PrintSupport
+    pdfium
 )

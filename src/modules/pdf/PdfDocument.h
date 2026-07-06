@@ -62,6 +62,10 @@ public:
     [[nodiscard]] int pageCount() const { return int(m_pages.size()); }
     [[nodiscard]] const std::vector<PageInfo>& pages() const { return m_pages; }
 
+    // The document catalog (/Root), resolved. Null Object if malformed —
+    // can't happen after a successful open().
+    [[nodiscard]] const Object& catalog() const;
+
     // Resolves a reference to its object; returns a null Object if not found.
     // Direct (non-Stream) objects are cached after first parse.
     [[nodiscard]] const Object& resolve(Ref r) const;

@@ -53,6 +53,13 @@ set_target_properties(NativeOffice PROPERTIES
     MACOSX_BUNDLE    TRUE
 )
 
+# PdfModule links pdfium.dll — stage it beside the exe so the app starts
+# without any extra PATH setup (same reason as the windeployqt step below).
+add_custom_command(TARGET NativeOffice POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:pdfium>" "$<TARGET_FILE_DIR:NativeOffice>"
+    COMMENT "Staging pdfium.dll next to NativeOffice.exe")
+
 # Deploy the Qt runtime beside the exe after every build. Without this the
 # exe only runs when Qt's bin is on PATH — and processes we don't launch
 # (e.g. the browser spawning us via the nativeoffice:// protocol handler)

@@ -612,6 +612,13 @@ Object Document::parseIndirectFromObjStream(int streamObjNum, int indexInStream)
 // ─────────────────────────────────────────────────────────────────────────────
 // Page tree
 // ─────────────────────────────────────────────────────────────────────────────
+const Object& Document::catalog() const {
+    static const Object kNull;
+    const Object* rootRefObj = m_trailer.find("Root");
+    if (!rootRefObj || !rootRefObj->isRef()) return kNull;
+    return resolve(*rootRefObj);
+}
+
 bool Document::buildPageList(OpenStatus& status) {
     const Object* rootRefObj = m_trailer.find("Root");
     if (!rootRefObj || !rootRefObj->isRef()) { status = OpenStatus::MalformedTrailer; return false; }
