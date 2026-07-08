@@ -330,22 +330,21 @@ void StatusBar::setZoomPercent(int pct) {
 }
 
 void StatusBar::applyTheme() {
-    const auto& tm = ThemeManager::instance();
-    setStyleSheet(QString(R"(
-QWidget#pdfStatusBar { background: %1; border-top: 1px solid %2; }
+    // The status tray is always white chrome, matching the rest of the shell,
+    // regardless of the app-wide dark/light mode.
+    setStyleSheet(R"(
+QWidget#pdfStatusBar { background: #FFFFFF; border-top: 1px solid #E4E7ED; }
 QToolButton#pdfStatusBtn { background: transparent; border: none; border-radius: 4px;
-    color: %3; font: 12pt "Segoe UI"; min-width: 22px; }
-QToolButton#pdfStatusBtn:hover { background: %4; }
-QToolButton#pdfStatusBtn:disabled { color: %5; }
-QLabel#pdfStatusLabel { color: %3; font: 9pt "Segoe UI"; }
-QLineEdit#pdfPageEdit { background: %6; border: 1px solid %2; border-radius: 4px;
-    color: %3; font: 9pt "Segoe UI"; padding: 1px; }
-QSlider#pdfZoomSlider::groove:horizontal { height: 3px; background: %2; border-radius: 1px; }
+    color: #5A6071; font: 12pt "Segoe UI"; min-width: 22px; }
+QToolButton#pdfStatusBtn:hover { background: #EFF1F5; }
+QToolButton#pdfStatusBtn:disabled { color: #C1C6D2; }
+QLabel#pdfStatusLabel { color: #5A6071; font: 9pt "Segoe UI"; }
+QLineEdit#pdfPageEdit { background: #FFFFFF; border: 1px solid #D7DAE0; border-radius: 4px;
+    color: #1C1E26; font: 9pt "Segoe UI"; padding: 1px; }
+QSlider#pdfZoomSlider::groove:horizontal { height: 3px; background: #D7DAE0; border-radius: 1px; }
 QSlider#pdfZoomSlider::handle:horizontal { width: 12px; height: 12px; margin: -5px 0;
-    border-radius: 6px; background: %7; }
-)")
-        .arg(tm.chromePanelBg(), tm.chromeBorder(), tm.chromeText(), tm.chromeHoverBg(),
-             tm.chromeTextMuted(), tm.chromeBg(), "#6D5BE8"));
+    border-radius: 6px; background: #6D5BE8; }
+)");
 }
 
 } // namespace NativeOffice::Pdf

@@ -245,6 +245,7 @@ PdfModule::PdfModule(QWidget* parent)
     connect(m_status, &Pdf::StatusBar::fitWidthRequested, m_viewer, &Pdf::Viewer::fitWidth);
     connect(m_status, &Pdf::StatusBar::fitPageRequested,  m_viewer, &Pdf::Viewer::fitPage);
     connect(m_sidebar, &Pdf::Sidebar::pageActivated, m_viewer, &Pdf::Viewer::goToPage);
+    connect(m_viewer, &Pdf::Viewer::openRequested, this, &PdfModule::openInteractive);
 
     // ── annotation placement (comment tools) ────────────────────────────
     connect(m_viewer, &Pdf::Viewer::rectPlaced,  this, &PdfModule::onRectPlaced);

@@ -29,6 +29,8 @@
 #include <QTextEdit>
 #include <QLabel>
 #include <QListWidget>
+#include <QLineEdit>
+#include <QMenu>
 #include <QPushButton>
 #include <QInputDialog>
 #include <QDialog>
@@ -131,6 +133,24 @@ ImpressModule::ImpressModule(QWidget* parent)
     applyStyles();
     setObjectName("impressModule");
 
+    // Dev-only capture hook (same pattern as PdfModule): PrintWindow-based
+    // external captures drop drawPixmap content on this machine, so
+    // verification screenshots come from Qt's own render path instead.
+    // Set NATIVEOFFICE_IMPRESS_GRAB to a .png path; a second grab with the
+    // comments panel open lands next to it as <path>.comments.png.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_IMPRESS_GRAB")) {
+        const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_IMPRESS_GRAB");
+        QTimer::singleShot(6000, this, [this, grabPath] {
+            grab().save(grabPath, "PNG");
+            m_commentsVisible = true;
+            m_commentsPanel->setVisible(true);
+            refreshComments();
+            QTimer::singleShot(500, this, [this, grabPath] {
+                grab().save(grabPath + ".comments.png", "PNG");
+            });
+        });
+    }
+
     // Create the first slide automatically
     addNewSlide();
     captureUndoBaseline();
@@ -192,9 +212,12 @@ void ImpressModule::buildUi() {
     // (window resize, splitter drag, notes toggle, tab switch).
     m_view->viewport()->installEventFilter(this);
 
+    // Speaker notes live in a hidden-by-default pane (View → Speaker Notes);
+    // the everyday review flow is the Comments panel on the status tray.
     m_notesEdit = new QTextEdit(m_canvasSplitter);
     m_notesEdit->setObjectName("impressNotes");
-    m_notesEdit->setPlaceholderText("Click to add speaker notes…");
+    m_notesEdit->setPlaceholderText("Speaker notes…");
+    m_notesEdit->setVisible(false);
 
     m_canvasSplitter->addWidget(m_view);
     m_canvasSplitter->addWidget(m_notesEdit);
@@ -324,11 +347,13 @@ void ImpressModule::buildUi() {
         m_notesEdit->setVisible(m_notesVisible);
     });
 
-    connect(m_ribbon, &ImpressRibbon::commentsToggleRequested, this, [this] {
+    auto toggleComments = [this] {
         m_commentsVisible = !m_commentsVisible;
         m_commentsPanel->setVisible(m_commentsVisible);
         if (m_commentsVisible) refreshComments();
-    });
+    };
+    connect(m_ribbon, &ImpressRibbon::commentsToggleRequested, this, toggleComments);
+    connect(m_statusBar, &ImpressStatusBar::commentToggleRequested, this, toggleComments);
 
     connect(m_ribbon, &ImpressRibbon::designColorSelected, this,
             &ImpressModule::applyDesignColor);
@@ -503,60 +528,112 @@ QWidget* ImpressModule::buildBrandBar() {
 QWidget* ImpressModule::buildCommentsPanel() {
     m_commentsPanel = new QWidget(this);
     m_commentsPanel->setObjectName("impressComments");
-    m_commentsPanel->setFixedWidth(232);
+    m_commentsPanel->setFixedWidth(280);
     m_commentsPanel->setVisible(false);
     m_commentsPanel->setStyleSheet(
-        "QWidget#impressComments { background:#F3F4F6; border-left:1px solid #D7DAE0; }");
+        "QWidget#impressComments { background:#FFFFFF; border-left:1px solid #E4E7ED; }");
 
     auto* v = new QVBoxLayout(m_commentsPanel);
-    v->setContentsMargins(8, 8, 8, 8);
-    v->setSpacing(6);
+    v->setContentsMargins(14, 12, 14, 12);
+    v->setSpacing(8);
 
+    // Header: "Comments" + close button
+    auto* header = new QHBoxLayout;
     auto* title = new QLabel("Comments", m_commentsPanel);
-    title->setStyleSheet("font-weight:600; font-size:13px; color:#1C1E26;");
+    title->setStyleSheet("font-weight:600; font-size:14px; color:#1C1E26;");
+    auto* closeBtn = new QToolButton(m_commentsPanel);
+    closeBtn->setText(QString::fromUtf8("\xE2\x9C\x95"));   // ✕
+    closeBtn->setToolTip("Close comments");
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    closeBtn->setStyleSheet(
+        "QToolButton { border:none; background:transparent; color:#5A6071; "
+        "font-size:13px; padding:2px 6px; border-radius:4px; }"
+        "QToolButton:hover { background:#EFF1F5; color:#1C1E26; }");
+    connect(closeBtn, &QToolButton::clicked, this, [this] {
+        m_commentsVisible = false;
+        m_commentsPanel->setVisible(false);
+    });
+    header->addWidget(title);
+    header->addStretch();
+    header->addWidget(closeBtn);
+    v->addLayout(header);
+
+    // Empty state — shown while the current slide has no comments
+    m_commentEmpty = new QLabel(
+        QString::fromUtf8("\xF0\x9F\x92\xAC\n\nThere are no comments\non the current slide"),
+        m_commentsPanel);
+    m_commentEmpty->setAlignment(Qt::AlignCenter);
+    m_commentEmpty->setStyleSheet("color:#8A90A0; font-size:12px;");
 
     m_commentList = new QListWidget(m_commentsPanel);
     m_commentList->setWordWrap(true);
-    m_commentList->setStyleSheet("QListWidget{background:#FFFFFF; border:1px solid #D7DAE0; "
-                                 "border-radius:6px; font-size:12px;}");
-
-    auto* row = new QHBoxLayout;
-    auto* addBtn = new QPushButton("New", m_commentsPanel);
-    auto* delBtn = new QPushButton("Delete", m_commentsPanel);
-    row->addWidget(addBtn);
-    row->addWidget(delBtn);
-
-    v->addWidget(title);
-    v->addWidget(m_commentList, 1);
-    v->addLayout(row);
-
-    connect(addBtn, &QPushButton::clicked, this, [this] {
-        if (m_currentIdx < 0) return;
-        QInputDialog dlg(this);
-        dlg.setWindowTitle("New Comment");
-        dlg.setLabelText("Comment:");
-        dlg.setInputMode(QInputDialog::TextInput);
-        dlg.setOption(QInputDialog::UsePlainTextEditForTextInput, true);
-        dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
-        dlg.resize(420, 240);
-        if (dlg.exec() != QDialog::Accepted) return;
-        const QString t = dlg.textValue();
-        if (t.trimmed().isEmpty()) return;
-        m_slideData[m_currentIdx].comments.push_back({ "You", t.trimmed() });
-        refreshComments();
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
-        commitUndoStep();
-    });
-    connect(delBtn, &QPushButton::clicked, this, [this] {
-        if (m_currentIdx < 0) return;
-        const int r = m_commentList->currentRow();
+    m_commentList->setVisible(false);
+    m_commentList->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_commentList->setStyleSheet(
+        "QListWidget { background:#FFFFFF; border:none; font-size:12px; }"
+        "QListWidget::item { background:#F7F8FA; border:1px solid #E4E7ED; "
+        "border-radius:6px; padding:8px; margin-bottom:6px; color:#1C1E26; }"
+        "QListWidget::item:selected { border-color:#6D5BE8; background:#F3F1FD; }");
+    connect(m_commentList, &QListWidget::customContextMenuRequested, this,
+            [this](const QPoint& pos) {
+        const int r = m_commentList->indexAt(pos).row();
+        if (r < 0 || m_currentIdx < 0) return;
+        QMenu menu(m_commentList);
+        QAction* del = menu.addAction("Delete comment");
+        if (menu.exec(m_commentList->viewport()->mapToGlobal(pos)) != del) return;
         auto& cs = m_slideData[m_currentIdx].comments;
-        if (r < 0 || r >= static_cast<int>(cs.size())) return;
+        if (r >= static_cast<int>(cs.size())) return;
         cs.erase(cs.begin() + r);
         refreshComments();
         if (!m_dirty) { m_dirty = true; emit documentModified(); }
         commitUndoStep();
     });
+
+    v->addWidget(m_commentEmpty, 1);
+    v->addWidget(m_commentList, 1);
+
+    // Footer: note input + Cancel / Insert
+    m_commentInput = new QLineEdit(m_commentsPanel);
+    m_commentInput->setPlaceholderText("Enter note");
+    m_commentInput->setStyleSheet(
+        "QLineEdit { border:1px solid #D7DAE0; border-radius:6px; padding:7px 10px; "
+        "font-size:12px; background:#FFFFFF; color:#1C1E26; }"
+        "QLineEdit:focus { border-color:#6D5BE8; }");
+
+    auto* row = new QHBoxLayout;
+    row->setSpacing(8);
+    auto* cancelBtn = new QPushButton("Cancel", m_commentsPanel);
+    auto* insertBtn = new QPushButton("Insert", m_commentsPanel);
+    cancelBtn->setCursor(Qt::PointingHandCursor);
+    insertBtn->setCursor(Qt::PointingHandCursor);
+    cancelBtn->setStyleSheet(
+        "QPushButton { background:#F3F4F6; color:#5A6071; border:1px solid #D7DAE0; "
+        "border-radius:6px; padding:6px 16px; font-size:12px; }"
+        "QPushButton:hover { background:#E7E9EE; }");
+    insertBtn->setStyleSheet(
+        "QPushButton { background:#6D5BE8; color:#FFFFFF; border:none; "
+        "border-radius:6px; padding:6px 16px; font-size:12px; }"
+        "QPushButton:hover { background:#8674F0; }");
+    row->addStretch();
+    row->addWidget(cancelBtn);
+    row->addWidget(insertBtn);
+
+    v->addWidget(m_commentInput);
+    v->addLayout(row);
+
+    auto insertComment = [this] {
+        if (m_currentIdx < 0) return;
+        const QString t = m_commentInput->text().trimmed();
+        if (t.isEmpty()) return;
+        m_slideData[m_currentIdx].comments.push_back({ "You", t });
+        m_commentInput->clear();
+        refreshComments();
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        commitUndoStep();
+    };
+    connect(insertBtn, &QPushButton::clicked, this, insertComment);
+    connect(m_commentInput, &QLineEdit::returnPressed, this, insertComment);
+    connect(cancelBtn, &QPushButton::clicked, this, [this] { m_commentInput->clear(); });
 
     return m_commentsPanel;
 }
@@ -564,12 +641,17 @@ QWidget* ImpressModule::buildCommentsPanel() {
 void ImpressModule::refreshComments() {
     if (!m_commentList) return;
     m_commentList->clear();
-    if (m_currentIdx < 0 || m_currentIdx >= static_cast<int>(m_slideData.size())) return;
-    for (const auto& cm : m_slideData[m_currentIdx].comments) {
-        auto* item = new QListWidgetItem(QString("%1: %2").arg(cm.author, cm.text));
-        item->setToolTip(cm.text);
-        m_commentList->addItem(item);
+    bool hasComments = false;
+    if (m_currentIdx >= 0 && m_currentIdx < static_cast<int>(m_slideData.size())) {
+        for (const auto& cm : m_slideData[m_currentIdx].comments) {
+            auto* item = new QListWidgetItem(QString("%1\n%2").arg(cm.author, cm.text));
+            item->setToolTip(cm.text);
+            m_commentList->addItem(item);
+        }
+        hasComments = !m_slideData[m_currentIdx].comments.empty();
     }
+    m_commentList->setVisible(hasComments);
+    if (m_commentEmpty) m_commentEmpty->setVisible(!hasComments);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

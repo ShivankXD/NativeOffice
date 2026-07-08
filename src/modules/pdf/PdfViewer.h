@@ -63,6 +63,7 @@ signals:
     void currentPageChanged(int pageIndex);
     void zoomChanged(qreal factor);
     void selectionChanged(const QString& text);
+    void openRequested();               // empty-state "+" button clicked
 
     // Geometry reports (page points, top-left origin), per the active mode.
     void rectPlaced(const QString& tag, int pageIndex, const QRectF& rectPt);
@@ -97,6 +98,8 @@ private:
     [[nodiscard]] QRectF pageViewRect(int i) const;       // page rect in viewport px
     [[nodiscard]] int pageAt(const QPoint& viewPos) const; // -1 if in a gap
     [[nodiscard]] QPointF toPagePt(int page, const QPoint& viewPos) const;
+    [[nodiscard]] QRect emptyPlusCircle() const;     // empty-state "+" geometry
+    [[nodiscard]] QRect emptyStateHitRect() const;   // clickable empty-state area
     void updateCurrentPage();
     void updateSelection(int page, const QRectF& dragPt);
 
@@ -111,6 +114,9 @@ private:
     // raster cache: pageIndex → pixmap at (m_zoom × devicePixelRatio)
     mutable std::map<int, QPixmap> m_cache;
     qreal m_cacheZoom = 0;
+
+    QPixmap m_dotTile;                          // dotted-grid background tile
+    bool m_emptyHover = false;                  // hovering the empty-state "+"
 
     int m_currentPage = 0;
 

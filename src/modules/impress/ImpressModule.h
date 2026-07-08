@@ -39,6 +39,7 @@ class QJsonObject;
 class QTabWidget;
 class QTimer;
 class QListWidget;
+class QLineEdit;
 class QLabel;
 class QToolButton;
 class QVariantAnimation;
@@ -159,6 +160,8 @@ private:
     QSplitter*        m_canvasSplitter { nullptr };
     QWidget*          m_commentsPanel { nullptr };
     QListWidget*      m_commentList   { nullptr };
+    QLabel*           m_commentEmpty  { nullptr };
+    QLineEdit*        m_commentInput  { nullptr };
     bool              m_commentsVisible { false };
 
     // Deck: parallel arrays (scenes own their data; we hold pointers)
@@ -178,7 +181,7 @@ private:
     bool        m_restoringUndo { false };
     QTimer*     m_undoDebounce { nullptr };
 
-    bool m_notesVisible { true };
+    bool m_notesVisible { false };   // speaker notes pane is opt-in (View tab)
     int  m_zoomPercent  { 100 };   // 100% == fit-to-window
 
     // ── Effect-preview overlay (sits over the canvas during a preview) ────

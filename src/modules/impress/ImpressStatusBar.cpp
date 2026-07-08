@@ -33,6 +33,16 @@ ImpressStatusBar::ImpressStatusBar(QWidget* parent)
     layout->addWidget(m_themeLabel);
     layout->addStretch();
 
+    // ── Comment (toggles the right-hand Comments panel) ─────────────────
+    m_btnComment = new QToolButton(this);
+    m_btnComment->setText(QString::fromUtf8("\xF0\x9F\x92\xAC Comment"));
+    m_btnComment->setToolTip("Show or hide comments on this slide");
+    m_btnComment->setObjectName("statusViewBtn");
+    m_btnComment->setCursor(Qt::PointingHandCursor);
+    connect(m_btnComment, &QToolButton::clicked,
+            this, &ImpressStatusBar::commentToggleRequested);
+    layout->addWidget(m_btnComment);
+
     // ── View mode buttons ───────────────────────────────────────────────
     auto* group = new QButtonGroup(this);
     group->setExclusive(true);
@@ -89,55 +99,12 @@ ImpressStatusBar::ImpressStatusBar(QWidget* parent)
 }
 
 void ImpressStatusBar::applyTheme() {
-    if (ThemeManager::instance().isDark()) {
-        setStyleSheet(R"(
+    // The status tray is always white chrome, matching the rest of the shell,
+    // regardless of the app-wide dark/light mode.
+    setStyleSheet(R"(
 QWidget#impressStatusBar {
-    background-color: #0D1117;
-    border-top: 1px solid #2A3344;
-}
-QLabel#statusLabel {
-    color: #9AA4B8;
-    font-size: 11px;
-    font-family: "Segoe UI", "Inter", sans-serif;
-}
-QToolButton#statusViewBtn {
-    color: #9AA4B8;
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 11px;
-    font-family: "Segoe UI", "Inter", sans-serif;
-}
-QToolButton#statusViewBtn:hover {
-    background: #1E2737;
-    color: #E6E9F0;
-}
-QToolButton#statusViewBtn:checked {
-    background: #3A1F1F;
-    color: #FF9A8C;
-}
-QSlider#statusZoomSlider::groove:horizontal {
-    height: 4px;
-    background: #2A3344;
-    border-radius: 2px;
-}
-QSlider#statusZoomSlider::handle:horizontal {
-    width: 12px;
-    height: 12px;
-    margin: -4px 0;
-    background: #6D5BE8;
-    border-radius: 6px;
-}
-QSlider#statusZoomSlider::handle:horizontal:hover {
-    background: #8674F0;
-}
-)");
-    } else {
-        setStyleSheet(R"(
-QWidget#impressStatusBar {
-    background-color: #F3F4F6;
-    border-top: 1px solid #D7DAE0;
+    background-color: #FFFFFF;
+    border-top: 1px solid #E4E7ED;
 }
 QLabel#statusLabel {
     color: #5A6071;
@@ -177,7 +144,6 @@ QSlider#statusZoomSlider::handle:horizontal:hover {
     background: #8674F0;
 }
 )");
-    }
 }
 
 void ImpressStatusBar::setSlideInfo(int currentIndex, int total) {

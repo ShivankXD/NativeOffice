@@ -887,9 +887,9 @@ QWidget* ImpressRibbon::buildInsertTab() {
     layout->addWidget(makeSeparator());
 
     // ── Comments ────────────────────────────────────────────────────────
-    auto* btnComment = makeBigBtn(commentsIcon(), "Notes",
-                                  "Show or hide the speaker notes panel");
-    connect(btnComment, &QToolButton::clicked, this, &ImpressRibbon::notesToggleRequested);
+    auto* btnComment = makeBigBtn(commentsIcon(), "Comment",
+                                  "Show or hide comments on this slide");
+    connect(btnComment, &QToolButton::clicked, this, &ImpressRibbon::commentsToggleRequested);
     layout->addWidget(makeGroup("Comments", { btnComment }));
 
     layout->addStretch();

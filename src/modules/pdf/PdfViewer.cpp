@@ -24,6 +24,19 @@ Viewer::Viewer(EditSession* session, QWidget* parent)
     , m_session(session)
 {
     setObjectName("pdfViewer");
+    setFrameShape(QFrame::NoFrame);     // no dark frame between canvas and chrome
+    // Light scrollbars so the chrome around the white canvas stays white.
+    setStyleSheet(R"(
+QAbstractScrollArea#pdfViewer { border: none; background: transparent; }
+QScrollBar:vertical { background: #F6F7F9; width: 12px; border: none; }
+QScrollBar::handle:vertical { background: #CDD2DC; border-radius: 4px; min-height: 40px; margin: 2px; }
+QScrollBar::handle:vertical:hover { background: #B7BDC9; }
+QScrollBar:horizontal { background: #F6F7F9; height: 12px; border: none; }
+QScrollBar::handle:horizontal { background: #CDD2DC; border-radius: 4px; min-width: 40px; margin: 2px; }
+QScrollBar::handle:horizontal:hover { background: #B7BDC9; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+)");
     setMouseTracking(true);
     viewport()->setMouseTracking(true);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
@@ -97,6 +110,17 @@ QPointF Viewer::toPagePt(int page, const QPoint& viewPos) const {
     return { (viewPos.x() - r.x()) / m_zoom, (viewPos.y() - r.y()) / m_zoom };
 }
 
+QRect Viewer::emptyPlusCircle() const {
+    QRect circle(0, 0, 64, 64);
+    circle.moveCenter(viewport()->rect().center() - QPoint(0, 34));
+    return circle;
+}
+
+QRect Viewer::emptyStateHitRect() const {
+    // The "+" circle plus its captions below.
+    return emptyPlusCircle().adjusted(-70, -10, 70, 74);
+}
+
 // ── painting ────────────────────────────────────────────────────────────────
 
 void Viewer::invalidateCache() {
@@ -144,15 +168,52 @@ void Viewer::paintEvent(QPaintEvent*) {
     }
 
     QPainter p(viewport());
-    const auto& tm = ThemeManager::instance();
-    p.fillRect(viewport()->rect(), QColor(tm.isDark() ? "#171B24" : "#E8EAEF"));
+    const QRect vp = viewport()->rect();
+
+    // Figma-style canvas: soft white with a subtle dotted grid that pans
+    // with the content. The grid is a cached tile so scrolling stays cheap.
+    const QColor canvasBg("#FDFDFE");
+    const qreal dprBg = devicePixelRatioF();
+    if (m_dotTile.isNull() || !qFuzzyCompare(m_dotTile.devicePixelRatio(), dprBg)) {
+        constexpr int step = 24;
+        m_dotTile = QPixmap(qRound(step * dprBg), qRound(step * dprBg));
+        m_dotTile.setDevicePixelRatio(dprBg);
+        m_dotTile.fill(canvasBg);
+        QPainter tp(&m_dotTile);
+        tp.setRenderHint(QPainter::Antialiasing);
+        tp.setPen(Qt::NoPen);
+        tp.setBrush(QColor("#D8DCE4"));
+        tp.drawEllipse(QPointF(step / 2.0, step / 2.0), 1.2, 1.2);
+    }
+    p.fillRect(vp, canvasBg);
+    const QPointF bgOff = contentOffset();
+    p.drawTiledPixmap(vp, m_dotTile, QPointF(-bgOff.x(), -bgOff.y()));
 
     if (!m_session->hasDocument()) {
-        p.setPen(QColor(tm.chromeTextMuted()));
-        QFont f("Segoe UI", 11);
-        p.setFont(f);
-        p.drawText(viewport()->rect(), Qt::AlignCenter,
-                   tr("Open a PDF to get started (File → Open, or drop a file here)"));
+        p.setRenderHint(QPainter::Antialiasing);
+
+        // Centered "+" button with a soft halo, WPS/Figma-style empty state.
+        const QRect circle = emptyPlusCircle();
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(109, 91, 232, 26));
+        p.drawEllipse(circle.adjusted(-8, -8, 8, 8));
+        p.setBrush(QColor(m_emptyHover ? "#8674F0" : "#6D5BE8"));
+        p.drawEllipse(circle);
+
+        p.setPen(QPen(Qt::white, 3, Qt::SolidLine, Qt::RoundCap));
+        const QPoint c = circle.center();
+        p.drawLine(c - QPoint(12, 0), c + QPoint(12, 0));
+        p.drawLine(c - QPoint(0, 12), c + QPoint(0, 12));
+
+        p.setPen(QColor("#3B4152"));
+        p.setFont(QFont("Segoe UI", 11, QFont::DemiBold));
+        p.drawText(QRect(vp.left(), circle.bottom() + 16, vp.width(), 24),
+                   Qt::AlignHCenter | Qt::AlignTop, tr("Click to add a PDF"));
+        p.setPen(QColor("#9AA0AE"));
+        p.setFont(QFont("Segoe UI", 9));
+        p.drawText(QRect(vp.left(), circle.bottom() + 44, vp.width(), 20),
+                   Qt::AlignHCenter | Qt::AlignTop,
+                   tr("or drop a file anywhere on the canvas"));
         return;
     }
 
@@ -162,12 +223,17 @@ void Viewer::paintEvent(QPaintEvent*) {
         const QRectF pr = pageViewRect(i);
         if (!pr.intersects(viewport()->rect())) continue;
 
-        // page shadow + white base (visible before raster arrives)
-        p.fillRect(pr.translated(2, 3), QColor(0, 0, 0, 45));
+        // soft page shadow + white base (visible before raster arrives)
+        p.fillRect(pr.translated(0, 2), QColor(20, 24, 40, 26));
         p.fillRect(pr, Qt::white);
         auto it = m_cache.find(i);
         if (it != m_cache.end())
             p.drawPixmap(pr.topLeft(), it->second);
+
+        // hairline page edge so white pages read against the white canvas
+        p.setPen(QColor("#E4E7ED"));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(pr.adjusted(0, 0, -1, -1));
 
         // overlays: search/highlight rects
         auto hi = m_highlights.find(i);
@@ -239,6 +305,11 @@ void Viewer::wheelEvent(QWheelEvent* ev) {
 
 void Viewer::mousePressEvent(QMouseEvent* ev) {
     if (ev->button() != Qt::LeftButton) return;
+    if (!m_session->hasDocument()) {
+        if (emptyStateHitRect().contains(ev->pos()))
+            emit openRequested();
+        return;
+    }
     m_dragging = true;
     m_dragStartView = m_dragLastView = ev->pos();
     m_dragPage = pageAt(ev->pos());
@@ -256,6 +327,15 @@ void Viewer::mousePressEvent(QMouseEvent* ev) {
 }
 
 void Viewer::mouseMoveEvent(QMouseEvent* ev) {
+    if (!m_session->hasDocument()) {
+        const bool hover = emptyStateHitRect().contains(ev->pos());
+        if (hover != m_emptyHover) {
+            m_emptyHover = hover;
+            viewport()->update();
+        }
+        viewport()->setCursor(hover ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        return;
+    }
     if (!m_dragging) {
         if (m_mode == Mode::Pan)
             viewport()->setCursor(Qt::OpenHandCursor);

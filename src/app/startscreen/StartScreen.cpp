@@ -392,7 +392,6 @@ QWidget* StartScreen::buildTopBar() {
     connect(bellBtn, &QToolButton::clicked, this,
             [this, bellBtn] { showNotificationsPopup(bellBtn); });
     rightL->addWidget(bellBtn);
-    rightL->addWidget(iconBtn(Lucide::kHelp, nullptr));
     rightL->addWidget(iconBtn(Lucide::kSettings, [this]{ showSettingsDialog(); }));
 
     // Account avatar — the real profile photo (cached by AuthManager), with a

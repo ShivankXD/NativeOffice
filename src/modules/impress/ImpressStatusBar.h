@@ -28,6 +28,7 @@ public:
 signals:
     void zoomChanged(int percent);
     void viewModeChanged(ImpressViewMode mode);
+    void commentToggleRequested();
 
 private:
     void applyTheme();
@@ -36,6 +37,7 @@ private:
     QLabel*      m_themeLabel { nullptr };
     QSlider*     m_zoomSlider { nullptr };
     QLabel*      m_zoomLabel  { nullptr };
+    QToolButton* m_btnComment { nullptr };
     QToolButton* m_btnNormal  { nullptr };
     QToolButton* m_btnOutline { nullptr };
     QToolButton* m_btnSorter  { nullptr };
