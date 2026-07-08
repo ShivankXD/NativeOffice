@@ -22,6 +22,8 @@
 #include <QWidget>
 #include <QColor>
 #include <QStringList>
+#include <utility>
+#include <vector>
 
 class QLineEdit;
 class QCheckBox;
@@ -54,17 +56,20 @@ private:
 
     void addImagesDialog();
     void addImages(const QStringList& paths);
-    void removeSelected();
     void clearAll();
     void sortImages();
     void refreshList();
     void updateUiState();
+    void updateTargetBadges();
     void setMode(bool bySize);
     void pickFillColor();
     void exportImages();
 
     // Resize one source image according to the current settings.
     [[nodiscard]] QImage transform(const QImage& src) const;
+    // The output size the current settings produce for a given source size
+    // (drives the per-card "orig → target" badges without reloading pixels).
+    [[nodiscard]] QSize computeTargetSize(const QSize& src) const;
 
     // ── data ───────────────────────────────────────────────────────────
     QStringList m_paths;
@@ -97,6 +102,8 @@ private:
     // ── canvas ─────────────────────────────────────────────────────────
     QStackedWidget* m_canvasStack { nullptr };
     QListWidget*    m_thumbList   { nullptr };
+    // Per-card target-size badge + the source image size it reports on.
+    std::vector<std::pair<QLabel*, QSize>> m_targetBadges;
 };
 
 } // namespace NativeOffice

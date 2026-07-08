@@ -38,6 +38,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 
 namespace NativeOffice {
 
@@ -105,6 +106,11 @@ ImageResizerWidget::ImageResizerWidget(QWidget* parent)
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_RESIZER_GRAB")) {
         const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_RESIZER_GRAB");
         QTimer::singleShot(2500, this, [this, grabPath] {
+            // Optional: pre-load images (";"-separated paths) so the grab
+            // shows the populated card view, not just the empty state.
+            const QString seed = qEnvironmentVariable("NATIVEOFFICE_RESIZER_SEED");
+            if (!seed.isEmpty())
+                addImages(seed.split(QLatin1Char(';'), Qt::SkipEmptyParts));
             grab().save(grabPath, "PNG");
         });
     }
@@ -353,6 +359,16 @@ QWidget* ImageResizerWidget::buildSettingsPanel() {
     connect(m_btnClear,  &QToolButton::clicked, this, &ImageResizerWidget::clearAll);
     connect(m_exportBtn, &QPushButton::clicked, this, &ImageResizerWidget::exportImages);
 
+    // Keep the per-card "→ target" badges in sync with the settings.
+    connect(m_widthEdit,  &QLineEdit::textChanged, this,
+            [this] { updateTargetBadges(); });
+    connect(m_heightEdit, &QLineEdit::textChanged, this,
+            [this] { updateTargetBadges(); });
+    connect(m_lockRatio,  &QCheckBox::toggled, this,
+            [this] { updateTargetBadges(); });
+    connect(m_percentSpin, qOverload<int>(&QSpinBox::valueChanged), this,
+            [this] { updateTargetBadges(); });
+
     return panel;
 }
 
@@ -389,24 +405,16 @@ QWidget* ImageResizerWidget::buildCanvas() {
     m_canvasStack->addWidget(empty);
     connect(upload, &QPushButton::clicked, this, &ImageResizerWidget::addImagesDialog);
 
-    // Page 1 — thumbnails of the added images
+    // Page 1 — big preview cards for the added images (name + orig → target)
     m_thumbList = new QListWidget(m_canvasStack);
     m_thumbList->setObjectName("rszThumbs");
     m_thumbList->setViewMode(QListView::IconMode);
-    m_thumbList->setIconSize(QSize(128, 128));
-    m_thumbList->setGridSize(QSize(160, 176));
     m_thumbList->setResizeMode(QListView::Adjust);
     m_thumbList->setMovement(QListView::Static);
-    m_thumbList->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_thumbList->setWordWrap(true);
+    m_thumbList->setSelectionMode(QAbstractItemView::NoSelection);
+    m_thumbList->setSpacing(14);
     m_thumbList->setFrameShape(QFrame::NoFrame);
     m_thumbList->viewport()->setAutoFillBackground(false);
-    m_thumbList->setContextMenuPolicy(Qt::ActionsContextMenu);
-    auto* removeAct = new QAction(tr("Remove selected"), m_thumbList);
-    removeAct->setShortcut(QKeySequence::Delete);
-    removeAct->setShortcutContext(Qt::WidgetShortcut);
-    connect(removeAct, &QAction::triggered, this, &ImageResizerWidget::removeSelected);
-    m_thumbList->addAction(removeAct);
     m_canvasStack->addWidget(m_thumbList);
 
     cl->addWidget(m_canvasStack);
@@ -454,10 +462,18 @@ QPushButton#rszUpload { background: #6D5BE8; color: #FFFFFF; border: none;
 QPushButton#rszUpload:hover { background: #8674F0; }
 QLabel#rszHint { font-size: 15px; color: #5A6071; background: transparent; }
 QLabel#rszHintSub { font-size: 11px; color: #9AA0AE; background: transparent; }
-QListWidget#rszThumbs { background: transparent; font-size: 11px; color: #3B4152; }
-QListWidget#rszThumbs::item { background: #FFFFFF; border: 1px solid #E4E7ED;
-    border-radius: 8px; padding: 6px; }
-QListWidget#rszThumbs::item:selected { border-color: #6D5BE8; background: #F3F1FD; }
+QListWidget#rszThumbs { background: transparent; }
+QListWidget#rszThumbs::item { background: transparent; border: none; }
+QFrame#rszCard { background: #FFFFFF; border: 1px solid #E4E7ED; border-radius: 12px; }
+QLabel#rszCardPreview { background: #F7F8FA; border: 1px solid #EFF1F5; border-radius: 8px; }
+QLabel#rszCardName { font-size: 12px; font-weight: 600; color: #1C1E26; background: transparent; }
+QLabel#rszBadge { background: #F3F4F6; color: #3B4152; border-radius: 6px;
+    padding: 4px 10px; font-size: 11px; font-weight: 600; }
+QLabel#rszBadgeTarget { background: #EDE9FC; color: #4C3BD6; border-radius: 6px;
+    padding: 4px 10px; font-size: 11px; font-weight: 600; }
+QToolButton#rszCardClose { background: #F3F4F6; border: none; border-radius: 11px;
+    color: #5A6071; font-size: 11px; }
+QToolButton#rszCardClose:hover { background: #FDECEA; color: #C62828; }
 QScrollBar:vertical { background: #F6F7F9; width: 10px; border: none; }
 QScrollBar::handle:vertical { background: #CDD2DC; border-radius: 4px; min-height: 30px; margin: 2px; }
 QScrollBar::handle:vertical:hover { background: #B7BDC9; }
@@ -486,13 +502,6 @@ void ImageResizerWidget::addImages(const QStringList& paths) {
     if (added) refreshList();
 }
 
-void ImageResizerWidget::removeSelected() {
-    const auto selected = m_thumbList->selectedItems();
-    for (QListWidgetItem* it : selected)
-        m_paths.removeAll(it->data(Qt::UserRole).toString());
-    if (!selected.isEmpty()) refreshList();
-}
-
 void ImageResizerWidget::clearAll() {
     if (m_paths.isEmpty()) return;
     m_paths.clear();
@@ -512,21 +521,106 @@ void ImageResizerWidget::sortImages() {
 
 void ImageResizerWidget::refreshList() {
     m_thumbList->clear();
+    m_targetBadges.clear();
+
     for (const QString& p : m_paths) {
         QImageReader reader(p);
         reader.setAutoTransform(true);
-        const QSize sz = reader.size();
-        QImage thumb = reader.read().scaled(128, 128, Qt::KeepAspectRatio,
-                                            Qt::SmoothTransformation);
-        auto* item = new QListWidgetItem(
-            QIcon(QPixmap::fromImage(thumb)),
-            QStringLiteral("%1\n%2×%3").arg(QFileInfo(p).fileName())
-                .arg(sz.width()).arg(sz.height()));
+        const QImage img = reader.read();
+        if (img.isNull()) continue;
+        const QSize origSize = img.size();
+
+        auto* card = new QFrame;
+        card->setObjectName("rszCard");
+        card->setFixedWidth(272);
+        auto* cv = new QVBoxLayout(card);
+        cv->setContentsMargins(12, 8, 12, 12);
+        cv->setSpacing(8);
+
+        // top row: remove-this-image button
+        auto* top = new QHBoxLayout;
+        auto* close = new QToolButton(card);
+        close->setObjectName("rszCardClose");
+        close->setText(QString::fromUtf8("\xE2\x9C\x95"));   // ✕
+        close->setToolTip(tr("Remove this image"));
+        close->setFixedSize(22, 22);
+        close->setCursor(Qt::PointingHandCursor);
+        top->addStretch();
+        top->addWidget(close);
+        cv->addLayout(top);
+        connect(close, &QToolButton::clicked, this, [this, p] {
+            m_paths.removeAll(p);
+            refreshList();
+        });
+
+        // large, clearly visible preview
+        auto* preview = new QLabel(card);
+        preview->setObjectName("rszCardPreview");
+        preview->setFixedSize(248, 224);
+        preview->setAlignment(Qt::AlignCenter);
+        preview->setPixmap(QPixmap::fromImage(
+            img.scaled(240, 216, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        cv->addWidget(preview, 0, Qt::AlignHCenter);
+
+        auto* name = new QLabel(card);
+        name->setObjectName("rszCardName");
+        name->setText(name->fontMetrics().elidedText(
+            QFileInfo(p).fileName(), Qt::ElideMiddle, 240));
+        name->setToolTip(p);
+        cv->addWidget(name);
+
+        // size badges: original → target (target follows the settings live)
+        auto* sizes = new QHBoxLayout;
+        sizes->setSpacing(8);
+        auto* orig = new QLabel(QStringLiteral("%1 × %2")
+                                    .arg(origSize.width()).arg(origSize.height()), card);
+        orig->setObjectName("rszBadge");
+        auto* arrow = new QLabel(QStringLiteral("→"), card);
+        arrow->setObjectName("rszMuted");
+        auto* target = new QLabel(card);
+        target->setObjectName("rszBadgeTarget");
+        sizes->addWidget(orig);
+        sizes->addWidget(arrow);
+        sizes->addWidget(target);
+        sizes->addStretch();
+        cv->addLayout(sizes);
+        m_targetBadges.emplace_back(target, origSize);
+
+        auto* item = new QListWidgetItem(m_thumbList);
         item->setData(Qt::UserRole, p);
-        item->setToolTip(p);
-        m_thumbList->addItem(item);
+        item->setSizeHint(card->sizeHint());
+        m_thumbList->setItemWidget(item, card);
     }
+
+    updateTargetBadges();
     updateUiState();
+}
+
+void ImageResizerWidget::updateTargetBadges() {
+    for (const auto& [label, origSize] : m_targetBadges) {
+        const QSize t = computeTargetSize(origSize);
+        label->setText(QStringLiteral("%1 × %2").arg(t.width()).arg(t.height()));
+    }
+}
+
+QSize ImageResizerWidget::computeTargetSize(const QSize& src) const {
+    if (!src.isValid()) return src;
+    if (m_tabPercent->isChecked()) {
+        const double f = m_percentSpin->value() / 100.0;
+        return { std::max(1, int(src.width() * f + 0.5)),
+                 std::max(1, int(src.height() * f + 0.5)) };
+    }
+    const int w = m_widthEdit->text().toInt();    // 0 == Auto
+    const int h = m_heightEdit->text().toInt();
+    if (w <= 0 && h <= 0) return src;
+    if (m_lockRatio->isChecked() || w <= 0 || h <= 0) {
+        if (w > 0 && h > 0) return src.scaled(w, h, Qt::KeepAspectRatio);
+        if (w > 0) return { w, std::max(1, int(std::llround(
+                                double(src.height()) * w / src.width()))) };
+        return { std::max(1, int(std::llround(
+                     double(src.width()) * h / src.height()))), h };
+    }
+    return { w, h };
 }
 
 void ImageResizerWidget::updateUiState() {
@@ -555,6 +649,7 @@ void ImageResizerWidget::setMode(bool bySize) {
     m_tabPercent->setChecked(!bySize);
     m_pageSize->setVisible(bySize);
     m_pagePercent->setVisible(!bySize);
+    updateTargetBadges();
 }
 
 void ImageResizerWidget::pickFillColor() {
