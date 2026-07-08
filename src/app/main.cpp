@@ -14,6 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "startscreen/StartScreen.h"
 #include "startscreen/SplashScreen.h"
+#include "tools/ImageResizer.h"
 #include "auth/LoginGate.h"
 #include "auth/InstanceGuard.h"
 #include "core/theme/ThemeManager.h"
@@ -115,6 +116,7 @@ static class WriterWindow* createWriterWindow(const QString& filePath = {});
 static class CalcWindow*   createCalcWindow(const QString& filePath = {});
 static class ImpressWindow* createImpressWindow(const QString& filePath = {});
 static class PdfWindow*    createPdfWindow(const QString& filePath = {});
+static class ImageResizerWindow* createImageResizerWindow();
 
 // Adds an editor window as a new tab in the main shell (defined after MainShell).
 static void presentEditor(EditorWindow* win);
@@ -488,6 +490,36 @@ protected:
 private:
     NativeOffice::PdfModule* m_pdf { nullptr };
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ImageResizerWindow — the Image Resizer tool tab (Home → Tools). Stateless
+// from the shell's point of view: nothing to save, closing never prompts.
+// ─────────────────────────────────────────────────────────────────────────────
+class ImageResizerWindow : public EditorWindow {
+    Q_OBJECT
+public:
+    explicit ImageResizerWindow(QWidget* parent = nullptr)
+        : EditorWindow(parent)
+    {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setMinimumSize(960, 640);
+        resize(1200, 800);
+        setWindowTitle("Image Resizer");
+        setCentralWidget(new NativeOffice::ImageResizerWidget(this));
+    }
+
+    bool    requestClose()          override { return true; }
+    QString docKindName()     const override { return QStringLiteral("Image Resizer"); }
+    QString currentDocPath()  const override { return {}; }
+    bool    docDirty()        const override { return false; }
+};
+
+static ImageResizerWindow* createImageResizerWindow() {
+    auto* win = new ImageResizerWindow;
+    const QScreen* screen = QApplication::primaryScreen();
+    win->move(screen->availableGeometry().center() - win->rect().center());
+    return win;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ShellTabBar — custom-painted tab bar: a white strip, the first ("Home") tab
@@ -1591,6 +1623,8 @@ int main(int argc, char* argv[]) {
                          s, [](NativeOffice::DocumentType type, const QString& name) {
             openFromTemplate(type, name);
         });
+        QObject::connect(s, &NativeOffice::StartScreen::imageResizerRequested,
+                         s, [] { presentEditor(createImageResizerWindow()); });
         return s;
     };
 
@@ -1616,6 +1650,8 @@ int main(int argc, char* argv[]) {
                          s, [s, &shell](NativeOffice::DocumentType type, const QString& name) {
             shell.presentInHomeTab(s, createWindowForTemplate(type, name));
         });
+        QObject::connect(s, &NativeOffice::StartScreen::imageResizerRequested,
+                         s, [s, &shell] { shell.presentInHomeTab(s, createImageResizerWindow()); });
         QObject::connect(s, &NativeOffice::StartScreen::settingsRequested,
                          &controller, &NativeOffice::AppController::openSettings);
         return s;
@@ -1647,6 +1683,11 @@ int main(int argc, char* argv[]) {
     const bool openedFromCli = !cliFiles.isEmpty();
     for (const QString& path : cliFiles)
         openDocumentByPath(path);
+
+    // Dev-only capture aid (same family as NATIVEOFFICE_*_GRAB): open the
+    // Image Resizer tab on startup so it can be verified without UI clicks.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_RESIZER"))
+        presentEditor(createImageResizerWindow());
 
     auto& auth = NativeOffice::AuthManager::instance();
     QObject::connect(&guard, &NativeOffice::InstanceGuard::urlReceived,

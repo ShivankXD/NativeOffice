@@ -31,6 +31,8 @@ signals:
     void settingsRequested();
     // A named (non-blank) template was chosen in the gallery.
     void templateChosen(DocumentType type, const QString& name);
+    // The Image Resizer tool card (right column) was clicked.
+    void imageResizerRequested();
 
 private:
     void     buildUi();

@@ -22,6 +22,8 @@ qt_add_executable(NativeOffice
     auth/InstanceGuard.h
     settings/SettingsDialog.cpp
     settings/SettingsDialog.h
+    tools/ImageResizer.cpp
+    tools/ImageResizer.h
     common/Avatars.h
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )

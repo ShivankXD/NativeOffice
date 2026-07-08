@@ -713,6 +713,12 @@ QWidget* StartScreen::buildRightColumn() {
       pv->addWidget(twoCol(p, Lucide::kTimer, "Time spent", "—", "#E6E9F0"));
       v->addWidget(p); }
 
+    // Tools
+    { auto [p, pv] = makePanel("Tools");
+      pv->addWidget(twoCol(p, Lucide::kImage, "Image Resizer", "Open", "#3B82F6",
+                           [this] { emit imageResizerRequested(); }));
+      v->addWidget(p); }
+
     v->addStretch();
     col->setStyleSheet(R"(
         QFrame#sidePanel { background:#12161F; border:1px solid #202836; border-radius:14px; }
