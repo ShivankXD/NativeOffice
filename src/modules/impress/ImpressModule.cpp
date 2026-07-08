@@ -528,6 +528,7 @@ QWidget* ImpressModule::buildBrandBar() {
 QWidget* ImpressModule::buildCommentsPanel() {
     m_commentsPanel = new QWidget(this);
     m_commentsPanel->setObjectName("impressComments");
+    m_commentsPanel->setAttribute(Qt::WA_StyledBackground, true);
     m_commentsPanel->setFixedWidth(280);
     m_commentsPanel->setVisible(false);
     m_commentsPanel->setStyleSheet(

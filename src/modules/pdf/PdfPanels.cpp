@@ -242,6 +242,10 @@ StatusBar::StatusBar(QWidget* parent)
     : QWidget(parent)
 {
     setObjectName("pdfStatusBar");
+    // Custom QWidget subclasses don't paint stylesheet backgrounds unless
+    // told to — without this the tray is transparent and the (dark) shell
+    // chrome behind it shows through.
+    setAttribute(Qt::WA_StyledBackground, true);
     setFixedHeight(30);
 
     auto* h = new QHBoxLayout(this);

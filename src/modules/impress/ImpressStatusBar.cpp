@@ -17,6 +17,10 @@ ImpressStatusBar::ImpressStatusBar(QWidget* parent)
     : QWidget(parent)
 {
     setObjectName("impressStatusBar");
+    // Custom QWidget subclasses don't paint stylesheet backgrounds unless
+    // told to — without this the tray is transparent and the (dark) shell
+    // chrome behind it shows through.
+    setAttribute(Qt::WA_StyledBackground, true);
     setFixedHeight(28);
 
     auto* layout = new QHBoxLayout(this);
