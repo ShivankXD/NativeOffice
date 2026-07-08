@@ -45,6 +45,9 @@ private:
     void openFileDialog();
     void showTemplatesDialog(int initialCategory = 0);  // 0 Word, 1 Sheet, 2 Slides
     void showSettingsDialog();                          // real, QSettings-backed
+    void showNotificationsPopup(QWidget* anchor);       // bell dropdown
+    void showShortcutsDialog();                         // real supported shortcuts
+    void showWhatsNewDialog();                          // release highlights
 
     AppController* m_controller { nullptr };
 };

@@ -40,6 +40,8 @@
 #include <QCheckBox>
 #include <QFormLayout>
 #include <QDialogButtonBox>
+#include <QDesktopServices>
+#include <QUrl>
 #include <functional>
 #include <utility>
 
@@ -73,11 +75,19 @@ QLabel* badge(const QString& text, const QString& color, int size = 30, QWidget*
 }
 
 // The real, transparent brand mark at a crisp hi-dpi size (same
-// device-pixel-ratio trick as Avatars.h's roundAvatarPixmap()).
+// device-pixel-ratio trick as Avatars.h's roundAvatarPixmap()). The source
+// artwork is the full lockup (mark + wordmark + strapline); crop out just the
+// "N" mark, else the baked-in text turns to mush at UI sizes.
 QLabel* logoMark(int h, QWidget* parent) {
     auto* l = new QLabel(parent);
     const qreal dpr = parent ? parent->devicePixelRatio() : 1.0;
     QPixmap src(":/assets/nativeoffice-logo-mark.png");
+    if (!src.isNull()) {
+        src = src.copy(QRect(int(src.width()  * 0.205),
+                             int(src.height() * 0.115),
+                             int(src.width()  * 0.600),
+                             int(src.height() * 0.555)));
+    }
     QPixmap scaled = src.scaledToHeight(int(h * dpr), Qt::SmoothTransformation);
     scaled.setDevicePixelRatio(dpr);
     l->setPixmap(scaled);
@@ -231,6 +241,16 @@ void StartScreen::buildUi() {
         QScrollBar::handle:vertical { background:#2A3240; border-radius:5px; min-height:30px; }
         QScrollBar::add-line, QScrollBar::sub-line { height:0; }
     )");
+
+    // Dev-only capture hook (PrintWindow drops pixmap content on this
+    // machine): set NATIVEOFFICE_HOME_GRAB to a .png path to have the home
+    // screen grab itself shortly after startup.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB")) {
+        const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_HOME_GRAB");
+        QTimer::singleShot(6000, this, [this, grabPath] {
+            grab().save(grabPath, "PNG");
+        });
+    }
 }
 
 // ── Left sidebar ──────────────────────────────────────────────────────────────
@@ -242,12 +262,18 @@ QWidget* StartScreen::buildSidebar() {
     v->setContentsMargins(14, 18, 14, 18);
     v->setSpacing(4);
 
-    // Logo
+    // Logo — two-tone wordmark ("Office" in the logo's violet) beside a
+    // larger brand mark.
     auto* logoRow = new QWidget(bar);
     auto* lh = new QHBoxLayout(logoRow);
-    lh->setContentsMargins(6, 0, 0, 8); lh->setSpacing(10);
-    lh->addWidget(logoMark(30, logoRow));
-    lh->addWidget(heading("NativeOffice", 16, "#E6E9F0", true, logoRow));
+    lh->setContentsMargins(4, 0, 0, 10); lh->setSpacing(11);
+    lh->addWidget(logoMark(40, logoRow));
+    auto* brand = new QLabel(logoRow);
+    brand->setTextFormat(Qt::RichText);
+    brand->setText("<span style='color:#F0F2F7;'>Native</span>"
+                   "<span style='color:#8B7CF7;'>Office</span>");
+    brand->setStyleSheet("background:transparent; font:700 20px 'Segoe UI';");
+    lh->addWidget(brand);
     lh->addStretch();
     v->addWidget(logoRow);
     v->addSpacing(8);
@@ -303,8 +329,24 @@ QWidget* StartScreen::buildTopBar() {
     auto* bar = new QWidget(this);
     bar->setObjectName("topBar");
     bar->setFixedHeight(64);
+    // Three sections with equal-stretch outer halves so the clock lands on the
+    // bar's true midline regardless of how wide the search box or icon
+    // cluster are: [search … stretch] [clock] [stretch … icons].
     auto* h = new QHBoxLayout(bar);
     h->setContentsMargins(28, 0, 24, 0); h->setSpacing(16);
+
+    // Equal minimum widths give both halves identical size hints, so the
+    // equal stretch factors keep them the same width at every window size —
+    // which pins the clock to the bar's true midline.
+    auto* leftBox = new QWidget(bar);
+    leftBox->setMinimumWidth(420);
+    auto* leftL = new QHBoxLayout(leftBox);
+    leftL->setContentsMargins(0, 0, 0, 0); leftL->setSpacing(16);
+
+    auto* rightBox = new QWidget(bar);
+    rightBox->setMinimumWidth(420);
+    auto* rightL = new QHBoxLayout(rightBox);
+    rightL->setContentsMargins(0, 0, 0, 0); rightL->setSpacing(16);
 
     auto* search = new QLineEdit(bar);
     search->setObjectName("searchBox");
@@ -317,10 +359,11 @@ QWidget* StartScreen::buildTopBar() {
     auto* sl = new QHBoxLayout(search);
     sl->setContentsMargins(0, 0, 8, 0); sl->addStretch(); sl->addWidget(kbd);
 
-    h->addWidget(search);
+    leftL->addWidget(search);
+    leftL->addStretch();
+    h->addWidget(leftBox, 1);
 
-    // Live clock — fills the space the search box vacated at top-center.
-    // Reads the system clock (not a server) and repaints once a second.
+    // Live clock — sits between the two equal-width halves, i.e. centered.
     auto* clock = new QLabel(bar);
     clock->setObjectName("liveClock");
     clock->setAlignment(Qt::AlignCenter);
@@ -332,9 +375,7 @@ QWidget* StartScreen::buildTopBar() {
     connect(clockTimer, &QTimer::timeout, clock, refreshClock);
     clockTimer->start(1000);
 
-    h->addStretch();
-    h->addWidget(clock);
-    h->addStretch();
+    h->addWidget(clock, 0);
 
     auto iconBtn = [&](const char* svg, std::function<void()> cb) {
         auto* b = new QToolButton(bar);
@@ -346,9 +387,13 @@ QWidget* StartScreen::buildTopBar() {
         if (cb) connect(b, &QToolButton::clicked, this, cb);
         return b;
     };
-    h->addWidget(iconBtn(Lucide::kBell, nullptr));
-    h->addWidget(iconBtn(Lucide::kHelp, nullptr));
-    h->addWidget(iconBtn(Lucide::kSettings, [this]{ showSettingsDialog(); }));
+    rightL->addStretch();
+    auto* bellBtn = iconBtn(Lucide::kBell, nullptr);
+    connect(bellBtn, &QToolButton::clicked, this,
+            [this, bellBtn] { showNotificationsPopup(bellBtn); });
+    rightL->addWidget(bellBtn);
+    rightL->addWidget(iconBtn(Lucide::kHelp, nullptr));
+    rightL->addWidget(iconBtn(Lucide::kSettings, [this]{ showSettingsDialog(); }));
 
     // Account avatar — the real profile photo (cached by AuthManager), with a
     // coloured-initial fallback. Clicking it opens Settings → Account.
@@ -370,7 +415,8 @@ QWidget* StartScreen::buildTopBar() {
     connect(&AuthManager::instance(), &AuthManager::profileChanged,
             avatar, refreshAvatar);
     connect(avatar, &QToolButton::clicked, this, [this]{ showSettingsDialog(); });
-    h->addWidget(avatar);
+    rightL->addWidget(avatar);
+    h->addWidget(rightBox, 1);
 
     bar->setStyleSheet(R"(
         QWidget#topBar { background:#0D1117; border-bottom:1px solid #1B212C; }
@@ -635,9 +681,15 @@ QWidget* StartScreen::buildRightColumn() {
         return std::make_pair(p, pv);
     };
     auto twoCol = [&](QWidget* parent, const char* icon, const QString& left,
-                      const QString& right, const QString& rightColor) {
-        auto* row = new QWidget(parent);
-        auto* h = new QHBoxLayout(row); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(10);
+                      const QString& right, const QString& rightColor,
+                      std::function<void()> onClick = nullptr) -> QWidget* {
+        auto* row = new ClickableFrame(parent);
+        row->setObjectName(onClick ? "sideRowLink" : "sideRow");
+        if (onClick) {
+            row->setCursor(Qt::PointingHandCursor);
+            row->onClick = std::move(onClick);
+        }
+        auto* h = new QHBoxLayout(row); h->setContentsMargins(6, 4, 6, 4); h->setSpacing(10);
         h->addWidget(Lucide::label(icon, "#9AA4B8", 14, row));
         h->addWidget(heading(left, 12, "#C3CAD8", false, row));
         h->addStretch();
@@ -648,8 +700,10 @@ QWidget* StartScreen::buildRightColumn() {
     // Get Started
     { auto [p, pv] = makePanel("Get Started");
       pv->addWidget(twoCol(p, Lucide::kPlay, "Take a tour", "3 min", "#7B8494"));
-      pv->addWidget(twoCol(p, Lucide::kKeyboard, "Keyboard shortcuts", "View all", "#3B82F6"));
-      pv->addWidget(twoCol(p, Lucide::kSparkles, "What's new", "See updates", "#3B82F6"));
+      pv->addWidget(twoCol(p, Lucide::kKeyboard, "Keyboard shortcuts", "View all", "#3B82F6",
+                           [this] { showShortcutsDialog(); }));
+      pv->addWidget(twoCol(p, Lucide::kSparkles, "What's new", "See updates", "#3B82F6",
+                           [this] { showWhatsNewDialog(); }));
       v->addWidget(p); }
 
     // Your Activity
@@ -663,6 +717,9 @@ QWidget* StartScreen::buildRightColumn() {
     v->addStretch();
     col->setStyleSheet(R"(
         QFrame#sidePanel { background:#12161F; border:1px solid #202836; border-radius:14px; }
+        #sideRow { background:transparent; }
+        #sideRowLink { background:transparent; border-radius:8px; }
+        #sideRowLink:hover { background:#161C28; }
     )");
     return col;
 }
@@ -670,6 +727,245 @@ QWidget* StartScreen::buildRightColumn() {
 // ── Settings ── the full sectioned window lives in settings/SettingsDialog ───────
 void StartScreen::showSettingsDialog() {
     SettingsDialog dlg(this);
+    dlg.exec();
+}
+
+// ── Notifications ── dropdown anchored under the bell icon ────────────────────
+void StartScreen::showNotificationsPopup(QWidget* anchor) {
+    auto* pop = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
+    pop->setObjectName("notifPop");
+    pop->setAttribute(Qt::WA_DeleteOnClose);
+    pop->setAttribute(Qt::WA_StyledBackground, true);
+    pop->setFixedWidth(360);
+
+    auto* v = new QVBoxLayout(pop);
+    v->setContentsMargins(14, 12, 14, 12);
+    v->setSpacing(4);
+    v->addWidget(heading("Notifications", 14, "#F0F2F7", true, pop));
+    v->addSpacing(4);
+
+    auto item = [&](const char* icon, const QString& title, const QString& body,
+                    const QString& url) {
+        auto* row = new ClickableFrame(pop);
+        row->setObjectName("notifItem");
+        auto* hl = new QHBoxLayout(row);
+        hl->setContentsMargins(10, 8, 10, 8);
+        hl->setSpacing(10);
+        hl->addWidget(Lucide::label(icon, "#8B7CF7", 16, row), 0, Qt::AlignTop);
+        auto* tv = new QVBoxLayout();
+        tv->setSpacing(2);
+        tv->addWidget(heading(title, 12, "#E6E9F0", true, row));
+        auto* b = heading(body, 11, "#9AA4B8", false, row);
+        b->setWordWrap(true);
+        tv->addWidget(b);
+        hl->addLayout(tv, 1);
+        if (!url.isEmpty()) {
+            row->setCursor(Qt::PointingHandCursor);
+            row->onClick = [pop, url] {
+                QDesktopServices::openUrl(QUrl(url));
+                pop->close();
+            };
+        }
+        v->addWidget(row);
+    };
+
+    item(Lucide::kStar, "Our family is growing",
+         "The NativeOffice community is increasing day by day — "
+         "thanks for being part of this family!",
+         QString());
+    item(Lucide::kHelp, "Queries or feature requests?",
+         "We'd love to hear from you — mail us at contact@nativeoffice.online.",
+         QStringLiteral("mailto:contact@nativeoffice.online"));
+    item(Lucide::kFileText, "Privacy Policy",
+         "Read how NativeOffice handles your data.",
+         QStringLiteral("https://nativeoffice.online/privacy"));
+    item(Lucide::kFileText, "Terms of Service",
+         "The terms that govern your use of NativeOffice.",
+         QStringLiteral("https://nativeoffice.online/terms"));
+
+    pop->setStyleSheet(R"(
+        QFrame#notifPop { background:#12161F; border:1px solid #2A3344; border-radius:12px; }
+        #notifItem { background:transparent; border-radius:8px; }
+        #notifItem:hover { background:#161C28; }
+    )");
+    pop->adjustSize();
+    const QPoint bottomRight =
+        anchor->mapToGlobal(QPoint(anchor->width(), anchor->height() + 8));
+    pop->move(bottomRight - QPoint(pop->width(), 0));
+    pop->show();
+}
+
+// ── Keyboard shortcuts ── the ones the app actually implements ────────────────
+void StartScreen::showShortcutsDialog() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("Keyboard Shortcuts");
+    dlg.resize(680, 640);
+    dlg.setStyleSheet(R"(
+        QDialog { background:#0D1117; }
+        QScrollArea { background:transparent; border:none; }
+        QScrollArea > QWidget > QWidget { background:transparent; }
+    )");
+
+    auto* root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(24, 20, 24, 16);
+    root->setSpacing(12);
+    root->addWidget(heading("Keyboard Shortcuts", 20, "#F0F2F7", true, &dlg));
+
+    auto* scroll = new QScrollArea(&dlg);
+    scroll->setWidgetResizable(true);
+    auto* page = new QWidget(scroll);
+    auto* pv = new QVBoxLayout(page);
+    pv->setContentsMargins(0, 4, 12, 4);
+    pv->setSpacing(6);
+
+    auto section = [&](const QString& title) {
+        pv->addSpacing(10);
+        pv->addWidget(heading(title, 14, "#8B7CF7", true, page));
+        pv->addSpacing(2);
+    };
+    auto row = [&](const QString& keys, const QString& what) {
+        auto* r = new QWidget(page);
+        auto* h = new QHBoxLayout(r);
+        h->setContentsMargins(0, 2, 0, 2);
+        h->setSpacing(14);
+        auto* chip = new QLabel(keys, r);
+        chip->setStyleSheet("background:#1B2230; color:#C3CAD8; border-radius:5px;"
+                            "padding:3px 10px; font:600 11px 'Segoe UI';");
+        chip->setFixedWidth(150);
+        chip->setAlignment(Qt::AlignCenter);
+        h->addWidget(chip);
+        h->addWidget(heading(what, 12, "#AEB6C6", false, r));
+        h->addStretch();
+        pv->addWidget(r);
+    };
+
+    section("Everywhere");
+    row("Ctrl + N",           "New document");
+    row("Ctrl + O",           "Open a file");
+    row("Ctrl + S",           "Save");
+    row("Ctrl + Shift + S",   "Save As");
+    row("Ctrl + Z",           "Undo");
+    row("Ctrl + Y",           "Redo");
+    row("Ctrl + X / C / V",   "Cut / Copy / Paste");
+    row("Ctrl + A",           "Select all");
+    row("Ctrl + W",           "Close document");
+
+    section("Writer (Documents)");
+    row("Ctrl + B / I / U",   "Bold / Italic / Underline");
+    row("Ctrl + F",           "Find");
+    row("Ctrl + H",           "Find and replace");
+    row("Ctrl + P",           "Print");
+    row("F7",                 "Spelling check");
+    row("Ctrl + ] / [",       "Grow / shrink font size");
+    row("Ctrl + L / E / R / J", "Align left / center / right / justify");
+    row("Ctrl + 1 / 5 / 2",   "Line spacing 1.0 / 1.5 / 2.0");
+    row("Ctrl + Alt + 1-3",   "Apply Heading 1–3");
+    row("Ctrl + Shift + N",   "Back to Normal style");
+    row("Ctrl + Shift + L",   "Bulleted list");
+    row("Ctrl + M",           "Increase indent (Shift to decrease)");
+    row("Ctrl + K",           "Insert hyperlink");
+    row("Ctrl + Enter",       "Page break");
+    row("Ctrl + Space",       "Clear formatting");
+    row("Shift + F3",         "Change case");
+    row("Ctrl + Shift + E",   "Export to PDF");
+
+    section("Sheets (Spreadsheets)");
+    row("Ctrl + B / I / U",   "Bold / Italic / Underline");
+    row("Ctrl + D",           "Fill down");
+    row("Ctrl + R",           "Fill right");
+    row("Delete",             "Clear selected cells");
+
+    section("Slides (Presentations)");
+    row("F5",                 "Start slide show");
+    row("Shift + F5",         "Slide show from current slide");
+    row("Esc",                "Exit slide show");
+    row("→ / Space",          "Next slide");
+    row("← / Backspace",      "Previous slide");
+    row("B",                  "Black screen during show");
+    row("Ctrl + M",           "New slide");
+    row("Delete",             "Delete selected object");
+    row("Ctrl + Shift + E",   "Export to PDF");
+
+    section("PDF");
+    row("Ctrl + F",           "Find in document");
+    row("Ctrl + P",           "Print");
+    row("Esc",                "Exit read mode");
+
+    pv->addStretch();
+    scroll->setWidget(page);
+    root->addWidget(scroll, 1);
+
+    auto* closeBtn = new QPushButton("Close", &dlg);
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    closeBtn->setStyleSheet("QPushButton { background:#6D5BE8; color:#FFFFFF; border:none;"
+                            "border-radius:8px; padding:8px 22px; font:600 12px 'Segoe UI'; }"
+                            "QPushButton:hover { background:#7E6DF0; }");
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    auto* br = new QHBoxLayout();
+    br->addStretch();
+    br->addWidget(closeBtn);
+    root->addLayout(br);
+
+    dlg.exec();
+}
+
+// ── What's new ── recent release highlights ───────────────────────────────────
+void StartScreen::showWhatsNewDialog() {
+    QDialog dlg(this);
+    dlg.setWindowTitle("What's New");
+    dlg.resize(520, 480);
+    dlg.setStyleSheet("QDialog { background:#0D1117; }");
+
+    auto* root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(24, 20, 24, 16);
+    root->setSpacing(14);
+    root->addWidget(heading("What's New in NativeOffice", 20, "#F0F2F7", true, &dlg));
+
+    auto item = [&](const char* icon, const QString& title, const QString& body) {
+        auto* card = new QFrame(&dlg);
+        card->setObjectName("newsCard");
+        card->setStyleSheet("#newsCard { background:#12161F; border:1px solid #202836;"
+                            "border-radius:10px; }");
+        auto* h = new QHBoxLayout(card);
+        h->setContentsMargins(14, 12, 14, 12);
+        h->setSpacing(12);
+        h->addWidget(Lucide::label(icon, "#8B7CF7", 18, card), 0, Qt::AlignTop);
+        auto* tv = new QVBoxLayout();
+        tv->setSpacing(3);
+        tv->addWidget(heading(title, 13, "#E6E9F0", true, card));
+        auto* b = heading(body, 12, "#9AA4B8", false, card);
+        b->setWordWrap(true);
+        tv->addWidget(b);
+        h->addLayout(tv, 1);
+        root->addWidget(card);
+    };
+
+    item(Lucide::kDownload, "PDF editor has arrived",
+         "A full PDF workspace: view, edit, annotate, fill forms, protect with "
+         "passwords, sign, convert and OCR — right inside NativeOffice.");
+    item(Lucide::kKeyboard, "Full keyboard shortcut suite",
+         "Familiar shortcuts now work across Writer, Sheets, Slides and PDF. "
+         "See “Keyboard shortcuts” in Get Started for the full list.");
+    item(Lucide::kSparkles, "A fresh, unified look",
+         "New logo tray in every editor, a clean white theme with violet "
+         "accents, and your Free/Premium plan badge at a glance.");
+    item(Lucide::kTimer, "Coming soon: Image Resizer",
+         "Resize and compress images without leaving NativeOffice. "
+         "It’s on the way!");
+
+    root->addStretch();
+
+    auto* closeBtn = new QPushButton("Nice!", &dlg);
+    closeBtn->setCursor(Qt::PointingHandCursor);
+    closeBtn->setStyleSheet("QPushButton { background:#6D5BE8; color:#FFFFFF; border:none;"
+                            "border-radius:8px; padding:8px 24px; font:600 12px 'Segoe UI'; }"
+                            "QPushButton:hover { background:#7E6DF0; }");
+    connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    auto* br = new QHBoxLayout();
+    br->addStretch();
+    br->addWidget(closeBtn);
+    root->addLayout(br);
+
     dlg.exec();
 }
 
