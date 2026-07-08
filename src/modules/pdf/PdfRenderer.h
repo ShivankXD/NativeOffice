@@ -23,6 +23,7 @@
 typedef struct fpdf_document_t__* FPDF_DOCUMENT;
 typedef struct fpdf_page_t__*     FPDF_PAGE;
 typedef struct fpdf_textpage_t__* FPDF_TEXTPAGE;
+typedef struct fpdf_form_handle_t__* FPDF_FORMHANDLE;
 
 namespace NativeOffice::Pdf {
 
@@ -77,6 +78,10 @@ public:
     };
     [[nodiscard]] std::vector<CharBox> pageChars(int pageIndex) const;
 
+    // Decoded raster images embedded in a page (for "Extract Picture").
+    // Returns the rendered bitmaps in page order; empty if the page has none.
+    [[nodiscard]] std::vector<QImage> pageImages(int pageIndex) const;
+
     // Line-grouped rectangles for the characters inside `area` (page points,
     // top-left origin) — what Highlight/Underline/StrikeOut snap to.
     [[nodiscard]] std::vector<QRectF> snapTextRects(int pageIndex, const QRectF& area) const;
@@ -103,6 +108,11 @@ private:
 
     QByteArray    m_data;      // must outlive m_doc (FPDF_LoadMemDocument)
     FPDF_DOCUMENT m_doc = nullptr;
+    // Form-fill environment: required for PDFium to render Widget (AcroForm
+    // field) annotations, which the base page renderer skips. Held opaquely
+    // (real type is FPDF_FORMHANDLE) and released before the document.
+    FPDF_FORMHANDLE m_form = nullptr;
+    void* m_formFillInfo = nullptr;    // heap FPDF_FORMFILLINFO kept alive with m_form
 
     std::vector<QSizeF> m_pageSizes;                    // filled at open()
     mutable std::vector<FPDF_PAGE>     m_pageCache;     // index-aligned, null until used

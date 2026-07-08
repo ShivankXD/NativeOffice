@@ -17,6 +17,7 @@
 
 #include <QRectF>
 #include <QString>
+#include <map>
 #include <vector>
 
 namespace NativeOffice::Pdf {

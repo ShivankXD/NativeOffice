@@ -231,7 +231,7 @@ QTreeWidget#pdfBookmarksTree::item { padding: 3px; }
 QTreeWidget#pdfBookmarksTree::item:hover, QListWidget#pdfCommentsList::item:hover { background: %3; }
 )")
         .arg(tm.chromePanelBg(), tm.chromeBorder(), tm.chromeHoverBg(),
-             tm.chromeActiveBg(), tm.chromeText(), tm.chromeTextMuted(), "#E8372A"));
+             tm.chromeActiveBg(), tm.chromeText(), tm.chromeTextMuted(), "#6D5BE8"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,7 +345,7 @@ QSlider#pdfZoomSlider::handle:horizontal { width: 12px; height: 12px; margin: -5
     border-radius: 6px; background: %7; }
 )")
         .arg(tm.chromePanelBg(), tm.chromeBorder(), tm.chromeText(), tm.chromeHoverBg(),
-             tm.chromeTextMuted(), tm.chromeBg(), "#E8372A"));
+             tm.chromeTextMuted(), tm.chromeBg(), "#6D5BE8"));
 }
 
 } // namespace NativeOffice::Pdf

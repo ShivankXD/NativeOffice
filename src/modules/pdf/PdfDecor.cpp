@@ -528,13 +528,68 @@ OpResult addHeaderFooter(const QString& in, const QString& out, const HeaderFoot
     return applyDecor(in, out, plan);
 }
 
+namespace {
+OpResult removeDecorByTag(const QString& in, const QString& out, const QByteArray& tag);
+bool     hasDecorTag(const QString& path, const QByteArray& tag);
+} // namespace
+
+OpResult addInvisibleTextLayer(const QString& in, const QString& out,
+                               const std::map<int, std::vector<OcrWord>>& wordsByPage) {
+    // Re-running OCR replaces the previous layer rather than stacking.
+    QString source = in;
+    QString scratch;
+    if (hasDecorTag(in, "ocrtext")) {
+        scratch = out + QStringLiteral(".noocr");
+        const OpResult rm = removeDecorByTag(in, scratch, "ocrtext");
+        if (!rm.ok) return rm;
+        source = scratch;
+    }
+
+    DecorPlan plan;
+    plan.tag = "ocrtext";
+    plan.needFont = true;
+    plan.content = [&wordsByPage](int pageIdx, double /*w*/, double h) -> QByteArray {
+        auto it = wordsByPage.find(pageIdx);
+        if (it == wordsByPage.end() || it->second.empty()) return {};
+        QByteArray body = "q\nBT\n3 Tr\n";   // render mode 3: invisible
+        for (const OcrWord& word : it->second) {
+            if (word.text.trimmed().isEmpty() || word.box.height() <= 1) continue;
+            const double size = word.box.height() * 0.9;
+            // Horizontal scaling so the invisible glyphs span the same width
+            // the printed word occupies (keeps selection rectangles aligned).
+            const double natural = helveticaTextWidthPt(word.text, size);
+            const double tz = natural > 0.5 ? word.box.width() / natural * 100.0 : 100.0;
+            const double x = word.box.left();
+            const double y = h - word.box.bottom() + word.box.height() * 0.18;   // baseline
+            body += "/" + QByteArray(kFontName) + " " + num(size) + " Tf\n";
+            body += num(std::clamp(tz, 10.0, 500.0)) + " Tz\n";
+            body += "1 0 0 1 " + num(x) + " " + num(y) + " Tm\n";
+            body += "(" + escapePdfText(word.text) + ") Tj\n";
+        }
+        body += "100 Tz\nET\nQ\n";
+        return body;
+    };
+
+    const OpResult r = applyDecor(source, out, plan);
+    if (!scratch.isEmpty()) QFile::remove(scratch);
+    return r;
+}
+
+bool hasOcrLayer(const QString& path) {
+    return hasDecorTag(path, "ocrtext");
+}
+
 OpResult removeDecor(const QString& in, const QString& out, DecorKind kind) {
+    return removeDecorByTag(in, out, kindTag(kind));
+}
+
+namespace {
+
+OpResult removeDecorByTag(const QString& in, const QString& out, const QByteArray& tag) {
     OpenStatus status;
     auto doc = Document::open(in, status);
     if (!doc)
         return { false, QString("This PDF isn't supported yet: %1").arg(openStatusReason(status)) };
-
-    const QByteArray tag = kindTag(kind);
 
     Writer writer;
     const int pagesNum = writer.allocate();
@@ -609,11 +664,10 @@ OpResult removeDecor(const QString& in, const QString& out, DecorKind kind) {
     return { true, {} };
 }
 
-bool hasDecor(const QString& path, DecorKind kind) {
+bool hasDecorTag(const QString& path, const QByteArray& tag) {
     OpenStatus status;
     auto doc = Document::open(path, status);
     if (!doc) return false;
-    const QByteArray tag = kindTag(kind);
     for (const PageInfo& page : doc->pages()) {
         const Object* c = page.dict.find("Contents");
         if (!c || !c->isArray()) continue;
@@ -626,6 +680,12 @@ bool hasDecor(const QString& path, DecorKind kind) {
         }
     }
     return false;
+}
+
+} // namespace
+
+bool hasDecor(const QString& path, DecorKind kind) {
+    return hasDecorTag(path, kindTag(kind));
 }
 
 } // namespace NativeOffice::Pdf

@@ -1057,7 +1057,7 @@ QToolButton#ribbonTab {
     padding: 5px 14px; color: %3; font: 10pt "Segoe UI";
 }
 QToolButton#ribbonTab:hover { background: %4; }
-QToolButton#ribbonTab:checked { color: #E8372A; font-weight: 600; }
+QToolButton#ribbonTab:checked { color: #6D5BE8; font-weight: 600; }
 QToolButton#ribbonFileBtn {
     background: transparent; border: none; border-radius: 5px;
     padding: 5px 10px; color: %3; font: 10pt "Segoe UI";

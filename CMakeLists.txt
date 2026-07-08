@@ -74,6 +74,12 @@ add_subdirectory(src/app)
 # installed, not shipped).
 qt_add_executable(PdfRenderSmoke tools/PdfRenderSmoke.cpp)
 target_include_directories(PdfRenderSmoke PRIVATE ${CMAKE_SOURCE_DIR}/src/modules/pdf)
+get_target_property(_qtcore_inc2 Qt6::Core INTERFACE_INCLUDE_DIRECTORIES)
+foreach(_d IN LISTS _qtcore_inc2)
+    if(EXISTS "${_d}/${Qt6Core_VERSION}/QtCore/private/qzipreader_p.h")
+        target_include_directories(PdfRenderSmoke PRIVATE "${_d}/${Qt6Core_VERSION}")
+    endif()
+endforeach()
 target_link_libraries(PdfRenderSmoke PRIVATE PdfModule Qt6::Gui)
 add_custom_command(TARGET PdfRenderSmoke POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

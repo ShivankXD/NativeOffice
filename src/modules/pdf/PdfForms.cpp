@@ -204,8 +204,8 @@ OpResult fillTextFields(const QString& in, const QString& out,
         return { false, QString("This PDF isn't supported yet: %1").arg(openStatusReason(status)) };
 
     const Object& cat = doc->catalog();
-    const Object* afRef = cat.find("AcroForm");
-    if (!afRef || !afRef->isRef())
+    const Object* afRef = cat.find("AcroForm");   // may be an inline dict or a ref
+    if (!afRef)
         return { false, "This PDF has no fillable form." };
 
     Writer writer;
@@ -291,12 +291,19 @@ OpResult fillTextFields(const QString& in, const QString& out,
             serializeObjectBody(dict, [&copier](Ref r) { return copier.copy(r); }));
     }
 
-    // Rebuild AcroForm with NeedAppearances = true and DA/DR carried over.
+    // Rebuild AcroForm as its own indirect object (works whether the source
+    // AcroForm was inline or an indirect ref). Its /Fields refs resolve to
+    // the substituted field objects via the copier.
+    //
+    // NeedAppearances is set FALSE: we generate correct /AP streams for every
+    // filled field, and a `true` value tells viewers to discard those and
+    // regenerate — which static (non-interactive) renderers like PDFium's
+    // can't do, leaving the fields blank.
     const int newAcroNum = writer.allocate();
-    copier.preMap(afRef->ref, newAcroNum);
+    if (afRef->isRef()) copier.preMap(afRef->ref, newAcroNum);
     {
         Object na = acro;
-        Object needAp; needAp.type = Object::Type::Bool; needAp.boolVal = true;
+        Object needAp; needAp.type = Object::Type::Bool; needAp.boolVal = false;
         na.dict.insert("NeedAppearances", needAp);
         writer.setObjectBody(newAcroNum,
             serializeObjectBody(na, [&copier](Ref r) { return copier.copy(r); }));

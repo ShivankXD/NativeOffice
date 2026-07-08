@@ -33,14 +33,31 @@ public:
     // or a stream's dict+data) with a previously allocated object number.
     void setObjectBody(int objNum, const QByteArray& body);
 
+    // Serializes the whole file into a byte buffer (header, all registered
+    // objects, classic xref, trailer). Exposed so the signing path can build
+    // the exact bytes, patch the /ByteRange + /Contents placeholders, and
+    // then write — signatures must be computed over the final layout.
+    [[nodiscard]] QByteArray buildBuffer(int rootObjNum) const;
+
     // Serializes the whole file: header, all registered objects, a classic
     // xref table, and a trailer pointing at `rootObjNum`. Returns false on
     // I/O failure (caller should treat that as "could not write output").
     bool writeTo(const QString& path, int rootObjNum) const;
 
+    // Encryption trailer: when `encryptObjNum` > 0, the trailer references it
+    // as /Encrypt and includes /ID [<idBytes><idBytes>]. The referenced
+    // object (the standard security handler dict) must be registered by the
+    // caller. `idBytes` is the raw file identifier (typically 16 bytes).
+    void setEncryptTrailer(int encryptObjNum, const QByteArray& idBytes) {
+        m_encryptObjNum = encryptObjNum;
+        m_idBytes = idBytes;
+    }
+
 private:
     int m_next = 1;
     std::map<int, QByteArray> m_bodies;
+    int m_encryptObjNum = 0;
+    QByteArray m_idBytes;
 };
 
 } // namespace NativeOffice::Pdf

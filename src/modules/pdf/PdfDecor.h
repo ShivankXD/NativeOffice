@@ -13,7 +13,9 @@
 #include "PdfOps.h"
 
 #include <QColor>
+#include <QRectF>
 #include <QString>
+#include <map>
 #include <vector>
 
 namespace NativeOffice::Pdf {
@@ -76,5 +78,20 @@ bool hasDecor(const QString& path, DecorKind kind);
 // Width of `text` in points when set in Helvetica at `fontSizePt` (AFM
 // metrics for WinAnsi). Exposed for the dialogs' live previews.
 double helveticaTextWidthPt(const QString& text, double fontSizePt);
+
+// ── OCR text layer ───────────────────────────────────────────────────────────
+// One recognized word with its box in page points (top-left origin).
+struct OcrWord {
+    QString text;
+    QRectF  box;
+};
+
+// Overlays an INVISIBLE text layer (render mode 3) with each word placed at
+// its recognized position — this is what makes a scanned PDF searchable and
+// copyable. Pages without entries are copied through untouched. Tagged like
+// the other decorations, so re-running OCR replaces the old layer.
+OpResult addInvisibleTextLayer(const QString& in, const QString& out,
+                               const std::map<int, std::vector<OcrWord>>& wordsByPage);
+bool hasOcrLayer(const QString& path);
 
 } // namespace NativeOffice::Pdf

@@ -178,7 +178,7 @@ QWidget#pdfOrganizer { background: %1; }
 QLabel#pdfOrganizerHint { background: %1; color: %2; font: 9pt "Segoe UI"; }
 QListWidget#pdfOrganizerGrid { background: %1; border: none; color: %3; font: 9pt "Segoe UI"; }
 QListWidget#pdfOrganizerGrid::item { background: transparent; border: 2px solid transparent; border-radius: 4px; }
-QListWidget#pdfOrganizerGrid::item:selected { border: 2px solid #E8372A; background: %4; }
+QListWidget#pdfOrganizerGrid::item:selected { border: 2px solid #6D5BE8; background: %4; }
 QListWidget#pdfOrganizerGrid::item:hover { background: %4; }
 )")
         .arg(tm.isDark() ? "#171B24" : "#E8EAEF",

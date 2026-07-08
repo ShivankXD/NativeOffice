@@ -97,7 +97,13 @@ void Writer::setObjectBody(int objNum, const QByteArray& body) {
 bool Writer::writeTo(const QString& path, int rootObjNum) const {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    const QByteArray out = buildBuffer(rootObjNum);
+    const qint64 written = f.write(out);
+    f.close();
+    return written == out.size();
+}
 
+QByteArray Writer::buildBuffer(int rootObjNum) const {
     QByteArray out;
     out += "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n";   // binary-marker comment, standard practice
 
@@ -127,12 +133,15 @@ bool Writer::writeTo(const QString& path, int rootObjNum) const {
 
     out += "trailer\n";
     out += "<< /Size " + QByteArray::number(highest + 1)
-         + " /Root " + QByteArray::number(rootObjNum) + " 0 R >>\n";
+         + " /Root " + QByteArray::number(rootObjNum) + " 0 R";
+    if (m_encryptObjNum > 0) {
+        const QByteArray idHex = "<" + m_idBytes.toHex() + ">";
+        out += " /Encrypt " + QByteArray::number(m_encryptObjNum) + " 0 R";
+        out += " /ID [" + idHex + idHex + "]";
+    }
+    out += " >>\n";
     out += "startxref\n" + QByteArray::number(xrefOffset) + "\n%%EOF\n";
-
-    const qint64 written = f.write(out);
-    f.close();
-    return written == out.size();
+    return out;
 }
 
 } // namespace NativeOffice::Pdf

@@ -11,6 +11,8 @@
 #endif
 #include <fpdfview.h>
 #include <fpdf_doc.h>
+#include <fpdf_edit.h>
+#include <fpdf_formfill.h>
 #include <fpdf_save.h>
 #include <fpdf_text.h>
 
@@ -104,6 +106,16 @@ std::unique_ptr<Renderer> Renderer::open(const QString& path,
     r->m_pageCache.assign(n, nullptr);
     r->m_textCache.assign(n, nullptr);
 
+    // Init a form-fill environment so Widget (AcroForm field) annotations
+    // render. Rendering-only: all interaction callbacks are left null. The
+    // FPDF_FORMFILLINFO must outlive the handle, so it's heap-allocated.
+    auto* ffi = new FPDF_FORMFILLINFO{};
+    ffi->version = 1;
+    r->m_formFillInfo = ffi;
+    r->m_form = FPDFDOC_InitFormFillEnvironment(r->m_doc, ffi);
+    if (r->m_form)
+        FPDF_SetFormFieldHighlightAlpha(r->m_form, 0);   // no field tint in render
+
     status = RenderOpenStatus::Ok;
     return r;
 }
@@ -113,6 +125,8 @@ Renderer::~Renderer() {
         if (tp) FPDFText_ClosePage(tp);
     for (FPDF_PAGE p : m_pageCache)
         if (p) FPDF_ClosePage(p);
+    if (m_form) FPDFDOC_ExitFormFillEnvironment(m_form);
+    delete static_cast<FPDF_FORMFILLINFO*>(m_formFillInfo);
     if (m_doc) FPDF_CloseDocument(m_doc);
 }
 
@@ -153,7 +167,11 @@ QImage Renderer::renderPage(int pageIndex, qreal scale) const {
     FPDF_BITMAP bmp = FPDFBitmap_CreateEx(w, h, FPDFBitmap_BGRA,
                                           img.bits(), int(img.bytesPerLine()));
     if (!bmp) return {};
-    FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, FPDF_ANNOT | FPDF_LCD_TEXT);
+    const int flags = FPDF_ANNOT | FPDF_LCD_TEXT;
+    FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, flags);
+    // Overlay form-field widgets (skipped by the base page render).
+    if (m_form)
+        FPDF_FFLDraw(m_form, bmp, page, 0, 0, w, h, 0, flags);
     FPDFBitmap_Destroy(bmp);
     return img;
 }
@@ -183,6 +201,37 @@ std::vector<Renderer::CharBox> Renderer::pageChars(int pageIndex) const {
         cb.ch  = QChar(ushort(FPDFText_GetUnicode(tp, i)));
         cb.box = QRectF(l, pageH - t, r - l, t - b);    // flip to top-left origin
         out.push_back(cb);
+    }
+    return out;
+}
+
+std::vector<QImage> Renderer::pageImages(int pageIndex) const {
+    std::vector<QImage> out;
+    FPDF_PAGE page = pageHandle(pageIndex);
+    if (!page) return out;
+    const int nObj = FPDFPage_CountObjects(page);
+    for (int i = 0; i < nObj; ++i) {
+        FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, i);
+        if (!obj || FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_IMAGE) continue;
+        // Render the image object to a bitmap with the document's decode
+        // (handles the colorspace/filters PDFium supports).
+        FPDF_BITMAP bmp = FPDFImageObj_GetRenderedBitmap(m_doc, page, obj);
+        if (!bmp) continue;
+        const int w = FPDFBitmap_GetWidth(bmp);
+        const int h = FPDFBitmap_GetHeight(bmp);
+        const int stride = FPDFBitmap_GetStride(bmp);
+        const int format = FPDFBitmap_GetFormat(bmp);
+        const auto* buf = static_cast<const uchar*>(FPDFBitmap_GetBuffer(bmp));
+        if (w > 0 && h > 0 && buf) {
+            QImage::Format qf = (format == FPDFBitmap_BGRA) ? QImage::Format_ARGB32
+                              : (format == FPDFBitmap_BGRx) ? QImage::Format_RGB32
+                                                            : QImage::Format_RGB888;
+            // BGR(x/a) memory maps to Qt's ARGB32/RGB32 on little-endian;
+            // BGR (3-channel) needs an explicit swap.
+            QImage img(buf, w, h, stride, qf);
+            out.push_back(format == FPDFBitmap_BGR ? img.rgbSwapped().copy() : img.copy());
+        }
+        FPDFBitmap_Destroy(bmp);
     }
     return out;
 }

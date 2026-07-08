@@ -16,9 +16,18 @@
 
 namespace NativeOffice::Pdf::rebuild {
 
+// Optional hook applied to each object right before serialization — used by
+// the encryption pass to encrypt every string/stream in place, keyed by the
+// object's new number.
+struct ObjectEncryptor {
+    virtual ~ObjectEncryptor() = default;
+    virtual void encrypt(Object& obj, int objNum) = 0;
+};
+
 class Copier {
 public:
-    Copier(const Document& src, Writer& dst) : m_src(src), m_dst(dst) {}
+    explicit Copier(const Document& src, Writer& dst, ObjectEncryptor* enc = nullptr)
+        : m_src(src), m_dst(dst), m_enc(enc) {}
 
     int copy(Ref oldRef) {
         if (oldRef.num < 0) return -oldRef.num;   // sentinel passthrough
@@ -26,8 +35,14 @@ public:
         if (it != m_map.end()) return it->second;
         const int newNum = m_dst.allocate();
         m_map[oldRef] = newNum;                    // register first: breaks cycles
-        const Object& working = m_src.resolve(oldRef);
-        m_dst.setObjectBody(newNum, serializeObjectBody(working, [this](Ref r) { return copy(r); }));
+        if (m_enc) {
+            Object working = m_src.resolve(oldRef);   // mutable copy to encrypt
+            m_enc->encrypt(working, newNum);
+            m_dst.setObjectBody(newNum, serializeObjectBody(working, [this](Ref r) { return copy(r); }));
+        } else {
+            const Object& working = m_src.resolve(oldRef);
+            m_dst.setObjectBody(newNum, serializeObjectBody(working, [this](Ref r) { return copy(r); }));
+        }
         return newNum;
     }
 
@@ -44,6 +59,7 @@ public:
 private:
     const Document& m_src;
     Writer& m_dst;
+    ObjectEncryptor* m_enc = nullptr;
     std::map<Ref, int> m_map;
 };
 

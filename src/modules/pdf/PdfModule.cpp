@@ -6,16 +6,25 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "PdfModule.h"
 #include "PdfAnnots.h"
+#include "PdfConvert.h"
+#include "PdfCryptoUi.h"
+#include "PdfOcr.h"
 #include "PdfDecorUi.h"
 #include "PdfEditSession.h"
+#include "PdfForms.h"
 #include "PdfOps.h"
+#include "PdfSign.h"
+#include "PdfSignUi.h"
+#include "PdfSignature.h"
 #include "PdfOrganizer.h"
 #include "PdfPanels.h"
 #include "PdfViewer.h"
 #include "core/theme/ThemeManager.h"
+#include "core/common/BrandBar.h"
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -35,6 +44,7 @@
 #include <QPrintDialog>
 #include <QPrinter>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QTimer>
@@ -189,6 +199,7 @@ PdfModule::PdfModule(QWidget* parent)
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
+    root->addWidget(new BrandBar(this));   // unified full-width brand tray
     root->addWidget(m_ribbon);
 
     auto* body = new QWidget(this);
@@ -415,9 +426,10 @@ void PdfModule::dispatch(PdfAction a) {
 
     // Actions that work without a document.
     switch (a) {
-    case A::OpenFile:  openInteractive(); return;
-    case A::MergePdf:  doMerge(); return;
-    case A::Translate: comingSoon(tr("Parallel Translate")); return;
+    case A::OpenFile:     openInteractive(); return;
+    case A::MergePdf:     doMerge(); return;
+    case A::PictureToPdf: doPictureToPdf(); return;
+    case A::Translate:    comingSoon(tr("Parallel Translate")); return;
     default: break;
     }
 
@@ -538,24 +550,23 @@ void PdfModule::dispatch(PdfAction a) {
     case A::HeaderFooter:
         Pdf::runHeaderFooterUi(this, m_session, [this](const QString& m) { toast(m); });
         break;
-    case A::FillForm:
-    case A::HighlightFields: comingSoon(tr("Form filling")); break;
-    case A::AddSignature:
-    case A::AddInitials:     comingSoon(tr("Signatures")); break;
-    case A::Encrypt:         comingSoon(tr("Encrypt")); break;
-    case A::CertSign:
-    case A::Timestamp:
-    case A::ManageCerts:
-    case A::ValidateSigs:    comingSoon(tr("Certificate signatures")); break;
-    case A::ToWord:
-    case A::ToExcel:
-    case A::ToPpt:
-    case A::ToPicture:
-    case A::ToText:
-    case A::PictureToPdf:
-    case A::ToImageOnlyPdf:
-    case A::ExtractPicture:  comingSoon(tr("Convert")); break;
-    case A::OcrPdf:          comingSoon(tr("OCR")); break;
+    case A::FillForm:        doFillForm(); break;
+    case A::HighlightFields: doHighlightFields(); break;
+    case A::AddSignature:    doAddSignature(false); break;
+    case A::AddInitials:     doAddSignature(true);  break;
+    case A::Encrypt:      doEncrypt(); break;
+    case A::CertSign:     doSign(); break;
+    case A::Timestamp:    doTimestamp(); break;
+    case A::ManageCerts:  Pdf::runCertificateManager(this); break;
+    case A::ValidateSigs: doValidateSignatures(); break;
+    case A::ToWord:          doConvert(A::ToWord); break;
+    case A::ToExcel:         doConvert(A::ToExcel); break;
+    case A::ToPpt:           doConvert(A::ToPpt); break;
+    case A::ToPicture:       doConvert(A::ToPicture); break;
+    case A::ToText:          doConvert(A::ToText); break;
+    case A::ToImageOnlyPdf:  doConvert(A::ToImageOnlyPdf); break;
+    case A::ExtractPicture:  doConvert(A::ExtractPicture); break;
+    case A::OcrPdf:          doOcr(); break;
     case A::EditContent:     break;   // disabled button; unreachable
     default: break;
     }
@@ -1126,6 +1137,299 @@ void PdfModule::doImportComments() {
             return Pdf::importXfdf(in, src, out);
         });
     toast(r.ok ? tr("Comments imported.") : r.message);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// fill & sign
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PdfModule::doFillForm() {
+    const auto fields = Pdf::detectFormFields(m_session->currentRevisionPath());
+    if (fields.empty()) {
+        toast(tr("This PDF has no fillable form fields."));
+        return;
+    }
+
+    // Count text fields — only those are editable here.
+    std::vector<const Pdf::FormField*> textFields;
+    for (const auto& f : fields)
+        if (f.type == Pdf::FormField::Type::Text) textFields.push_back(&f);
+    if (textFields.empty()) {
+        toast(tr("This form has %1 field(s), but none are text fields we can fill yet.")
+                  .arg(fields.size()));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Fill out Form"));
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    dlg.resize(460, std::min(560, 80 + int(textFields.size()) * 46));
+    auto* outer = new QVBoxLayout(&dlg);
+
+    auto* scroll = new QScrollArea(&dlg);
+    scroll->setWidgetResizable(true);
+    auto* inner = new QWidget;
+    auto* form = new QFormLayout(inner);
+
+    std::vector<QLineEdit*> edits;
+    edits.reserve(textFields.size());
+    for (const Pdf::FormField* f : textFields) {
+        auto* edit = new QLineEdit(f->value, inner);
+        edit->setPlaceholderText(tr("(page %1)").arg(f->pageIndex + 1));
+        form->addRow(f->fullName, edit);
+        edits.push_back(edit);
+    }
+    scroll->setWidget(inner);
+    outer->addWidget(scroll, 1);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Apply"));
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    outer->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    std::map<QString, QString> values;
+    for (size_t i = 0; i < textFields.size(); ++i)
+        values[textFields[i]->fullName] = edits[i]->text();
+
+    const OpResult r = m_session->apply(tr("Fill form"),
+        [&values](const QString& in, const QString& out) {
+            return Pdf::fillTextFields(in, out, values);
+        });
+    toast(r.ok ? tr("Form filled.") : r.message);
+}
+
+void PdfModule::doHighlightFields() {
+    m_center->setCurrentIndex(0);
+    if (m_fieldsHighlighted) {
+        m_viewer->clearHighlights();
+        m_fieldsHighlighted = false;
+        return;
+    }
+    const auto fields = Pdf::detectFormFields(m_session->currentRevisionPath());
+    if (fields.empty()) { toast(tr("This PDF has no form fields.")); return; }
+
+    std::map<int, std::vector<QRectF>> byPage;
+    for (const auto& f : fields)
+        if (f.pageIndex >= 0) byPage[f.pageIndex].push_back(f.rect);
+    for (const auto& [page, rects] : byPage)
+        m_viewer->setHighlightRects(page, rects);
+    m_fieldsHighlighted = true;
+    toast(tr("Highlighted %1 field(s). Click again to hide.").arg(fields.size()));
+}
+
+void PdfModule::doAddSignature(bool initials) {
+    const QImage sig = Pdf::runSignatureDialog(this, initials);
+    if (sig.isNull()) return;
+
+    // Stash the signature to a temp PNG for the Picture-annotation placement.
+    const QString tmp = QDir::tempPath() + "/nosig_"
+        + QString::number(QDateTime::currentMSecsSinceEpoch()) + ".png";
+    if (!sig.save(tmp, "PNG")) { toast(tr("Could not prepare the signature image.")); return; }
+
+    m_pendingAnnotImage = tmp;
+    startCommentTool(int(AnnotSpec::Kind::Picture), Qt::transparent);
+    toast(initials ? tr("Drag a small box to place your initials.")
+                   : tr("Drag a box on the page to place your signature."));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// protect
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PdfModule::doEncrypt() {
+    const auto res = Pdf::runEncryptDialog(this);
+    if (!res.confirmed) return;
+
+    const QString base = QFileInfo(currentFilePath()).completeBaseName();
+    const QString suggested = QFileInfo(currentFilePath()).path()
+        + "/" + (base.isEmpty() ? "document" : base) + "-protected.pdf";
+    const QString out = QFileDialog::getSaveFileName(this, tr("Save Encrypted PDF"),
+        suggested, tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+
+    const OpResult r = Pdf::encryptDocument(m_session->currentRevisionPath(), out, res.options);
+    if (!r.ok) { toast(r.message); return; }
+
+    if (QMessageBox::question(this, tr("Encrypt"),
+            tr("Saved an encrypted copy to \"%1\".\nOpen it now?")
+                .arg(QFileInfo(out).fileName()))
+        == QMessageBox::Yes)
+        openPath(out);
+    else
+        toast(tr("Encrypted copy saved."));
+}
+
+void PdfModule::doSign() {
+    const auto res = Pdf::runSignDialog(this);
+    if (!res.confirmed) return;
+
+    const QString base = QFileInfo(currentFilePath()).completeBaseName();
+    const QString out = QFileDialog::getSaveFileName(this, tr("Save Signed PDF"),
+        QFileInfo(currentFilePath()).path() + "/" + (base.isEmpty() ? "document" : base) + "-signed.pdf",
+        tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+
+    const OpResult r = Pdf::signPdf(m_session->currentRevisionPath(), out, res.options);
+    if (!r.ok) { toast(r.message); return; }
+
+    if (QMessageBox::question(this, tr("Certificate Signature"),
+            tr("Signed copy saved to \"%1\".\nOpen it now?").arg(QFileInfo(out).fileName()))
+        == QMessageBox::Yes)
+        openPath(out);
+    else
+        toast(tr("Document signed."));
+}
+
+void PdfModule::doTimestamp() {
+    const QString tsa = Pdf::runTimestampDialog(this);
+    if (tsa.isEmpty()) return;
+
+    const QString base = QFileInfo(currentFilePath()).completeBaseName();
+    const QString out = QFileDialog::getSaveFileName(this, tr("Save Timestamped PDF"),
+        QFileInfo(currentFilePath()).path() + "/" + (base.isEmpty() ? "document" : base) + "-timestamped.pdf",
+        tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+
+    toast(tr("Contacting the timestamp authority…"));
+    QApplication::processEvents();
+    const OpResult r = Pdf::timestampPdf(m_session->currentRevisionPath(), out, tsa);
+    if (!r.ok) { toast(r.message); return; }
+    toast(tr("Timestamp added — saved to \"%1\".").arg(QFileInfo(out).fileName()));
+}
+
+void PdfModule::doValidateSignatures() {
+    const auto results = Pdf::validateSignatures(m_session->currentRevisionPath());
+    Pdf::showValidationReport(this, results);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// convert
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PdfModule::doConvert(PdfAction which) {
+    using A = PdfAction;
+    const QString src = m_session->currentRevisionPath();
+    const QString baseDir = QFileInfo(currentFilePath()).path();
+    const QString baseName = QFileInfo(currentFilePath()).completeBaseName().isEmpty()
+        ? QStringLiteral("document") : QFileInfo(currentFilePath()).completeBaseName();
+
+    auto saveAs = [&](const QString& filter, const QString& ext) {
+        QString out = QFileDialog::getSaveFileName(this, tr("Convert"),
+            baseDir + "/" + baseName + "." + ext, filter);
+        if (!out.isEmpty() && QFileInfo(out).suffix().isEmpty()) out += "." + ext;
+        return out;
+    };
+
+    Pdf::OpResult r{ false, tr("Unsupported conversion.") };
+    switch (which) {
+    case A::ToText: {
+        const QString out = saveAs(tr("Text files (*.txt)"), "txt");
+        if (out.isEmpty()) return;
+        r = Pdf::toTxt(src, out);
+        break;
+    }
+    case A::ToWord: {
+        const QString out = saveAs(tr("Word documents (*.docx)"), "docx");
+        if (out.isEmpty()) return;
+        r = Pdf::toDocx(src, out);
+        break;
+    }
+    case A::ToExcel: {
+        const QString out = saveAs(tr("Excel workbooks (*.xlsx)"), "xlsx");
+        if (out.isEmpty()) return;
+        r = Pdf::toXlsx(src, out);
+        break;
+    }
+    case A::ToPpt: {
+        const QString out = saveAs(tr("PowerPoint presentations (*.pptx)"), "pptx");
+        if (out.isEmpty()) return;
+        r = Pdf::toPptx(src, out, 150);
+        break;
+    }
+    case A::ToImageOnlyPdf: {
+        const QString out = saveAs(tr("PDF files (*.pdf)"), "pdf");
+        if (out.isEmpty()) return;
+        r = Pdf::toImageOnlyPdf(src, out, 150);
+        break;
+    }
+    case A::ToPicture:
+    case A::ExtractPicture: {
+        const QString dir = QFileDialog::getExistingDirectory(this,
+            which == A::ToPicture ? tr("Save Page Images To…") : tr("Extract Pictures To…"),
+            baseDir);
+        if (dir.isEmpty()) return;
+        QStringList written;
+        r = which == A::ToPicture
+            ? Pdf::toImages(src, dir, baseName, Pdf::RasterFormat::Png, 150, &written)
+            : Pdf::extractImages(src, dir, baseName, &written);
+        if (r.ok) { toast(tr("Wrote %1 image(s) to \"%2\".").arg(written.size()).arg(QDir(dir).dirName())); return; }
+        break;
+    }
+    default: break;
+    }
+
+    toast(r.ok ? tr("Converted successfully.") : r.message);
+}
+
+void PdfModule::doOcr() {
+    if (!Pdf::ocrAvailable()) {
+        toast(tr("OCR needs a Windows OCR language pack "
+                 "(Settings › Time & Language › Language › Optional features)."));
+        return;
+    }
+
+    const QStringList langs = Pdf::ocrLanguages();
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("OCR PDF"));
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* form = new QFormLayout(&dlg);
+    auto* langCombo = new QComboBox(&dlg);
+    langCombo->addItems(langs);
+    auto* dpiCombo = new QComboBox(&dlg);
+    dpiCombo->addItems({ "200 dpi (faster)", "300 dpi (recommended)", "400 dpi (best)" });
+    dpiCombo->setCurrentIndex(1);
+    form->addRow(tr("Language:"), langCombo);
+    form->addRow(tr("Resolution:"), dpiCombo);
+    form->addRow(new QLabel(tr("Adds an invisible, searchable text layer over the page images."), &dlg));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Run OCR"));
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    form->addRow(buttons);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QString lang = langCombo->currentText();
+    const int dpi = dpiCombo->currentIndex() == 0 ? 200 : dpiCombo->currentIndex() == 2 ? 400 : 300;
+
+    toast(tr("Recognizing text… this may take a moment."));
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QApplication::processEvents();
+
+    const OpResult r = m_session->apply(tr("OCR"),
+        [&lang, dpi](const QString& in, const QString& out) {
+            return Pdf::ocrPdf(in, out, lang, dpi);
+        });
+    QApplication::restoreOverrideCursor();
+    toast(r.ok ? tr("OCR complete — the text is now searchable (Ctrl+F).") : r.message);
+}
+
+void PdfModule::doPictureToPdf() {
+    const QStringList images = QFileDialog::getOpenFileNames(this,
+        tr("Pick images to combine into a PDF"), QDir::homePath(),
+        tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
+    if (images.isEmpty()) return;
+    const QString out = QFileDialog::getSaveFileName(this, tr("Save PDF"),
+        QFileInfo(images.first()).path() + "/images.pdf", tr("PDF files (*.pdf)"));
+    if (out.isEmpty()) return;
+    const OpResult r = Pdf::imagesToPdf(images, out);
+    if (!r.ok) { toast(r.message); return; }
+    if (QMessageBox::question(this, tr("Picture to PDF"),
+            tr("Created \"%1\".\nOpen it now?").arg(QFileInfo(out).fileName()))
+        == QMessageBox::Yes)
+        openPath(out);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

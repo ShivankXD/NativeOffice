@@ -93,6 +93,22 @@ private:
     void doAddBookmark();
     void doAddLink(int page, const QRectF& rectPt);
 
+    // ── fill & sign ─────────────────────────────────────────────────────
+    void doFillForm();
+    void doHighlightFields();
+    void doAddSignature(bool initials);
+
+    // ── protect ─────────────────────────────────────────────────────────
+    void doEncrypt();
+    void doSign();
+    void doTimestamp();
+    void doValidateSignatures();
+
+    // ── convert ─────────────────────────────────────────────────────────
+    void doConvert(PdfAction which);
+    void doPictureToPdf();
+    void doOcr();
+
     [[nodiscard]] std::vector<int> selectedOrCurrentPages() const;
 
     Pdf::EditSession* m_session   { nullptr };
@@ -114,6 +130,7 @@ private:
     QColor  m_pendingAnnotColor;
     QString m_pendingAnnotImage;            // image/attachment path for the pending tool
     bool    m_commentsHidden = false;
+    bool    m_fieldsHighlighted = false;
 };
 
 } // namespace NativeOffice
