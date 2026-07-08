@@ -346,16 +346,6 @@ QWidget* StartScreen::buildTopBar() {
         if (cb) connect(b, &QToolButton::clicked, this, cb);
         return b;
     };
-    // Light/dark chrome toggle — Home has no menu bar, so it lives here.
-    auto* themeBtn = iconBtn(ThemeManager::instance().isDark() ? Lucide::kSun : Lucide::kMoon, nullptr);
-    themeBtn->setToolTip("Toggle light / dark mode");
-    connect(themeBtn, &QToolButton::clicked, this, [themeBtn]() {
-        auto& tm = ThemeManager::instance();
-        tm.toggleMode();
-        themeBtn->setIcon(Lucide::icon(tm.isDark() ? Lucide::kSun : Lucide::kMoon,
-                                        "#AEB6C6", 17, themeBtn->devicePixelRatio()));
-    });
-    h->addWidget(themeBtn);
     h->addWidget(iconBtn(Lucide::kBell, nullptr));
     h->addWidget(iconBtn(Lucide::kHelp, nullptr));
     h->addWidget(iconBtn(Lucide::kSettings, [this]{ showSettingsDialog(); }));

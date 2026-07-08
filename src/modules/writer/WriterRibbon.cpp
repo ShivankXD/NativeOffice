@@ -1457,7 +1457,7 @@ QWidget* WriterRibbon::buildHomeTab() {
             sw->setCursor(Qt::PointingHandCursor);
             sw->setToolTip(hex);
             sw->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #C6CAD3;border-radius:3px;}"
-                                      "QToolButton:hover{border:2px solid #E8372A;}").arg(hex));
+                                      "QToolButton:hover{border:2px solid #6D5BE8;}").arg(hex));
             const QColor c(hex);
             connect(sw, &QToolButton::clicked, this, [this, c, menu] {
                 m_fontColor = c;
@@ -1500,7 +1500,7 @@ QWidget* WriterRibbon::buildHomeTab() {
             sw->setCursor(Qt::PointingHandCursor);
             sw->setToolTip(hex);
             sw->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #C6CAD3;border-radius:3px;}"
-                                      "QToolButton:hover{border:2px solid #E8372A;}").arg(hex));
+                                      "QToolButton:hover{border:2px solid #6D5BE8;}").arg(hex));
             const QColor c(hex);
             connect(sw, &QToolButton::clicked, this, [this, c, menu] {
                 m_highlightColor = c;
@@ -1638,7 +1638,7 @@ QWidget* WriterRibbon::buildHomeTab() {
             auto* sw = new QToolButton(grid);
             sw->setFixedSize(22, 22); sw->setCursor(Qt::PointingHandCursor); sw->setToolTip(hex);
             sw->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #C6CAD3;border-radius:3px;}"
-                                      "QToolButton:hover{border:2px solid #E8372A;}").arg(hex));
+                                      "QToolButton:hover{border:2px solid #6D5BE8;}").arg(hex));
             const QColor c(hex);
             connect(sw, &QToolButton::clicked, this, [this, c, menu] { applyShading(c); menu->hide(); });
             gl->addWidget(sw, i / 6, i % 6); ++i;
@@ -2506,7 +2506,7 @@ QWidget* WriterRibbon::buildPageLayoutTab() {
             auto* sw = new QToolButton(grid);
             sw->setFixedSize(22, 22); sw->setCursor(Qt::PointingHandCursor); sw->setToolTip(hex);
             sw->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #C6CAD3;border-radius:3px;}"
-                                      "QToolButton:hover{border:2px solid #E8372A;}").arg(hex));
+                                      "QToolButton:hover{border:2px solid #6D5BE8;}").arg(hex));
             const QColor c(hex);
             connect(sw, &QToolButton::clicked, this, [this, c, menu] { emit pageColorRequested(c); menu->hide(); });
             gl->addWidget(sw, i / 6, i % 6); ++i;
@@ -3009,7 +3009,7 @@ QWidget* WriterRibbon::buildTableTab() {
             auto* sw = new QToolButton(grid);
             sw->setFixedSize(22, 22); sw->setCursor(Qt::PointingHandCursor); sw->setToolTip(hex);
             sw->setStyleSheet(QString("QToolButton{background:%1;border:1px solid #C6CAD3;border-radius:3px;}"
-                                      "QToolButton:hover{border:2px solid #E8372A;}").arg(hex));
+                                      "QToolButton:hover{border:2px solid #6D5BE8;}").arg(hex));
             const QColor c(hex);
             connect(sw, &QToolButton::clicked, this, [this, c, menu]{ TableOps::setCellShading(m_editor, c); menu->hide(); m_editor->setFocus(); });
             gl->addWidget(sw, i / 6, i % 6); ++i;
@@ -5660,7 +5660,7 @@ QComboBox#ribbonCombo {
     font-family: "Segoe UI", "Inter", sans-serif;
 }
 QComboBox#ribbonCombo:hover { border-color: #3A4456; background-color: #17233B; }
-QComboBox#ribbonCombo:focus { border-color: #E8372A; }
+QComboBox#ribbonCombo:focus { border-color: #6D5BE8; }
 QComboBox#ribbonCombo::drop-down {
     subcontrol-origin: padding; subcontrol-position: center right; border: none; width: 16px;
 }
@@ -5670,7 +5670,7 @@ QComboBox QAbstractItemView {
     color: #E6E9F0;
     border: 1px solid #2A3344;
     border-radius: 6px;
-    selection-background-color: #E8372A;
+    selection-background-color: #6D5BE8;
     selection-color: #FFFFFF;
     outline: none;
     padding: 4px;
@@ -5726,12 +5726,12 @@ QToolButton#ribbonTabBtn:hover {
 QToolButton#ribbonTabBtn:checked {
     color: #1C1E26;
     background-color: #FFFFFF;
-    border-bottom: 2px solid #E8372A;
+    border-bottom: 2px solid #6D5BE8;
     font-weight: 700;
 }
 QToolButton#ribbonTableTabBtn {
-    color: #C0271C;
-    background: #FCE4E2;
+    color: #4C3BD6;
+    background: #EDE9FC;
     border: none;
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
@@ -5741,11 +5741,11 @@ QToolButton#ribbonTableTabBtn {
     font-family: "Segoe UI", "Inter", sans-serif;
     font-weight: 600;
 }
-QToolButton#ribbonTableTabBtn:hover { background: #F8D2CE; color: #A21D14; }
+QToolButton#ribbonTableTabBtn:hover { background: #DFD8FA; color: #3D2EC0; }
 QToolButton#ribbonTableTabBtn:checked {
     color: #FFFFFF;
-    background-color: #E8372A;
-    border-bottom: 2px solid #E8372A;
+    background-color: #6D5BE8;
+    border-bottom: 2px solid #6D5BE8;
     font-weight: 700;
 }
 QStackedWidget#ribbonStack { background-color: #FFFFFF; }
@@ -5774,9 +5774,9 @@ QToolButton#ribbonToolBtn:hover {
     background: #ECEEF2; color: #1C1E26; border-color: #DCDFE6;
 }
 QToolButton#ribbonToolBtn:checked {
-    background-color: #FCE4E2; color: #C0271C; border-color: #E8372A; font-weight: 700;
+    background-color: #EDE9FC; color: #4C3BD6; border-color: #6D5BE8; font-weight: 700;
 }
-QToolButton#ribbonToolBtn:pressed { background-color: #F6D2CE; }
+QToolButton#ribbonToolBtn:pressed { background-color: #DFD8FA; }
 QToolButton#ribbonToolBtn:disabled { color: #C2C6CE; }
 QToolButton#ribbonToolBtn::menu-button { width: 12px; border: none; background: transparent; }
 QToolButton#ribbonToolBtn::menu-arrow { image: url("%1"); width: 8px; height: 5px; }
@@ -5794,9 +5794,9 @@ QToolButton#ribbonBigBtn:hover {
     background: #ECEEF2; color: #1C1E26; border-color: #DCDFE6;
 }
 QToolButton#ribbonBigBtn:checked {
-    background-color: #FCE4E2; color: #C0271C; border-color: #E8372A; font-weight: 700;
+    background-color: #EDE9FC; color: #4C3BD6; border-color: #6D5BE8; font-weight: 700;
 }
-QToolButton#ribbonBigBtn:pressed { background-color: #F6D2CE; }
+QToolButton#ribbonBigBtn:pressed { background-color: #DFD8FA; }
 QToolButton#ribbonBigBtn::menu-button { width: 14px; border: none; background: transparent; }
 QToolButton#ribbonBigBtn::menu-arrow { image: url("%1"); width: 8px; height: 5px; }
 QToolButton#ribbonStyleBtn {
@@ -5809,7 +5809,7 @@ QToolButton#ribbonStyleBtn {
 }
 QToolButton#ribbonStyleBtn:hover { border-color: #B9BEC9; background: #F7F8FA; }
 QToolButton#ribbonStyleBtn:checked {
-    background-color: #FCE4E2; color: #C0271C; border-color: #E8372A;
+    background-color: #EDE9FC; color: #4C3BD6; border-color: #6D5BE8;
 }
 QComboBox#ribbonCombo {
     background-color: #FFFFFF;
@@ -5822,7 +5822,7 @@ QComboBox#ribbonCombo {
     font-family: "Segoe UI", "Inter", sans-serif;
 }
 QComboBox#ribbonCombo:hover { border-color: #9CA3AF; background-color: #FAFBFC; }
-QComboBox#ribbonCombo:focus { border-color: #E8372A; }
+QComboBox#ribbonCombo:focus { border-color: #6D5BE8; }
 QComboBox#ribbonCombo::drop-down {
     subcontrol-origin: padding; subcontrol-position: center right; border: none; width: 16px;
 }
@@ -5832,7 +5832,7 @@ QComboBox QAbstractItemView {
     color: #1C1E26;
     border: 1px solid #D5D8DF;
     border-radius: 6px;
-    selection-background-color: #E8372A;
+    selection-background-color: #6D5BE8;
     selection-color: #FFFFFF;
     outline: none;
     padding: 4px;
@@ -5849,8 +5849,8 @@ QToolButton#ribbonRowBtn {
     text-align: left;
 }
 QToolButton#ribbonRowBtn:hover { background: #ECEEF2; color: #1C1E26; border-color: #DCDFE6; }
-QToolButton#ribbonRowBtn:checked { background-color: #FCE4E2; color: #C0271C; border-color: #E8372A; }
-QToolButton#ribbonRowBtn:pressed { background-color: #F6D2CE; }
+QToolButton#ribbonRowBtn:checked { background-color: #EDE9FC; color: #4C3BD6; border-color: #6D5BE8; }
+QToolButton#ribbonRowBtn:pressed { background-color: #DFD8FA; }
 QToolButton#ribbonRowBtn::menu-indicator { image: url("%1"); subcontrol-position: right center; width: 8px; }
 QFrame#ribbonSep { background-color: #E2E4E9; border: none; margin: 6px 2px 16px 2px; }
 QMenu {
@@ -5859,7 +5859,7 @@ QMenu {
     font-family: "Segoe UI", "Inter", sans-serif; font-size: 12px;
 }
 QMenu::item { padding: 6px 18px; border-radius: 5px; }
-QMenu::item:selected { background-color: #FCE4E2; color: #C0271C; }
+QMenu::item:selected { background-color: #EDE9FC; color: #4C3BD6; }
 QMenu::separator { height: 1px; background: #E2E4E9; margin: 4px 8px; }
 )").arg(arrowPath));
     }

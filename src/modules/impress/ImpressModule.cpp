@@ -13,6 +13,7 @@
 #include "PresentModeWindow.h"
 #include "PptxImport.h"
 #include "core/theme/ThemeManager.h"
+#include "core/common/BrandBar.h"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -224,13 +225,18 @@ void ImpressModule::buildUi() {
     connect(m_ribbon, &ImpressRibbon::undoRequested, this, &ImpressModule::undo);
     connect(m_ribbon, &ImpressRibbon::redoRequested, this, &ImpressModule::redo);
 
-    // Keep the always-visible brand-bar undo/redo buttons in step with the stack.
-    auto refreshUndoButtons = [this] {
-        if (m_brandUndoBtn) m_brandUndoBtn->setEnabled(m_undoStack->canUndo());
-        if (m_brandRedoBtn) m_brandRedoBtn->setEnabled(m_undoStack->canRedo());
+    // Undo/redo keyboard shortcuts (the brand tray no longer carries buttons).
+    // WidgetWithChildrenShortcut keeps them scoped to this tab so multiple open
+    // documents in the shell don't fight over Ctrl+Z; the notes QTextEdit still
+    // wins while focused because it consumes the key via ShortcutOverride.
+    auto addSc = [this](const QKeySequence& seq, void (ImpressModule::*slot)()) {
+        auto* sc = new QShortcut(seq, this);
+        sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(sc, &QShortcut::activated, this, slot);
     };
-    connect(m_undoStack, &QUndoStack::canUndoChanged, this, [refreshUndoButtons](bool){ refreshUndoButtons(); });
-    connect(m_undoStack, &QUndoStack::canRedoChanged, this, [refreshUndoButtons](bool){ refreshUndoButtons(); });
+    addSc(QKeySequence::Undo, &ImpressModule::undo);                    // Ctrl+Z
+    addSc(QKeySequence::Redo, &ImpressModule::redo);                    // Ctrl+Y
+    addSc(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), &ImpressModule::redo);
 
     connect(m_ribbon, &ImpressRibbon::insertModeChanged, this, [this](InsertMode mode) {
         if (m_currentIdx >= 0 && m_currentIdx < static_cast<int>(m_scenes.size()))
@@ -484,168 +490,11 @@ void ImpressModule::buildUi() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Brand tray — logo + tagline pinned top-left on a translucent white card
+// Brand tray — the shared NativeOffice brand bar (logo mark, wordmark, plan
+// pill). Undo/redo live on keyboard shortcuts, not tray buttons.
 // ─────────────────────────────────────────────────────────────────────────────
-// ── Full-width brand banner ──────────────────────────────────────────────────
-// A custom-painted bar that spans the whole window width: a white surface with
-// soft decorative clouds, a dot grid and a ring on the right, and the logo card
-// + rocket + tagline on the left.
-namespace {
-// Undo / redo glyphs (a curved arrow + arrowhead), matching the ribbon icons.
-QIcon navIcon(bool redo) {
-    QPixmap pm(40, 40);
-    pm.fill(Qt::transparent);
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing);
-    QPen pen(QColor("#2C3140"), 2.6);
-    pen.setCapStyle(Qt::RoundCap);
-    pen.setJoinStyle(Qt::RoundJoin);
-    p.setPen(pen);
-    p.setBrush(Qt::NoBrush);
-    QPainterPath path;
-    QPolygonF h;
-    if (!redo) {
-        path.moveTo(12, 18); path.cubicTo(17, 9, 28, 10, 30, 21);
-        h << QPointF(7, 15) << QPointF(16, 14) << QPointF(11, 23);
-    } else {
-        path.moveTo(28, 18); path.cubicTo(23, 9, 12, 10, 10, 21);
-        h << QPointF(33, 15) << QPointF(24, 14) << QPointF(29, 23);
-    }
-    p.drawPath(path);
-    p.setBrush(QColor("#2C3140"));
-    p.setPen(Qt::NoPen);
-    p.drawPolygon(h);
-    return QIcon(pm);
-}
-
-class BrandBar : public QWidget {
-public:
-    explicit BrandBar(QWidget* parent = nullptr) : QWidget(parent) {}
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-
-        const double W = width(), H = height();
-        p.fillRect(rect(), QColor("#FFFFFF"));
-
-        p.setPen(Qt::NoPen);
-
-        // Soft cloud cluster anchored to the bottom-right corner (img1 motif).
-        p.setBrush(QColor("#CFE0F8"));
-        p.drawEllipse(QRectF(W - 160, H - 18, 56, 56));
-        p.drawEllipse(QRectF(W - 110, H - 42, 88, 88));
-        p.drawEllipse(QRectF(W - 40,  H - 20, 64, 64));
-        p.setBrush(QColor("#B7CFF4"));
-        p.drawEllipse(QRectF(W - 118, H - 10, 52, 52));
-        p.drawEllipse(QRectF(W - 64,  H - 16, 60, 60));
-
-        // A solid accent dot resting just above the cloud.
-        p.setBrush(QColor("#7FAEEE"));
-        p.drawEllipse(QRectF(W - 125, 8, 10, 10));
-
-        // Thin teal ring near the top-right.
-        p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(QColor("#54C7C2"), 2));
-        p.drawEllipse(QRectF(W - 35, 6, 14, 14));
-
-        // A small 3×3 grid of dots to the left of the cloud.
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor("#AFC3E6"));
-        const double gx = W - 212.0, gy = (H - 22) / 2.0 + 1.0, step = 10.0;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                p.drawEllipse(QRectF(gx + c * step - 2, gy + r * step - 2, 4, 4));
-
-        // Bottom hairline separator.
-        p.setPen(QPen(QColor("#E2E4E9"), 1));
-        p.drawLine(QPointF(0, H - 0.5), QPointF(W, H - 0.5));
-    }
-};
-} // namespace
-
 QWidget* ImpressModule::buildBrandBar() {
-    auto* bar = new BrandBar(this);
-    bar->setObjectName("impressBrandBar");
-    bar->setFixedHeight(54);
-    bar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    auto* barLayout = new QHBoxLayout(bar);
-    barLayout->setContentsMargins(16, 0, 16, 0);
-    barLayout->setSpacing(12);
-
-    // Logo (logo.jpg) inside a rounded white card.
-    auto* card = new QFrame(bar);
-    card->setObjectName("impressBrandLogoCard");
-    auto* cardLayout = new QHBoxLayout(card);
-    cardLayout->setContentsMargins(9, 4, 9, 4);
-    cardLayout->setSpacing(0);
-
-    auto* logo = new QLabel(card);
-    logo->setObjectName("impressBrandLogo");
-    QPixmap pm(":/assets/logo.jpg");
-    if (!pm.isNull()) {
-        logo->setPixmap(pm.scaledToHeight(26, Qt::SmoothTransformation));
-    } else {
-        logo->setText("NP");   // graceful fallback if the resource is missing
-    }
-    logo->setAlignment(Qt::AlignCenter);
-    cardLayout->addWidget(logo);
-
-    // Vertical divider.
-    auto* divider = new QFrame(bar);
-    divider->setObjectName("impressBrandDivider");
-    divider->setFrameShape(QFrame::VLine);
-    divider->setFixedSize(1, 24);
-
-    // Rocket glyph.
-    auto* rocket = new QLabel(QString::fromUtf8("\xF0\x9F\x9A\x80"), bar);  // 🚀
-    rocket->setObjectName("impressBrandRocket");
-
-    // Tagline: bold product name + lighter strapline.
-    auto* tagline = new QLabel(bar);
-    tagline->setObjectName("impressBrandText");
-    tagline->setTextFormat(Qt::RichText);
-    tagline->setText(
-        "<span style='color:#1A2233; font-weight:800;'>NativeOffice</span>"
-        "<span style='color:#5A6071;'>&nbsp;&nbsp;is your go to OfficeSuite!</span>");
-
-    // Always-visible quick-access undo / redo (independent of the ribbon tab).
-    auto makeNavBtn = [bar](const QIcon& icon, const QString& tip,
-                            const QKeySequence& sc) {
-        auto* b = new QToolButton(bar);
-        b->setObjectName("impressBrandNavBtn");
-        b->setIcon(icon);
-        b->setIconSize(QSize(22, 22));
-        b->setToolTip(tip);
-        b->setCursor(Qt::PointingHandCursor);
-        b->setFixedSize(32, 32);
-        b->setShortcut(sc);
-        b->setEnabled(false);
-        return b;
-    };
-    m_brandUndoBtn = makeNavBtn(navIcon(false), "Undo (Ctrl+Z)", QKeySequence::Undo);
-    m_brandRedoBtn = makeNavBtn(navIcon(true),  "Redo (Ctrl+Y)", QKeySequence::Redo);
-    connect(m_brandUndoBtn, &QToolButton::clicked, this, &ImpressModule::undo);
-    connect(m_brandRedoBtn, &QToolButton::clicked, this, &ImpressModule::redo);
-
-    auto* navDivider = new QFrame(bar);
-    navDivider->setObjectName("impressBrandDivider");
-    navDivider->setFrameShape(QFrame::VLine);
-    navDivider->setFixedSize(1, 24);
-
-    barLayout->addWidget(card, 0, Qt::AlignVCenter);
-    barLayout->addWidget(divider, 0, Qt::AlignVCenter);
-    barLayout->addWidget(rocket, 0, Qt::AlignVCenter);
-    barLayout->addWidget(tagline, 0, Qt::AlignVCenter);
-    barLayout->addSpacing(18);
-    barLayout->addWidget(navDivider, 0, Qt::AlignVCenter);
-    barLayout->addSpacing(8);
-    barLayout->addWidget(m_brandUndoBtn, 0, Qt::AlignVCenter);
-    barLayout->addWidget(m_brandRedoBtn, 0, Qt::AlignVCenter);
-    barLayout->addStretch();
-    return bar;
+    return new BrandBar(this);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -865,7 +714,7 @@ void ImpressModule::showTemplatesGallery() {
         btn->setFixedSize(268, 160);
         btn->setCursor(Qt::PointingHandCursor);
         btn->setStyleSheet("QToolButton{border:1px solid #D7DAE0; border-radius:6px; background:#fff;}"
-                           "QToolButton:hover{border:2px solid #E8372A;}");
+                           "QToolButton:hover{border:2px solid #6D5BE8;}");
         const SlideData chosen = tpl;
         connect(btn, &QToolButton::clicked, &dlg, [this, &dlg, chosen] {
             applyTemplate(chosen);
@@ -1383,46 +1232,6 @@ void ImpressModule::applyStyles() {
 QWidget#impressModule {
     background-color: #E8E9ED;
 }
-QFrame#impressBrandLogoCard {
-    background-color: #FFFFFF;
-    border: 1px solid #EDF0F6;
-    border-radius: 10px;
-}
-QLabel#impressBrandLogo {
-    background: transparent;
-    color: #E8372A;
-    font-size: 14px;
-    font-weight: 900;
-    font-family: "Segoe UI", sans-serif;
-    min-width: 26px;
-}
-QFrame#impressBrandDivider {
-    color: #DCE0E8;
-    background-color: #DCE0E8;
-    border: none;
-}
-QLabel#impressBrandRocket {
-    background: transparent;
-    font-size: 20px;
-    font-family: "Segoe UI Emoji", "Segoe UI", sans-serif;
-}
-QToolButton#impressBrandNavBtn {
-    background: transparent;
-    border: none;
-    border-radius: 7px;
-}
-QToolButton#impressBrandNavBtn:hover {
-    background-color: #ECEEF3;
-}
-QToolButton#impressBrandNavBtn:pressed {
-    background-color: #DDE0E8;
-}
-QLabel#impressBrandText {
-    background: transparent;
-    color: #2C3140;
-    font-size: 15px;
-    font-family: "Segoe UI", "Inter", sans-serif;
-}
 QWidget#impressBody {
     background-color: #E8E9ED;
 }
@@ -1445,7 +1254,7 @@ QTabWidget#impressLeftTabs QTabBar::tab {
 QTabWidget#impressLeftTabs QTabBar::tab:selected {
     background: #F3F4F6;
     color: #1C1E26;
-    border-top: 2px solid #E8372A;
+    border-top: 2px solid #6D5BE8;
 }
 QTextEdit#impressNotes {
     background-color: #FFFFFF;

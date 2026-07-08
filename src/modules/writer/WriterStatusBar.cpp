@@ -161,11 +161,11 @@ QSlider#statusZoomSlider::handle:horizontal {
     width: 12px;
     height: 12px;
     margin: -4px 0;
-    background: #E8372A;
+    background: #6D5BE8;
     border-radius: 6px;
 }
 QSlider#statusZoomSlider::handle:horizontal:hover {
-    background: #FF5247;
+    background: #8674F0;
 }
 )");
     } else {
@@ -210,8 +210,8 @@ QToolButton#statusViewBtn:hover {
     color: #1C1E26;
 }
 QToolButton#statusViewBtn:checked {
-    background: #FCE4E2;
-    color: #C0271C;
+    background: #EDE9FC;
+    color: #4C3BD6;
 }
 QSlider#statusZoomSlider::groove:horizontal {
     height: 4px;
@@ -222,11 +222,11 @@ QSlider#statusZoomSlider::handle:horizontal {
     width: 12px;
     height: 12px;
     margin: -4px 0;
-    background: #E8372A;
+    background: #6D5BE8;
     border-radius: 6px;
 }
 QSlider#statusZoomSlider::handle:horizontal:hover {
-    background: #FF5247;
+    background: #8674F0;
 }
 )");
     }

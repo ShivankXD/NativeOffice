@@ -11,6 +11,8 @@ add_library(NativeOfficeCore STATIC
     auth/AuthManager.h
     auth/SecureStore.cpp
     auth/SecureStore.h
+    common/BrandBar.cpp
+    common/BrandBar.h
 )
 
 target_include_directories(NativeOfficeCore PUBLIC

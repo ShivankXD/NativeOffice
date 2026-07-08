@@ -67,7 +67,7 @@ QTreeWidget::item:hover {
     background-color: #1E2737;
 }
 QTreeWidget::item:selected {
-    background-color: #E8372A;
+    background-color: #6D5BE8;
     color: #FFFFFF;
 }
 )");
@@ -88,7 +88,7 @@ QTreeWidget::item:hover {
     background-color: #E7E9EE;
 }
 QTreeWidget::item:selected {
-    background-color: #E8372A;
+    background-color: #6D5BE8;
     color: #FFFFFF;
 }
 )");

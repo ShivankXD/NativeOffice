@@ -1,0 +1,147 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// BrandBar.cpp
+// ─────────────────────────────────────────────────────────────────────────────
+#include "common/BrandBar.h"
+
+#include "auth/AuthManager.h"
+#include "theme/ThemeManager.h"
+
+#include <QFont>
+#include <QFontMetrics>
+#include <QLinearGradient>
+#include <QPainter>
+
+namespace NativeOffice {
+
+BrandBar::BrandBar(QWidget* parent)
+    : QWidget(parent)
+{
+    setObjectName("brandBar");
+    setFixedHeight(44);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    // The logo artwork is a full lockup (mark + wordmark + strapline); the
+    // text is unreadable at tray size, so crop just the "N" mark out of it.
+    // Fractions measured against the shipped 1254×1254 asset.
+    const QPixmap full(QStringLiteral(":/assets/nativeoffice-logo.png"));
+    if (!full.isNull()) {
+        const QRect markRect(int(full.width()  * 0.205),
+                             int(full.height() * 0.115),
+                             int(full.width()  * 0.600),
+                             int(full.height() * 0.555));
+        m_mark = full.copy(markRect);
+    }
+
+    auto& auth = AuthManager::instance();
+    m_premium  = auth.premiumActive();
+    connect(&auth, &AuthManager::entitlementChanged,
+            this, [this](bool on) { m_premium = on; update(); });
+    connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
+            this, [this](ThemeMode) { update(); });
+}
+
+void BrandBar::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+    const bool dark = ThemeManager::instance().isDark();
+    const int  w = width(), h = height();
+
+    p.fillRect(rect(), QColor(dark ? "#0D1117" : "#FFFFFF"));
+
+    // ── Plan pill (far right) — measure first so decorations can avoid it ──
+    QFont pillFont("Segoe UI");
+    pillFont.setBold(true);
+    pillFont.setPixelSize(11);
+    pillFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.8);
+    const QString planText = m_premium ? QStringLiteral("PREMIUM")
+                                       : QStringLiteral("FREE");
+    const QFontMetrics pfm(pillFont);
+    const qreal pillW = pfm.horizontalAdvance(planText) + 26;
+    const qreal pillH = 22;
+    const QRectF pill(w - 14 - pillW, (h - pillH) / 2.0, pillW, pillH);
+
+    // ── Right-side decorations (soft clouds, dot grid, accents) ────────────
+    p.setPen(Qt::NoPen);
+    const qreal dx = pill.left() - 12;   // decorations end here
+    p.setBrush(QColor(dark ? "#141C2E" : "#E2EAF8"));
+    p.drawEllipse(QPointF(dx - 44, h + 8), 40, 26);
+    p.drawEllipse(QPointF(dx, h + 10), 50, 32);
+    p.setBrush(QColor(dark ? "#1A2540" : "#CFDCF4"));
+    p.drawEllipse(QPointF(dx + 22, h + 6), 44, 28);
+
+    p.setBrush(QColor(dark ? "#33405C" : "#C3C8D4"));
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            p.drawEllipse(QPointF(dx - 162 + c * 6.5, h / 2.0 - 6.5 + r * 6.5), 1.5, 1.5);
+
+    p.setBrush(QColor("#3B82F6"));
+    p.drawEllipse(QPointF(dx - 124, h / 2.0 - 7), 3.4, 3.4);
+    p.setBrush(Qt::NoBrush);
+    QPen ring(QColor("#34B6A7"));
+    ring.setWidthF(1.7);
+    p.setPen(ring);
+    p.drawEllipse(QPointF(dx - 102, h / 2.0 + 4), 5.5, 5.5);
+
+    // ── Plan pill on top of the art ─────────────────────────────────────────
+    p.setFont(pillFont);
+    if (m_premium) {
+        QLinearGradient grad(pill.topLeft(), pill.bottomRight());
+        grad.setColorAt(0.0, QColor("#F6C34C"));
+        grad.setColorAt(1.0, QColor("#E8930C"));
+        p.setPen(Qt::NoPen);
+        p.setBrush(grad);
+        p.drawRoundedRect(pill, pillH / 2, pillH / 2);
+        p.setPen(QColor("#FFFFFF"));
+    } else {
+        p.setPen(QPen(QColor(dark ? "#2A3550" : "#D8DCE5"), 1));
+        p.setBrush(QColor(dark ? "#12161F" : "#F7F8FA"));
+        p.drawRoundedRect(pill, pillH / 2, pillH / 2);
+        p.setPen(QColor(dark ? "#9AA4B8" : "#6B7280"));
+    }
+    p.drawText(pill, Qt::AlignCenter, planText);
+
+    // ── Left: brand mark in a rounded white card ────────────────────────────
+    const QRectF card(12, (h - 30) / 2.0, 30, 30);
+    p.setPen(QPen(QColor(dark ? "#2A3140" : "#DADDE4"), 1));
+    p.setBrush(Qt::white);
+    p.drawRoundedRect(card, 8, 8);
+    if (!m_mark.isNull()) {
+        QRectF img = card.adjusted(3, 3, -3, -3);
+        const qreal aspect = qreal(m_mark.width()) / qreal(m_mark.height());
+        if (aspect > 1.0) {          // wider than tall: pin width, centre height
+            const qreal ih = img.width() / aspect;
+            img = QRectF(img.left(), img.center().y() - ih / 2, img.width(), ih);
+        } else {
+            const qreal iw = img.height() * aspect;
+            img = QRectF(img.center().x() - iw / 2, img.top(), iw, img.height());
+        }
+        p.drawPixmap(img, m_mark, m_mark.rect());
+    }
+
+    // Divider between the mark and the wordmark.
+    p.setPen(QPen(QColor(dark ? "#1B212C" : "#E6E8ED"), 1));
+    p.drawLine(QPointF(54, 10), QPointF(54, h - 10));
+
+    // Two-tone wordmark, echoing the logo art: "Native" ink + "Office" violet.
+    QFont wf("Segoe UI");
+    wf.setBold(true);
+    wf.setPixelSize(15);
+    p.setFont(wf);
+    const QFontMetrics wfm(wf);
+    const int tx = 66;
+    p.setPen(QColor(dark ? "#E6E9F0" : "#1C2333"));
+    p.drawText(QRectF(tx, 0, wfm.horizontalAdvance("Native") + 2, h),
+               Qt::AlignVCenter | Qt::AlignLeft, "Native");
+    p.setPen(QColor(dark ? "#9D8CFF" : "#6D5BE8"));
+    p.drawText(QRectF(tx + wfm.horizontalAdvance("Native") + 1, 0,
+                      wfm.horizontalAdvance("Office") + 4, h),
+               Qt::AlignVCenter | Qt::AlignLeft, "Office");
+
+    // Bottom hairline.
+    p.setPen(QPen(QColor(dark ? "#1B212C" : "#E4E6EB"), 1));
+    p.drawLine(0, h - 1, w, h - 1);
+}
+
+} // namespace NativeOffice

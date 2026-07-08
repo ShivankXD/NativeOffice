@@ -958,7 +958,7 @@ QWidget* ImpressRibbon::buildDesignTab() {
         btn->setFixedSize(26, 26);
         btn->setCursor(Qt::PointingHandCursor);
         btn->setToolTip(c.name());
-        btn->setStyleSheet(QString("QToolButton { background-color: %1; border: 1px solid #C6CAD3; border-radius: 4px; } QToolButton:hover { border: 2px solid #E8372A; }")
+        btn->setStyleSheet(QString("QToolButton { background-color: %1; border: 1px solid #C6CAD3; border-radius: 4px; } QToolButton:hover { border: 2px solid #6D5BE8; }")
                             .arg(c.name()));
         connect(btn, &QToolButton::clicked, this, [this, c]{
             if (m_designAllBtn && m_designAllBtn->isChecked()) emit designColorAllRequested(c);
@@ -1367,7 +1367,7 @@ QToolButton#ribbonTabBtn:hover {
 QToolButton#ribbonTabBtn:checked {
     color: #E6E9F0;
     background-color: #12161F;
-    border-bottom: 2px solid #E8372A;
+    border-bottom: 2px solid #6D5BE8;
     font-weight: 700;
 }
 QStackedWidget#ribbonStack {
@@ -1395,7 +1395,7 @@ QToolButton#ribbonToolBtn:hover {
 QToolButton#ribbonToolBtn:checked {
     background-color: #3A1F1F;
     color: #FF9A8C;
-    border-color: #E8372A;
+    border-color: #6D5BE8;
     font-weight: 700;
 }
 QToolButton#ribbonToolBtn:pressed {
@@ -1422,7 +1422,7 @@ QToolButton#ribbonBigBtn:hover {
 QToolButton#ribbonBigBtn:checked {
     background-color: #3A1F1F;
     color: #FF9A8C;
-    border-color: #E8372A;
+    border-color: #6D5BE8;
     font-weight: 700;
 }
 QToolButton#ribbonBigBtn:pressed {
@@ -1435,7 +1435,7 @@ QToolButton#ribbonThemeBtn {
     padding: 2px;
 }
 QToolButton#ribbonThemeBtn:hover {
-    border: 2px solid #E8372A;
+    border: 2px solid #6D5BE8;
 }
 QToolButton#ribbonCmdBtn {
     color: #E6E9F0;
@@ -1455,7 +1455,7 @@ QToolButton#ribbonCmdBtn:hover {
 QToolButton#ribbonCmdBtn:checked {
     background-color: #3A1F1F;
     color: #FF9A8C;
-    border-color: #E8372A;
+    border-color: #6D5BE8;
     font-weight: 600;
 }
 QToolButton#ribbonCmdBtn:pressed {
@@ -1476,7 +1476,7 @@ QComboBox#ribbonCombo:hover {
     background-color: #17233B;
 }
 QComboBox#ribbonCombo:focus {
-    border-color: #E8372A;
+    border-color: #6D5BE8;
 }
 QComboBox#ribbonCombo::drop-down {
     subcontrol-origin: padding;
@@ -1494,7 +1494,7 @@ QComboBox QAbstractItemView {
     color: #E6E9F0;
     border: 1px solid #2A3344;
     border-radius: 6px;
-    selection-background-color: #E8372A;
+    selection-background-color: #6D5BE8;
     selection-color: #FFFFFF;
     outline: none;
     padding: 4px;
@@ -1537,7 +1537,7 @@ QToolButton#ribbonTabBtn:hover {
 QToolButton#ribbonTabBtn:checked {
     color: #1C1E26;
     background-color: #FFFFFF;
-    border-bottom: 2px solid #E8372A;
+    border-bottom: 2px solid #6D5BE8;
     font-weight: 700;
 }
 QStackedWidget#ribbonStack {
@@ -1563,13 +1563,13 @@ QToolButton#ribbonToolBtn:hover {
     border-color: #DCDFE6;
 }
 QToolButton#ribbonToolBtn:checked {
-    background-color: #FCE4E2;
-    color: #C0271C;
-    border-color: #E8372A;
+    background-color: #EDE9FC;
+    color: #4C3BD6;
+    border-color: #6D5BE8;
     font-weight: 700;
 }
 QToolButton#ribbonToolBtn:pressed {
-    background-color: #F6D2CE;
+    background-color: #DFD8FA;
 }
 QToolButton#ribbonToolBtn:disabled {
     color: #C2C6CE;
@@ -1590,13 +1590,13 @@ QToolButton#ribbonBigBtn:hover {
     border-color: #DCDFE6;
 }
 QToolButton#ribbonBigBtn:checked {
-    background-color: #FCE4E2;
-    color: #C0271C;
-    border-color: #E8372A;
+    background-color: #EDE9FC;
+    color: #4C3BD6;
+    border-color: #6D5BE8;
     font-weight: 700;
 }
 QToolButton#ribbonBigBtn:pressed {
-    background-color: #F6D2CE;
+    background-color: #DFD8FA;
 }
 QToolButton#ribbonThemeBtn {
     background: #FFFFFF;
@@ -1605,7 +1605,7 @@ QToolButton#ribbonThemeBtn {
     padding: 2px;
 }
 QToolButton#ribbonThemeBtn:hover {
-    border: 2px solid #E8372A;
+    border: 2px solid #6D5BE8;
 }
 QToolButton#ribbonCmdBtn {
     color: #2F3440;
@@ -1623,13 +1623,13 @@ QToolButton#ribbonCmdBtn:hover {
     border-color: #B9BEC9;
 }
 QToolButton#ribbonCmdBtn:checked {
-    background-color: #FCE4E2;
-    color: #C0271C;
-    border-color: #E8372A;
+    background-color: #EDE9FC;
+    color: #4C3BD6;
+    border-color: #6D5BE8;
     font-weight: 600;
 }
 QToolButton#ribbonCmdBtn:pressed {
-    background-color: #F6D2CE;
+    background-color: #DFD8FA;
 }
 QComboBox#ribbonCombo {
     background-color: #FFFFFF;
@@ -1646,7 +1646,7 @@ QComboBox#ribbonCombo:hover {
     background-color: #FAFBFC;
 }
 QComboBox#ribbonCombo:focus {
-    border-color: #E8372A;
+    border-color: #6D5BE8;
 }
 QComboBox#ribbonCombo::drop-down {
     subcontrol-origin: padding;
@@ -1664,7 +1664,7 @@ QComboBox QAbstractItemView {
     color: #1C1E26;
     border: 1px solid #D5D8DF;
     border-radius: 6px;
-    selection-background-color: #E8372A;
+    selection-background-color: #6D5BE8;
     selection-color: #FFFFFF;
     outline: none;
     padding: 4px;

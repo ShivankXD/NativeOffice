@@ -17,14 +17,14 @@ ThemeManager::ThemeManager(QObject* parent)
     : QObject(parent)
     , m_theme{}
 {
-    const QString saved = QSettings().value("app/themeMode", "dark").toString();
-    m_mode = (saved == QLatin1String("light")) ? ThemeMode::Light : ThemeMode::Dark;
+    // Chrome is always light. Drop any persisted mode from the retired
+    // dark-chrome experiment so a stale "dark" can never resurface.
+    QSettings().remove("app/themeMode");
 }
 
 void ThemeManager::setMode(ThemeMode mode) {
     if (mode == m_mode) return;
     m_mode = mode;
-    QSettings().setValue("app/themeMode", mode == ThemeMode::Dark ? "dark" : "light");
     emit modeChanged(m_mode);
 }
 

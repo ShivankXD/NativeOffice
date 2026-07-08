@@ -9,6 +9,7 @@
 #include "WriterRuler.h"
 #include "DocxIo.h"
 #include "core/theme/ThemeManager.h"
+#include "core/common/BrandBar.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -50,78 +51,6 @@
 #include <QFontMetrics>
 
 namespace NativeOffice {
-
-namespace {
-// ─────────────────────────────────────────────────────────────────────────────
-// WriterBanner — slim full-width branded strip above the ribbon, matching the
-// Calc/Impress banner (logo + tagline pinned left, soft decorations right).
-// ─────────────────────────────────────────────────────────────────────────────
-class WriterBanner : public QWidget {
-public:
-    explicit WriterBanner(QWidget* parent = nullptr) : QWidget(parent) {
-        setObjectName("writerBanner");
-        setFixedHeight(44);
-    }
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        const int w = width(), h = height();
-        p.fillRect(rect(), QColor("#FFFFFF"));
-
-        // Right-side decorations (soft blue clouds, dots, ring).
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor("#E2EAF8"));
-        p.drawEllipse(QPointF(w - 70, h + 8), 40, 26);
-        p.drawEllipse(QPointF(w - 26, h + 10), 50, 32);
-        p.setBrush(QColor("#CFDcF4"));
-        p.drawEllipse(QPointF(w - 4, h + 6), 44, 28);
-        p.setBrush(QColor("#C3C8D4"));
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                p.drawEllipse(QPointF(w - 188 + c * 6.5, h / 2.0 - 6.5 + r * 6.5), 1.5, 1.5);
-        p.setBrush(QColor("#3B82F6"));
-        p.drawEllipse(QPointF(w - 150, h / 2.0 - 7), 3.4, 3.4);
-        p.setBrush(Qt::NoBrush);
-        QPen ring(QColor("#34B6A7")); ring.setWidthF(1.7); p.setPen(ring);
-        p.drawEllipse(QPointF(w - 128, h / 2.0 + 4), 5.5, 5.5);
-
-        // Left: "NP" logo tile.
-        const QRectF logo(12, (h - 28) / 2.0, 28, 28);
-        p.setPen(QPen(QColor("#DADDE4"), 1));
-        p.setBrush(Qt::white);
-        p.drawRoundedRect(logo, 7, 7);
-        QFont lf("Segoe UI"); lf.setBold(true); lf.setPixelSize(14); p.setFont(lf);
-        p.setPen(QColor("#2C3140"));
-        p.drawText(QRectF(logo.left() + 3, logo.top(), 13, logo.height()), Qt::AlignCenter, "N");
-        p.setPen(QColor("#E8372A"));
-        p.drawText(QRectF(logo.left() + 12, logo.top(), 13, logo.height()), Qt::AlignCenter, "P");
-
-        p.setPen(QPen(QColor("#E6E8ED"), 1));
-        p.drawLine(QPointF(50, 10), QPointF(50, h - 10));
-
-        { QFont ef("Segoe UI Emoji"); ef.setPixelSize(16); p.setFont(ef);
-          p.setPen(QColor("#2C3140"));
-          p.drawText(QRectF(58, 0, 24, h), Qt::AlignVCenter | Qt::AlignLeft,
-                     QString::fromUtf8("\xF0\x9F\x9A\x80")); }
-
-        QFont tf("Segoe UI"); tf.setBold(true); tf.setPixelSize(15); p.setFont(tf);
-        const QFontMetrics tfm(tf);
-        const int tx = 86;
-        p.setPen(QColor("#2C3140"));
-        p.drawText(QRectF(tx, 0, tfm.horizontalAdvance("NativeOffice") + 4, h),
-                   Qt::AlignVCenter | Qt::AlignLeft, "NativeOffice");
-        const int sx = tx + tfm.horizontalAdvance("NativeOffice") + 8;
-        QFont sf("Segoe UI"); sf.setPixelSize(13); p.setFont(sf);
-        p.setPen(QColor("#9097A6"));
-        p.drawText(QRectF(sx, 0, w - sx - 150, h),
-                   Qt::AlignVCenter | Qt::AlignLeft, "is your go to OfficeSuite!");
-
-        p.setPen(QPen(QColor("#E4E6EB"), 1));
-        p.drawLine(0, h - 1, w, h - 1);
-    }
-};
-} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
@@ -295,7 +224,7 @@ void WriterModule::buildUi() {
     m_autosaveTimer->start();
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this]{ QFile::remove(recoveryFilePath()); });
 
-    rootLayout->addWidget(new WriterBanner(this));   // full-width branded strip
+    rootLayout->addWidget(new BrandBar(this));   // unified full-width brand tray
     rootLayout->addWidget(m_ribbon);
     rootLayout->addWidget(m_hRuler);
 

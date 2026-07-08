@@ -108,7 +108,7 @@ private:
     ThemeManager& operator=(const ThemeManager&) = delete;
 
     Theme m_theme;
-    ThemeMode m_mode { ThemeMode::Dark };
+    ThemeMode m_mode { ThemeMode::Light };
 };
 
 } // namespace NativeOffice

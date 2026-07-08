@@ -58,7 +58,7 @@ void SlideThumbnailWidget::paintEvent(QPaintEvent*) {
 
     // ── Slide number label ────────────────────────────────────────────────
     p.setFont(QFont("Segoe UI", 9));
-    p.setPen(m_active ? QColor("#E8372A") : QColor("#9CA3AF"));
+    p.setPen(m_active ? QColor("#6D5BE8") : QColor("#9CA3AF"));
     p.drawText(QRect(leftPad, topPad, THUMB_W, numH),
                Qt::AlignLeft | Qt::AlignVCenter,
                QString::number(m_slideIndex + 1));
@@ -76,7 +76,7 @@ void SlideThumbnailWidget::paintEvent(QPaintEvent*) {
     // ── Selection / hover border ──────────────────────────────────────────
     QPen borderPen;
     if (m_active) {
-        borderPen = QPen(QColor("#E8372A"), 2.5);
+        borderPen = QPen(QColor("#6D5BE8"), 2.5);
     } else if (m_hovered) {
         borderPen = QPen(QColor("#9CA3AF"), 1.5);
     } else {
@@ -124,7 +124,7 @@ void SlideThumbnailWidget::contextMenuEvent(QContextMenuEvent* e) {
     menu.setStyleSheet(
         "QMenu { background-color: #FFFFFF; color: #1C1E26; border: 1px solid #D5D8DF; padding: 4px; }"
         "QMenu::item { padding: 6px 18px; border-radius: 4px; }"
-        "QMenu::item:selected { background-color: #E8372A; color: #FFFFFF; }"
+        "QMenu::item:selected { background-color: #6D5BE8; color: #FFFFFF; }"
         "QMenu::separator { height: 1px; background: #E2E4E9; margin: 4px 8px; }");
     QAction* actAdd = menu.addAction("➕  Add New Slide");
     QAction* actDup = menu.addAction("⎘  Duplicate Slide");
