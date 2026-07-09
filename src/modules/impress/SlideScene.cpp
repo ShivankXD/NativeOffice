@@ -776,16 +776,20 @@ void SlideScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
 }
 
 void SlideScene::keyPressEvent(QKeyEvent* event) {
-    if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
-        !selectedItems().isEmpty()) {
-        // Don't eat the key while editing text (let it edit the text instead)
-        bool editingText = false;
-        for (auto* it : selectedItems()) {
-            if (auto* ti = qgraphicsitem_cast<QGraphicsTextItem*>(it)) {
-                if (ti->textInteractionFlags() & Qt::TextEditable) { editingText = true; break; }
-            }
-        }
-        if (!editingText) {
+    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
+        // Whether the key deletes the selected object or edits text hinges on
+        // what currently holds keyboard focus, NOT on what is selected:
+        //   • A table cell being edited is the focus item while the *table* is
+        //     selected — the old "is a selected item editable text?" check said
+        //     no and deleted the whole table mid-typing (data loss).
+        //   • A text box always carries TextEditorInteraction, so that same
+        //     check always said "editing" and Delete could never remove a
+        //     selected text box.
+        // Keying off the focus item fixes both.
+        auto* focusedText = qgraphicsitem_cast<QGraphicsTextItem*>(focusItem());
+        const bool editingText = focusedText &&
+            (focusedText->textInteractionFlags() & Qt::TextEditable);
+        if (!editingText && !selectedItems().isEmpty()) {
             deleteSelectedItem();
             event->accept();
             return;
@@ -1643,7 +1647,12 @@ void SlideScene::saveToData(SlideData& data) const {
     data.background  = m_bg1;
     data.background2 = m_bg2;
 
-    for (auto* it : items()) {
+    // Iterate bottom-to-top. items() defaults to descending stacking order
+    // (topmost first); saving in that order and then re-adding in loadFromData
+    // (which stacks each new item on top) reversed the z-order on every
+    // save/load, undo/redo, theme change, slide-show rebuild and .pptx export.
+    // Ascending order keeps stacking stable across a round-trip.
+    for (auto* it : items(Qt::AscendingOrder)) {
         if (it == backgroundItem()) continue;
         if (dynamic_cast<SlideHandleItem*>(it)) continue;
         if (it->parentItem()) continue;          // table cells are saved with their table

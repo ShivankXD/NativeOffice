@@ -33,6 +33,12 @@ bool isExitAnim(ItemAnimation a) {
     return a == ItemAnimation::ExitFadeOut || a == ItemAnimation::ExitFlyLeft
         || a == ItemAnimation::ExitFlyRight || a == ItemAnimation::ExitZoomOut;
 }
+// Entrance and emphasis effects play when the slide first appears; exit effects
+// must NOT (they play on advance). Treating "any anim != None" as an entrance
+// made an object with an Exit effect animate away the instant its slide opened.
+bool isEntranceAnim(ItemAnimation a) {
+    return a != ItemAnimation::None && !isExitAnim(a);
+}
 }
 
 PresentModeWindow::PresentModeWindow(const std::vector<SlideData>& deck,
@@ -497,7 +503,7 @@ ItemAnimation PresentModeWindow::animOf(QGraphicsItem* item) const {
 bool PresentModeWindow::sceneHasAnimations(SlideScene* scene) const {
     for (auto* it : scene->items()) {
         if (it->zValue() < 0) continue;                 // background
-        if (animOf(it) != ItemAnimation::None) return true;
+        if (isEntranceAnim(animOf(it))) return true;
     }
     return false;
 }
@@ -508,7 +514,7 @@ void PresentModeWindow::setItemsToStart(SlideScene* scene) {
     for (auto* it : scene->items()) {
         if (it->zValue() < 0) continue;
         const ItemAnimation a = animOf(it);
-        if (a == ItemAnimation::None) continue;
+        if (!isEntranceAnim(a)) continue;   // exit effects play on advance, not entry
 
         m_orig.insert(it, { it->pos(), it->opacity(), it->scale(), it->rotation() });
         m_animItems.append(it);

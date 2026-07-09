@@ -370,7 +370,13 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
         // A text-bearing shape becomes a text box.
         item.type     = SlideItemType::TextBox;
         item.text     = trimmed;
-        item.fontSize = std::max(6.0, fontPt * sc.sy);
+        // fontPt is a real point size (the sz attribute is hundredths of a
+        // point). Convert to scene units: a point is 12700 EMU tall, and sc.sy
+        // maps slide EMU → the 540-unit scene. For a standard 16:9 deck this
+        // resolves to ~1.0× (so 18pt → 18 units); other slide sizes scale
+        // proportionally. Multiplying by sc.sy alone (≈0.00008) is the old bug
+        // that collapsed every run to the 6-unit floor.
+        item.fontSize = std::max(6.0, fontPt * sc.sy * 12700.0);
         item.penColor = textColor.isValid() ? textColor : QColor("#1C1E26");
         const QString colHex = item.penColor.name(QColor::HexRgb);
         QString body = trimmed.toHtmlEscaped();
@@ -514,11 +520,19 @@ QList<QString> orderedSlideParts(const ZipReader& zip) {
     }
     // Read slide id list order from presentation.xml
     if (zip.has("ppt/presentation.xml") && !ridToPart.isEmpty()) {
+        // <p:sldId> carries BOTH a plain "id" (a numeric slide id) and the
+        // relationship "r:id" we actually want. av() matches by local name, and
+        // r:id's local name is also "id" — so av(attrs,"id") returns the plain
+        // id and the rId lookup never hits (order then falls back to filename
+        // sort). Resolve r:id by its relationships namespace instead.
+        static const QString kRelNs = QStringLiteral(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
         QXmlStreamReader xml(zip.file("ppt/presentation.xml"));
         while (!xml.atEnd()) {
             if (xml.readNext() == QXmlStreamReader::StartElement &&
                 xml.name() == QLatin1String("sldId")) {
-                const QString rid = av(xml.attributes(), "id");   // r:id → local "id"
+                const QString rid =
+                    xml.attributes().value(kRelNs, QStringLiteral("id")).toString();
                 if (ridToPart.contains(rid)) result.append(ridToPart.value(rid));
             }
         }

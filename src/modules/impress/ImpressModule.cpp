@@ -87,8 +87,13 @@ public:
     void undo() override {
         m_module->m_restoringUndo = true;
         m_module->deckFromJson(m_before);
-        m_module->switchToSlide(qBound(0, m_beforeIdx, m_module->slideCount() - 1));
+        const int idx = qBound(0, m_beforeIdx, m_module->slideCount() - 1);
+        m_module->switchToSlide(idx);
         m_module->m_undoBaseline = QJsonDocument(m_before).toJson(QJsonDocument::Compact);
+        // Keep the baseline slide index in step with the restored state, or the
+        // next edit records a stale "before" index and a later undo jumps to the
+        // wrong slide.
+        m_module->m_undoBaselineIdx = idx;
         m_module->m_restoringUndo = false;
     }
     void redo() override {
@@ -104,8 +109,10 @@ public:
         }
         m_module->m_restoringUndo = true;
         m_module->deckFromJson(m_after);
-        m_module->switchToSlide(qBound(0, m_afterIdx, m_module->slideCount() - 1));
+        const int idx = qBound(0, m_afterIdx, m_module->slideCount() - 1);
+        m_module->switchToSlide(idx);
         m_module->m_undoBaseline = QJsonDocument(m_after).toJson(QJsonDocument::Compact);
+        m_module->m_undoBaselineIdx = idx;
         m_module->m_restoringUndo = false;
     }
 
@@ -1133,6 +1140,9 @@ void ImpressModule::deleteCurrentSlide() {
     m_currentIdx = -1;
     const int nextIdx = std::min(idx, static_cast<int>(m_scenes.size()) - 1);
     switchToSlide(nextIdx);
+    // Removing a slide changes no scene content, so no QGraphicsScene::changed
+    // fires — mark dirty explicitly or the deletion is lost with no save prompt.
+    if (!m_dirty) { m_dirty = true; emit documentModified(); }
     commitUndoStep();
 }
 
@@ -1158,6 +1168,8 @@ void ImpressModule::moveSlide(int fromIndex, int toIndex) {
 
     m_currentIdx = -1;
     switchToSlide(toIndex);
+    // Reordering touches no scene content, so mark dirty explicitly.
+    if (!m_dirty) { m_dirty = true; emit documentModified(); }
     commitUndoStep();
 }
 
@@ -1171,6 +1183,9 @@ void ImpressModule::applyLayoutToCurrentSlide(SlideLayout layout) {
 void ImpressModule::applyTransitionToCurrentSlide(SlideTransition transition) {
     if (m_currentIdx < 0) return;
     m_slideData[m_currentIdx].transition = transition;
+    // A transition is slide metadata, not scene content — mark dirty explicitly
+    // (the apply-to-all variant already does this).
+    if (!m_dirty) { m_dirty = true; emit documentModified(); }
     commitUndoStep();
     previewTransition(transition);   // play it once so the user sees it applied
 }
