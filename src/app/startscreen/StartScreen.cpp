@@ -202,41 +202,25 @@ bool StartScreen::launchLocked() const {
     return UpdateChecker::instance().isScanning();
 }
 
-// Blue rounded banner shown at the top of the home body. It mirrors
-// UpdateChecker's state: a spinner while scanning/downloading, a plain notice
-// when up to date or offline, and a "Restart to update" button when ready.
+// Compact update-status pill, shown at the top-right of the home page only.
+// Mirrors UpdateChecker: a spinner while scanning/downloading, a short notice
+// when up to date or offline, and — when an update is ready — a clickable
+// "Restart to update" pill.
 QWidget* StartScreen::buildUpdateBanner() {
-    auto* box = new QFrame(this);
-    box->setObjectName("updateBanner");
-    m_updateBanner = box;
-    auto* h = new QHBoxLayout(box);
-    h->setContentsMargins(16, 10, 12, 10);
-    h->setSpacing(10);
+    auto* pill = new ClickableFrame(this);
+    pill->setObjectName("updatePill");
+    m_updateBanner = pill;
+    pill->setFixedHeight(30);
+    auto* h = new QHBoxLayout(pill);
+    h->setContentsMargins(12, 0, 12, 0);
+    h->setSpacing(7);
 
-    m_updateSpin = new QLabel(box);
-    m_updateSpin->setStyleSheet("background:transparent;color:#FFFFFF;font:700 15px 'Segoe UI';");
-    m_updateSpin->setFixedWidth(16);
+    m_updateSpin = new QLabel(pill);
+    m_updateSpin->setFixedWidth(12);
     h->addWidget(m_updateSpin);
 
-    m_updateText = new QLabel(box);
-    m_updateText->setStyleSheet("background:transparent;color:#FFFFFF;font:600 13px 'Segoe UI';");
+    m_updateText = new QLabel(pill);
     h->addWidget(m_updateText);
-    h->addStretch();
-
-    m_updateBtn = new QPushButton("Restart to update", box);
-    m_updateBtn->setCursor(Qt::PointingHandCursor);
-    m_updateBtn->setStyleSheet(
-        "QPushButton { background:#FFFFFF; color:#1D4ED8; border:none; border-radius:8px;"
-        "  padding:6px 14px; font:700 12px 'Segoe UI'; }"
-        "QPushButton:hover { background:#EAF0FF; }");
-    m_updateBtn->hide();
-    connect(m_updateBtn, &QPushButton::clicked, this,
-            [] { UpdateChecker::instance().relaunchForUpdate(); });
-    h->addWidget(m_updateBtn);
-
-    box->setStyleSheet(
-        "QFrame#updateBanner { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-        "  stop:0 #2563EB, stop:1 #4F46E5); border:none; border-radius:12px; }");
 
     // Spinner animation.
     m_spinTimer = new QTimer(this);
@@ -249,35 +233,62 @@ QWidget* StartScreen::buildUpdateBanner() {
     auto& u = UpdateChecker::instance();
     connect(&u, &UpdateChecker::stateChanged, this, [this] { refreshUpdateBanner(); });
     connect(&u, &UpdateChecker::downloadProgress, this, [this](int pct) {
-        if (m_updateText)
-            m_updateText->setText(tr("Downloading the latest version… %1%").arg(pct));
+        if (m_updateText) m_updateText->setText(tr("Installing update  %1%").arg(pct));
     });
 
     refreshUpdateBanner();
-    return box;
+    return pill;
 }
 
 void StartScreen::refreshUpdateBanner() {
     if (!m_updateBanner) return;
     using S = UpdateChecker::State;
-    auto& u = UpdateChecker::instance();
-    const S s = u.state();
+    const S s = UpdateChecker::instance().state();
+    auto* pill = static_cast<ClickableFrame*>(m_updateBanner);
 
-    // Idle/Failed are not worth a banner; everything else is user-relevant.
+    // Idle/Failed aren't worth showing; everything else is user-relevant.
     const bool show = s != S::Idle && s != S::Failed;
     m_updateBanner->setVisible(show);
-    if (!show) { m_spinTimer->stop(); return; }
+    if (!show) { m_spinTimer->stop(); pill->onClick = nullptr; return; }
+
+    QString text;
+    switch (s) {
+    case S::Scanning:        text = tr("Scanning for updates"); break;
+    case S::UpToDate:        text = tr("You're on the latest version"); break;
+    case S::Offline:         text = tr("Offline — update check unavailable"); break;
+    case S::UpdateAvailable: text = tr("Preparing update"); break;
+    case S::Downloading:     text = tr("Installing update"); break;
+    case S::ReadyToRestart:  text = tr("Restart to update"); break;
+    default: break;
+    }
+    m_updateText->setText(text);
+
+    const bool ready = s == S::ReadyToRestart;
+    // A ready update turns the pill into a blue call-to-action button.
+    if (ready) {
+        pill->onClick = [] { UpdateChecker::instance().relaunchForUpdate(); };
+        pill->setStyleSheet("QFrame#updatePill { background:#1D4ED8;"
+                            " border:1px solid #2E5BE0; border-radius:15px; }");
+        m_updateText->setStyleSheet("background:transparent;color:#FFFFFF;font:700 12px 'Segoe UI';");
+    } else {
+        pill->onClick = nullptr;
+        pill->setCursor(Qt::ArrowCursor);
+        pill->setStyleSheet("QFrame#updatePill { background:#161B26;"
+                            " border:1px solid #263042; border-radius:15px; }");
+        m_updateText->setStyleSheet("background:transparent;color:#C7CEDC;font:600 12px 'Segoe UI';");
+    }
 
     const bool spinning = s == S::Scanning || s == S::UpdateAvailable || s == S::Downloading;
-    m_updateText->setText(u.bannerMessage());
-    m_updateBtn->setVisible(s == S::ReadyToRestart);
+    m_updateSpin->setStyleSheet("background:transparent;color:#C7CEDC;font:700 12px 'Segoe UI';");
     if (spinning) {
         m_updateSpin->show();
         if (!m_spinTimer->isActive()) m_spinTimer->start(90);
     } else {
         m_spinTimer->stop();
         m_updateSpin->hide();
+        m_updateSpin->clear();
     }
+    m_updateBanner->adjustSize();
 }
 
 void StartScreen::openFileDialog() {
@@ -505,6 +516,8 @@ QWidget* StartScreen::buildTopBar() {
         return b;
     };
     rightL->addStretch();
+    // Compact update-status pill, top-right of the home page.
+    rightL->addWidget(buildUpdateBanner(), 0, Qt::AlignVCenter);
     auto* bellBtn = iconBtn(Lucide::kBell, nullptr);
     connect(bellBtn, &QToolButton::clicked, this,
             [this, bellBtn] { showNotificationsPopup(bellBtn); });
@@ -551,9 +564,6 @@ QWidget* StartScreen::buildCenterColumn() {
     auto* col = new QWidget(this);
     auto* v = new QVBoxLayout(col);
     v->setContentsMargins(0, 0, 0, 0); v->setSpacing(22);
-
-    // Update status banner (blue box), pinned at the very top of the home body.
-    v->addWidget(buildUpdateBanner());
 
     // Welcome row + Import button
     auto* welcome = new QWidget(col);

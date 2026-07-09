@@ -60,10 +60,9 @@ private:
     AppController* m_controller { nullptr };
 
     // Update banner widgets (owned by the layout).
-    QWidget*     m_updateBanner { nullptr };
+    QWidget*     m_updateBanner { nullptr };   // compact top-right status pill
     QLabel*      m_updateSpin   { nullptr };
     QLabel*      m_updateText   { nullptr };
-    QPushButton* m_updateBtn    { nullptr };
     QTimer*      m_spinTimer    { nullptr };
     int          m_spinPhase    { 0 };
 };
