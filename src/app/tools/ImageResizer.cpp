@@ -26,6 +26,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QRadioButton>
@@ -39,6 +40,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 namespace NativeOffice {
 
@@ -62,6 +64,19 @@ protected:
         for (int y = step / 2; y < height(); y += step)
             for (int x = step / 2; x < width(); x += step)
                 p.drawEllipse(QPointF(x, y), 1.2, 1.2);
+    }
+};
+
+// A card that reports clicks — used to select which image to resize.
+class ClickCard : public QFrame {
+public:
+    using QFrame::QFrame;
+    std::function<void()> onClick;
+
+protected:
+    void mousePressEvent(QMouseEvent* ev) override {
+        if (ev->button() == Qt::LeftButton && onClick) onClick();
+        QFrame::mousePressEvent(ev);
     }
 };
 
@@ -90,6 +105,10 @@ ImageResizerWidget::ImageResizerWidget(QWidget* parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setAcceptDrops(true);
 
+    // Large photos (e.g. 8000×6000) exceed Qt's default decode budget and
+    // would silently fail to load; this tool legitimately handles them.
+    QImageReader::setAllocationLimit(0);
+
     auto* root = new QHBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
@@ -107,10 +126,16 @@ ImageResizerWidget::ImageResizerWidget(QWidget* parent)
         const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_RESIZER_GRAB");
         QTimer::singleShot(2500, this, [this, grabPath] {
             // Optional: pre-load images (";"-separated paths) so the grab
-            // shows the populated card view, not just the empty state.
-            const QString seed = qEnvironmentVariable("NATIVEOFFICE_RESIZER_SEED");
-            if (!seed.isEmpty())
-                addImages(seed.split(QLatin1Char(';'), Qt::SkipEmptyParts));
+            // shows the populated card view. Earlier seeds are marked
+            // exported so the one-image-at-a-time gate admits the next.
+            const QStringList seeds =
+                qEnvironmentVariable("NATIVEOFFICE_RESIZER_SEED")
+                    .split(QLatin1Char(';'), Qt::SkipEmptyParts);
+            for (int i = 0; i < seeds.size(); ++i) {
+                addImages({ seeds[i] });
+                if (i + 1 < seeds.size())
+                    for (Entry& e : m_images) e.exported = true;
+            }
             grab().save(grabPath, "PNG");
         });
     }
@@ -143,10 +168,10 @@ QWidget* ImageResizerWidget::buildSettingsPanel() {
     };
     auto* row = new QHBoxLayout;
     row->setSpacing(8);
-    auto* addBtn = mkTool(Lucide::kPlus, tr("Add images"));
+    m_btnAdd   = mkTool(Lucide::kPlus, tr("Add an image"));
     m_btnSort  = mkTool(Lucide::kSortDesc, tr("Sort by name"));
     m_btnClear = mkTool(Lucide::kTrash, tr("Remove all images"));
-    row->addWidget(addBtn);
+    row->addWidget(m_btnAdd);
     row->addStretch();
     row->addWidget(m_btnSort);
     row->addWidget(m_btnClear);
@@ -354,7 +379,7 @@ QWidget* ImageResizerWidget::buildSettingsPanel() {
     m_exportBtn->setCursor(Qt::PointingHandCursor);
     v->addWidget(m_exportBtn);
 
-    connect(addBtn,      &QToolButton::clicked, this, &ImageResizerWidget::addImagesDialog);
+    connect(m_btnAdd,    &QToolButton::clicked, this, &ImageResizerWidget::addImagesDialog);
     connect(m_btnSort,   &QToolButton::clicked, this, &ImageResizerWidget::sortImages);
     connect(m_btnClear,  &QToolButton::clicked, this, &ImageResizerWidget::clearAll);
     connect(m_exportBtn, &QPushButton::clicked, this, &ImageResizerWidget::exportImages);
@@ -465,8 +490,12 @@ QLabel#rszHintSub { font-size: 11px; color: #9AA0AE; background: transparent; }
 QListWidget#rszThumbs { background: transparent; }
 QListWidget#rszThumbs::item { background: transparent; border: none; }
 QFrame#rszCard { background: #FFFFFF; border: 1px solid #E4E7ED; border-radius: 12px; }
-QLabel#rszCardPreview { background: #F7F8FA; border: 1px solid #EFF1F5; border-radius: 8px; }
+QFrame#rszCard[sel="true"] { border: 2px solid #6D5BE8; }
+QLabel#rszCardPreview { background: #F7F8FA; border: 1px solid #EFF1F5; border-radius: 8px;
+    color: #8A90A0; font-size: 12px; }
 QLabel#rszCardName { font-size: 12px; font-weight: 600; color: #1C1E26; background: transparent; }
+QLabel#rszCardDone { color: #16A34A; font-size: 11px; font-weight: 600; background: transparent; }
+QLabel#rszCardPending { color: #B45309; font-size: 11px; font-weight: 600; background: transparent; }
 QLabel#rszBadge { background: #F3F4F6; color: #3B4152; border-radius: 6px;
     padding: 4px 10px; font-size: 11px; font-weight: 600; }
 QLabel#rszBadgeTarget { background: #EDE9FC; color: #4C3BD6; border-radius: 6px;
@@ -486,33 +515,56 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 // image management
 // ─────────────────────────────────────────────────────────────────────────────
 
+bool ImageResizerWidget::hasPending() const {
+    return std::any_of(m_images.begin(), m_images.end(),
+                       [](const Entry& e) { return !e.exported; });
+}
+
 void ImageResizerWidget::addImagesDialog() {
-    const QStringList files = QFileDialog::getOpenFileNames(
-        this, tr("Add Images"), QDir::homePath(), joinedImageFilter());
-    addImages(files);
+    if (hasPending()) {
+        QMessageBox::information(this, tr("Image Resizer"),
+            tr("Export the current image first — then you can add another."));
+        return;
+    }
+    const QString file = QFileDialog::getOpenFileName(
+        this, tr("Add Image"), QDir::homePath(), joinedImageFilter());
+    if (!file.isEmpty()) addImages({ file });
 }
 
 void ImageResizerWidget::addImages(const QStringList& paths) {
-    bool added = false;
+    // One image at a time: importing is locked while an image awaits export.
+    if (hasPending()) return;
     for (const QString& p : paths) {
-        if (!isReadableImage(p) || m_paths.contains(p)) continue;
-        m_paths << p;
-        added = true;
+        if (!isReadableImage(p)) continue;
+        const bool dup = std::any_of(m_images.begin(), m_images.end(),
+                                     [&p](const Entry& e) { return e.path == p; });
+        if (dup) continue;
+        m_images.push_back({ p, false });
+        m_selected = p;               // the new image is what gets resized next
+        refreshList();
+        return;                       // only the first valid image is taken
     }
-    if (added) refreshList();
+}
+
+void ImageResizerWidget::selectImage(const QString& path) {
+    if (m_selected == path) return;
+    m_selected = path;
+    refreshList();
 }
 
 void ImageResizerWidget::clearAll() {
-    if (m_paths.isEmpty()) return;
-    m_paths.clear();
+    if (m_images.empty()) return;
+    m_images.clear();
+    m_selected.clear();
     refreshList();
 }
 
 void ImageResizerWidget::sortImages() {
-    std::sort(m_paths.begin(), m_paths.end(),
-              [asc = m_sortAscending](const QString& a, const QString& b) {
-        const int c = QString::compare(QFileInfo(a).fileName(),
-                                       QFileInfo(b).fileName(), Qt::CaseInsensitive);
+    std::sort(m_images.begin(), m_images.end(),
+              [asc = m_sortAscending](const Entry& a, const Entry& b) {
+        const int c = QString::compare(QFileInfo(a.path).fileName(),
+                                       QFileInfo(b.path).fileName(),
+                                       Qt::CaseInsensitive);
         return asc ? c < 0 : c > 0;
     });
     m_sortAscending = !m_sortAscending;
@@ -523,33 +575,58 @@ void ImageResizerWidget::refreshList() {
     m_thumbList->clear();
     m_targetBadges.clear();
 
-    for (const QString& p : m_paths) {
+    for (const Entry& entry : m_images) {
+        const QString p = entry.path;
+        const bool selected = (p == m_selected);
+
+        // Decode the preview at thumbnail scale — fast, low-memory, and it
+        // still succeeds where a full-size decode of a huge photo would not.
         QImageReader reader(p);
         reader.setAutoTransform(true);
-        const QImage img = reader.read();
-        if (img.isNull()) continue;
-        const QSize origSize = img.size();
+        QSize origSize = reader.size();
+        QImage thumb;
+        if (origSize.isValid()) {
+            reader.setScaledSize(origSize.scaled(240, 216, Qt::KeepAspectRatio));
+            thumb = reader.read();
+        } else {
+            thumb = reader.read();          // format can't report size upfront
+            origSize = thumb.size();
+            if (!thumb.isNull())
+                thumb = thumb.scaled(240, 216, Qt::KeepAspectRatio,
+                                     Qt::SmoothTransformation);
+        }
 
-        auto* card = new QFrame;
+        auto* card = new ClickCard;
         card->setObjectName("rszCard");
+        card->setProperty("sel", selected);
         card->setFixedWidth(272);
+        card->setCursor(Qt::PointingHandCursor);
+        card->onClick = [this, p] { selectImage(p); };
         auto* cv = new QVBoxLayout(card);
         cv->setContentsMargins(12, 8, 12, 12);
         cv->setSpacing(8);
 
-        // top row: remove-this-image button
+        // top row: export state + remove-this-image button
         auto* top = new QHBoxLayout;
+        auto* state = new QLabel(card);
+        state->setObjectName(entry.exported ? "rszCardDone" : "rszCardPending");
+        state->setText(entry.exported ? tr("✓ Exported") : tr("Ready to resize"));
         auto* close = new QToolButton(card);
         close->setObjectName("rszCardClose");
         close->setText(QString::fromUtf8("\xE2\x9C\x95"));   // ✕
         close->setToolTip(tr("Remove this image"));
         close->setFixedSize(22, 22);
         close->setCursor(Qt::PointingHandCursor);
+        top->addWidget(state);
         top->addStretch();
         top->addWidget(close);
         cv->addLayout(top);
         connect(close, &QToolButton::clicked, this, [this, p] {
-            m_paths.removeAll(p);
+            m_images.erase(std::remove_if(m_images.begin(), m_images.end(),
+                               [&p](const Entry& e) { return e.path == p; }),
+                           m_images.end());
+            if (m_selected == p)
+                m_selected = m_images.empty() ? QString() : m_images.back().path;
             refreshList();
         });
 
@@ -558,8 +635,10 @@ void ImageResizerWidget::refreshList() {
         preview->setObjectName("rszCardPreview");
         preview->setFixedSize(248, 224);
         preview->setAlignment(Qt::AlignCenter);
-        preview->setPixmap(QPixmap::fromImage(
-            img.scaled(240, 216, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        if (!thumb.isNull())
+            preview->setPixmap(QPixmap::fromImage(thumb));
+        else
+            preview->setText(tr("Preview unavailable"));
         cv->addWidget(preview, 0, Qt::AlignHCenter);
 
         auto* name = new QLabel(card);
@@ -569,22 +648,27 @@ void ImageResizerWidget::refreshList() {
         name->setToolTip(p);
         cv->addWidget(name);
 
-        // size badges: original → target (target follows the settings live)
+        // size badges: original → target (target follows the settings live,
+        // and only the selected card shows one — that's what Export resizes)
         auto* sizes = new QHBoxLayout;
         sizes->setSpacing(8);
-        auto* orig = new QLabel(QStringLiteral("%1 × %2")
-                                    .arg(origSize.width()).arg(origSize.height()), card);
+        auto* orig = new QLabel(origSize.isValid()
+                                    ? QStringLiteral("%1 × %2")
+                                          .arg(origSize.width()).arg(origSize.height())
+                                    : QStringLiteral("—"), card);
         orig->setObjectName("rszBadge");
-        auto* arrow = new QLabel(QStringLiteral("→"), card);
-        arrow->setObjectName("rszMuted");
-        auto* target = new QLabel(card);
-        target->setObjectName("rszBadgeTarget");
         sizes->addWidget(orig);
-        sizes->addWidget(arrow);
-        sizes->addWidget(target);
+        if (selected && origSize.isValid()) {
+            auto* arrow = new QLabel(QStringLiteral("→"), card);
+            arrow->setObjectName("rszMuted");
+            auto* target = new QLabel(card);
+            target->setObjectName("rszBadgeTarget");
+            sizes->addWidget(arrow);
+            sizes->addWidget(target);
+            m_targetBadges.emplace_back(target, origSize);
+        }
         sizes->addStretch();
         cv->addLayout(sizes);
-        m_targetBadges.emplace_back(target, origSize);
 
         auto* item = new QListWidgetItem(m_thumbList);
         item->setData(Qt::UserRole, p);
@@ -624,11 +708,20 @@ QSize ImageResizerWidget::computeTargetSize(const QSize& src) const {
 }
 
 void ImageResizerWidget::updateUiState() {
-    const int n = int(m_paths.size());
-    m_countLabel->setText(n == 0 ? tr("No images added yet")
-                                 : tr("%n image(s) added", nullptr, n));
+    const int n = int(m_images.size());
+    const bool pending = hasPending();
+    if (n == 0)
+        m_countLabel->setText(tr("No images added yet"));
+    else if (pending)
+        m_countLabel->setText(tr("Export the selected image to add more"));
+    else
+        m_countLabel->setText(tr("%n image(s) added", nullptr, n));
     m_canvasStack->setCurrentIndex(n == 0 ? 0 : 1);
-    m_exportBtn->setEnabled(n > 0);
+    m_exportBtn->setEnabled(!m_selected.isEmpty());
+    m_btnAdd->setEnabled(!pending);
+    m_btnAdd->setToolTip(pending
+        ? tr("Export the selected image first, then add another")
+        : tr("Add an image"));
     m_btnSort->setEnabled(n > 1);
     m_btnClear->setEnabled(n > 0);
 
@@ -664,7 +757,7 @@ void ImageResizerWidget::pickFillColor() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void ImageResizerWidget::dragEnterEvent(QDragEnterEvent* ev) {
-    if (!ev->mimeData()->hasUrls()) return;
+    if (hasPending() || !ev->mimeData()->hasUrls()) return;
     for (const QUrl& u : ev->mimeData()->urls())
         if (u.isLocalFile() && isReadableImage(u.toLocalFile())) {
             ev->acceptProposedAction();
@@ -673,10 +766,15 @@ void ImageResizerWidget::dragEnterEvent(QDragEnterEvent* ev) {
 }
 
 void ImageResizerWidget::dropEvent(QDropEvent* ev) {
+    if (hasPending()) {
+        QMessageBox::information(this, tr("Image Resizer"),
+            tr("Export the current image first — then you can add another."));
+        return;
+    }
     QStringList paths;
     for (const QUrl& u : ev->mimeData()->urls())
         if (u.isLocalFile()) paths << u.toLocalFile();
-    addImages(paths);
+    addImages(paths);   // takes the first valid image only
     ev->acceptProposedAction();
 }
 
@@ -719,7 +817,9 @@ QImage ImageResizerWidget::transform(const QImage& src) const {
 }
 
 void ImageResizerWidget::exportImages() {
-    if (m_paths.isEmpty()) return;
+    // Export resizes the SELECTED image only.
+    if (m_selected.isEmpty()) return;
+    const QString srcPath = m_selected;
 
     if (m_tabSize->isChecked() && m_widthEdit->text().isEmpty()
         && m_heightEdit->text().isEmpty()) {
@@ -729,7 +829,7 @@ void ImageResizerWidget::exportImages() {
     }
 
     const QString dir = QFileDialog::getExistingDirectory(
-        this, tr("Choose Output Folder"), QFileInfo(m_paths.first()).absolutePath());
+        this, tr("Choose Output Folder"), QFileInfo(srcPath).absolutePath());
     if (dir.isEmpty()) return;
 
     // Target byte budget (JPG only).
@@ -739,64 +839,73 @@ void ImageResizerWidget::exportImages() {
         if (m_targetUnit->currentText() == QLatin1String("MB")) targetBytes *= 1024;
     }
 
-    const QString fmtChoice = m_formatCombo->currentText();
-    int done = 0;
-    QStringList failed;
-
-    for (const QString& srcPath : m_paths) {
-        QImageReader reader(srcPath);
-        reader.setAutoTransform(true);
-        QImage img = reader.read();
-        if (img.isNull()) { failed << QFileInfo(srcPath).fileName(); continue; }
-
-        img = transform(img);
-
-        QString ext = fmtChoice == tr("Original")
-                          ? QFileInfo(srcPath).suffix().toLower()
-                          : fmtChoice.toLower();
-        if (ext == QLatin1String("jpeg")) ext = QStringLiteral("jpg");
-        const bool isJpg = ext == QLatin1String("jpg");
-        if (isJpg && img.hasAlphaChannel()) {
-            // JPEG has no alpha — composite on the fill colour (or white).
-            QImage flat(img.size(), QImage::Format_RGB32);
-            flat.fill(m_fillTransparent && m_fillTransparent->isChecked()
-                          ? QColor(Qt::white) : m_fillColor);
-            QPainter p(&flat);
-            p.drawImage(0, 0, img);
-            p.end();
-            img = flat;
-        }
-
-        // Unique output path: <name>_resized.<ext>, then (2), (3), …
-        const QString base = QFileInfo(srcPath).completeBaseName() + "_resized";
-        QString outPath = dir + "/" + base + "." + ext;
-        for (int i = 2; QFileInfo::exists(outPath); ++i)
-            outPath = dir + "/" + base + QStringLiteral(" (%1).").arg(i) + ext;
-
-        bool ok = false;
-        if (isJpg && targetBytes > 0) {
-            // Highest quality that fits the byte budget (85 → 10).
-            QByteArray best;
-            for (int q = 85; q >= 10; q -= 15) {
-                QByteArray buf;
-                QBuffer io(&buf);
-                io.open(QIODevice::WriteOnly);
-                img.save(&io, "jpg", q);
-                best = buf;
-                if (buf.size() <= targetBytes) break;
-            }
-            QFile f(outPath);
-            ok = f.open(QIODevice::WriteOnly) && f.write(best) == best.size();
-        } else {
-            ok = img.save(outPath, ext.toLatin1().constData(), isJpg ? 90 : -1);
-        }
-        if (ok) ++done; else failed << QFileInfo(srcPath).fileName();
+    QImageReader reader(srcPath);
+    reader.setAutoTransform(true);
+    QImage img = reader.read();
+    if (img.isNull()) {
+        QMessageBox::warning(this, tr("Image Resizer"),
+                             tr("Could not read:\n%1").arg(srcPath));
+        return;
     }
 
-    QString msg = tr("%n image(s) exported to:\n", nullptr, done) + dir;
-    if (!failed.isEmpty())
-        msg += QStringLiteral("\n\n") + tr("Failed: ") + failed.join(QStringLiteral(", "));
-    QMessageBox box(QMessageBox::Information, tr("Export Complete"), msg,
+    img = transform(img);
+
+    const QString fmtChoice = m_formatCombo->currentText();
+    QString ext = fmtChoice == tr("Original")
+                      ? QFileInfo(srcPath).suffix().toLower()
+                      : fmtChoice.toLower();
+    if (ext == QLatin1String("jpeg")) ext = QStringLiteral("jpg");
+    const bool isJpg = ext == QLatin1String("jpg");
+    if (isJpg && img.hasAlphaChannel()) {
+        // JPEG has no alpha — composite on the fill colour (or white).
+        QImage flat(img.size(), QImage::Format_RGB32);
+        flat.fill(m_fillTransparent && m_fillTransparent->isChecked()
+                      ? QColor(Qt::white) : m_fillColor);
+        QPainter p(&flat);
+        p.drawImage(0, 0, img);
+        p.end();
+        img = flat;
+    }
+
+    // Unique output path: <name>_resized.<ext>, then (2), (3), …
+    const QString base = QFileInfo(srcPath).completeBaseName() + "_resized";
+    QString outPath = dir + "/" + base + "." + ext;
+    for (int i = 2; QFileInfo::exists(outPath); ++i)
+        outPath = dir + "/" + base + QStringLiteral(" (%1).").arg(i) + ext;
+
+    bool ok = false;
+    if (isJpg && targetBytes > 0) {
+        // Highest quality that fits the byte budget (85 → 10).
+        QByteArray best;
+        for (int q = 85; q >= 10; q -= 15) {
+            QByteArray buf;
+            QBuffer io(&buf);
+            io.open(QIODevice::WriteOnly);
+            img.save(&io, "jpg", q);
+            best = buf;
+            if (buf.size() <= targetBytes) break;
+        }
+        QFile f(outPath);
+        ok = f.open(QIODevice::WriteOnly) && f.write(best) == best.size();
+    } else {
+        ok = img.save(outPath, ext.toLatin1().constData(), isJpg ? 90 : -1);
+    }
+
+    if (!ok) {
+        QMessageBox::warning(this, tr("Image Resizer"),
+                             tr("Could not write:\n%1").arg(outPath));
+        return;
+    }
+
+    // Unlock importing: this image is done.
+    for (Entry& e : m_images)
+        if (e.path == srcPath) e.exported = true;
+    refreshList();
+
+    QMessageBox box(QMessageBox::Information, tr("Export Complete"),
+                    tr("Saved %1 (%2 × %3) to:\n%4")
+                        .arg(QFileInfo(outPath).fileName())
+                        .arg(img.width()).arg(img.height()).arg(dir),
                     QMessageBox::Ok, this);
     auto* open = box.addButton(tr("Open Folder"), QMessageBox::ActionRole);
     box.exec();

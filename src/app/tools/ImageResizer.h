@@ -17,6 +17,11 @@
 // Background Fill (colour / transparent) pads instead of stretching.
 // As Percentage: uniform scale. Export writes <name>_resized.<ext> to a
 // chosen folder; JPG can be squeezed under a target KB/MB budget.
+//
+// Workflow: one image is imported at a time and becomes the SELECTED card;
+// importing is locked until that image has been exported. Exported images
+// stay on the canvas as a gallery — clicking any card re-selects it, and
+// the settings + Export apply to the selected image only.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QWidget>
@@ -56,6 +61,8 @@ private:
 
     void addImagesDialog();
     void addImages(const QStringList& paths);
+    void selectImage(const QString& path);
+    [[nodiscard]] bool hasPending() const;   // an image awaiting its export
     void clearAll();
     void sortImages();
     void refreshList();
@@ -72,11 +79,17 @@ private:
     [[nodiscard]] QSize computeTargetSize(const QSize& src) const;
 
     // ── data ───────────────────────────────────────────────────────────
-    QStringList m_paths;
+    struct Entry {
+        QString path;
+        bool    exported { false };   // has this image been resized+exported?
+    };
+    std::vector<Entry> m_images;
+    QString m_selected;               // path of the card the settings apply to
     bool   m_sortAscending { true };
     QColor m_fillColor     { Qt::black };
 
     // ── settings panel ─────────────────────────────────────────────────
+    QToolButton*  m_btnAdd      { nullptr };
     QToolButton*  m_btnSort     { nullptr };
     QToolButton*  m_btnClear    { nullptr };
     QLabel*       m_countLabel  { nullptr };
