@@ -315,6 +315,36 @@ QWidget* StartScreen::buildSidebar() {
     }
     v->addStretch();
 
+    // ── Public-beta notice ──────────────────────────────────────────────────
+    // A small red BETA pill with a short note, so users know this isn't the
+    // final release and how to report problems.
+    {
+        auto* betaBox = new QWidget(bar);
+        auto* bv = new QVBoxLayout(betaBox);
+        bv->setContentsMargins(4, 10, 4, 2);
+        bv->setSpacing(6);
+
+        auto* pill = new QLabel("BETA", betaBox);
+        pill->setAlignment(Qt::AlignCenter);
+        pill->setFixedSize(54, 22);
+        pill->setStyleSheet("background:#E5484D;color:#FFFFFF;border-radius:6px;"
+                            "font:700 11px 'Segoe UI';letter-spacing:1px;");
+        bv->addWidget(pill, 0, Qt::AlignLeft);
+
+        auto* note = new QLabel(betaBox);
+        note->setTextFormat(Qt::RichText);
+        note->setWordWrap(true);
+        note->setOpenExternalLinks(true);
+        note->setText("Public beta — not the final product. Found an issue? "
+                      "Email <a href='mailto:contact@nativeoffice.online' "
+                      "style='color:#8B7CF7;text-decoration:none;'>"
+                      "contact@nativeoffice.online</a>.");
+        note->setStyleSheet("color:#7B8494;font:11px 'Segoe UI';background:transparent;");
+        bv->addWidget(note);
+
+        v->addWidget(betaBox);
+    }
+
     bar->setStyleSheet(R"(
         QWidget#sidebar { background:#0A0D13; border-right:1px solid #1B212C; }
         #navItem { background:transparent; border-radius:8px; }
