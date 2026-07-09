@@ -97,6 +97,9 @@ public slots:
     void applyAnimationToSelection(ItemAnimation anim);
     void setZoomPercent(int percent);
     void setViewMode(ImpressViewMode mode);
+    // Free-plan view-only mode: ribbon disabled, canvas non-interactive (no
+    // item edits), notes read-only. Navigation and slide show stay available.
+    void setReadOnly(bool on);
     void startSlideShow();
     void startPresenterView();
 

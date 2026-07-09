@@ -1457,4 +1457,8 @@ void PdfModule::comingSoon(const QString& feature) {
     toast(tr("%1 — coming soon.").arg(feature));
 }
 
+void PdfModule::setReadOnly(bool on) {
+    if (m_ribbon) m_ribbon->setEnabled(!on);
+}
+
 } // namespace NativeOffice

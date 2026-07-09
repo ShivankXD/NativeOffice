@@ -874,6 +874,18 @@ static void writerExportToPdf(NativeOffice::WriterModule* writer, QWidget* paren
         "Document exported to PDF successfully!\n\n" + path);
 }
 
+// Free-plan gate: put a freshly created module into view-only mode unless the
+// account is premium, and keep it in sync if entitlement changes while the
+// editor is open (e.g. the user activates a key on the website and returns).
+template <class Module>
+static void applyEntitlementLock(Module* m) {
+    auto& auth = NativeOffice::AuthManager::instance();
+    auto apply = [m, &auth] { m->setReadOnly(!auth.premiumActive()); };
+    apply();
+    QObject::connect(&auth, &NativeOffice::AuthManager::entitlementChanged,
+                     m, [apply](bool) { apply(); });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build the Writer editor window with full menu bar
 // ─────────────────────────────────────────────────────────────────────────────
@@ -881,6 +893,7 @@ static WriterWindow* createWriterWindow(const QString& filePath) {
     auto* win    = new WriterWindow;
     auto* writer = new NativeOffice::WriterModule;
     win->setWriter(writer);
+    applyEntitlementLock(writer);
 
     // Centre on screen
     const QScreen* screen = QApplication::primaryScreen();
@@ -988,6 +1001,7 @@ static CalcWindow* createCalcWindow(const QString& filePath) {
     auto* win  = new CalcWindow;
     auto* calc = new NativeOffice::CalcModule;
     win->setCalc(calc);
+    applyEntitlementLock(calc);
 
     // Centre on screen
     const QScreen* screen = QApplication::primaryScreen();
@@ -1072,6 +1086,7 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
     auto* win     = new ImpressWindow;
     auto* impress = new NativeOffice::ImpressModule(win);
     win->setImpress(impress);
+    applyEntitlementLock(impress);
 
     // Centre on screen
     const QScreen* screen = QApplication::primaryScreen();
@@ -1255,6 +1270,7 @@ static PdfWindow* createPdfWindow(const QString& filePath) {
     auto* win = new PdfWindow;
     auto* pdf = new NativeOffice::PdfModule;
     win->setPdf(pdf);
+    applyEntitlementLock(pdf);
 
     const QScreen* screen = QApplication::primaryScreen();
     win->move(screen->availableGeometry().center() - win->rect().center());

@@ -2681,4 +2681,10 @@ bool ImpressModule::loadFromPath(const QString& path) {
     return true;
 }
 
+void ImpressModule::setReadOnly(bool on) {
+    if (m_ribbon)    m_ribbon->setEnabled(!on);
+    if (m_notesEdit) m_notesEdit->setReadOnly(on);
+    if (m_view)      m_view->setInteractive(!on);
+}
+
 } // namespace NativeOffice

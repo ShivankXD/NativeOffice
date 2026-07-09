@@ -852,4 +852,9 @@ void WriterModule::insertImage() {
     m_editor->setFocus();
 }
 
+void WriterModule::setReadOnly(bool on) {
+    if (m_editor) m_editor->setReadOnly(on);
+    if (m_ribbon) m_ribbon->setEnabled(!on);   // grey out the editing ribbon
+}
+
 } // namespace NativeOffice

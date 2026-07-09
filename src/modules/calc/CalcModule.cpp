@@ -5062,4 +5062,14 @@ bool CalcModule::loadFromPath(const QString& path) {
     return true;
 }
 
+void CalcModule::setReadOnly(bool on) {
+    const QAbstractItemView::EditTriggers triggers = on
+        ? QAbstractItemView::NoEditTriggers
+        : (QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed
+           | QAbstractItemView::AnyKeyPressed);
+    for (QTableView* v : { m_tableView, m_frozenTop, m_frozenLeft, m_frozenCorner })
+        if (v) v->setEditTriggers(triggers);
+    if (m_ribbon) m_ribbon->setEnabled(!on);
+}
+
 } // namespace NativeOffice

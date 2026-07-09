@@ -67,6 +67,10 @@ public:
 
     [[nodiscard]] SpreadsheetModel* model() const noexcept { return m_model; }
 
+    // Free-plan view-only mode: cell editing is disabled on all table views and
+    // the ribbon is disabled. Scrolling/selection for viewing stays available.
+    void setReadOnly(bool on);
+
     // ── File state ────────────────────────────────────────────────────────
     [[nodiscard]] QString currentFilePath() const noexcept { return m_currentPath; }
     [[nodiscard]] bool    isDirty()         const noexcept { return m_dirty; }

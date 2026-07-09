@@ -50,6 +50,10 @@ public:
     // password if the file is encrypted.
     void setInitialFile(const QString& path);
 
+    // Free-plan view-only mode: the editing ribbon is disabled (viewing,
+    // scrolling and navigation via the viewer remain available).
+    void setReadOnly(bool on);
+
     bool saveToPath(const QString& path);   // EditorWindow save pipeline
 
 signals:

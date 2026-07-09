@@ -62,6 +62,10 @@ public:
     void setPlainContent(const QString& text);
     void markClean();
 
+    // Free-plan view-only mode: editor becomes read-only and the ribbon's
+    // editing controls are disabled. Viewing/scrolling stays available.
+    void setReadOnly(bool on);
+
 signals:
     void documentModified();
     // Emitted after a successful save/load with the new path
