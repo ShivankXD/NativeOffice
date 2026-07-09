@@ -7,6 +7,8 @@ add_library(NativeOfficeCore STATIC
     application/RecentFilesManager.h
     application/FileRouter.cpp
     application/FileRouter.h
+    application/UpdateChecker.cpp
+    application/UpdateChecker.h
     auth/AuthManager.cpp
     auth/AuthManager.h
     auth/SecureStore.cpp

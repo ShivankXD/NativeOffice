@@ -166,19 +166,21 @@ QWidget* SettingsDialog::buildAccountPage() {
         nameLbl->setText(a.userName().isEmpty() ? QStringLiteral("Not signed in")
                                                 : a.userName());
         emailLbl->setText(a.userEmail());
+        const bool premium = a.premiumActive();
         QStringList meta;
         if (!a.occupation().isEmpty()) meta << a.occupation();
         if (a.joinedAt().isValid())
             meta << QStringLiteral("Member since ")
                         + a.joinedAt().toString("MMMM yyyy");
+        // Show the expiry date beside the plan for time-limited premium.
+        if (premium && a.premiumUntil().isValid())
+            meta << QStringLiteral("Expires ")
+                        + a.premiumUntil().toString("MMMM d, yyyy");
         metaLbl->setText(meta.join(QStringLiteral("  ·  ")));
 
-        const bool premium = a.premiumActive();
-        const QString planText = premium
-            ? (a.premiumPlan() == QLatin1String("lifetime")
-                   ? QStringLiteral("PREMIUM · LIFETIME")
-                   : QStringLiteral("PREMIUM"))
-            : QStringLiteral("FREE PLAN");
+        // e.g. "PREMIUM · 1-YEAR", "PREMIUM · LIFETIME", or "FREE PLAN".
+        const QString planText = premium ? a.premiumPlanLabel().toUpper()
+                                         : QStringLiteral("FREE PLAN");
         planLbl->setText(planText);
         planLbl->setStyleSheet(QString(
             "background:%1; color:%2; border:1px solid %3; border-radius:13px;"

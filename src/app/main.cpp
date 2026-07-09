@@ -21,6 +21,7 @@
 #include "core/application/AppController.h"
 #include "core/application/RecentFilesManager.h"
 #include "core/application/FileRouter.h"
+#include "core/application/UpdateChecker.h"
 #include "core/auth/AuthManager.h"
 
 #include "WriterModule.h"
@@ -30,6 +31,7 @@
 #include "PdfModule.h"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QMainWindow>
 #include <QScreen>
 #include <QMenuBar>
@@ -1693,26 +1695,51 @@ int main(int argc, char* argv[]) {
     QObject::connect(&guard, &NativeOffice::InstanceGuard::urlReceived,
                      &auth, [&auth, &shell](const QString&) {
         auth.pollNow();                   // browser says approval landed
+        auth.refreshEntitlement();        // ...and may carry a fresh purchase/key
         if (shell.isVisible()) { shell.raise(); shell.activateWindow(); }
+    });
+
+    // Premium sync without continuous polling: whenever the app regains focus
+    // (e.g. the user just bought premium or redeemed a key on the website and
+    // switched back), re-read entitlement from /api/me. Throttled to at most
+    // once every 20s so rapid focus toggling can't hammer the backend. This is
+    // the "website changes it, the app catches it on return" path — cheap on
+    // bandwidth versus a background timer that runs while the user is away.
+    QObject::connect(&app, &QApplication::applicationStateChanged, &auth,
+                     [&auth](Qt::ApplicationState st) {
+        if (st != Qt::ApplicationActive) return;
+        static qint64 lastMs = 0;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (nowMs - lastMs < 20000) return;
+        lastMs = nowMs;
+        auth.refreshEntitlement();        // no-op when signed out
     });
 
     // ── Reveal flow (after the sign-in gate) ───────────────────────────────
     // When launched to open a specific document, go straight to its tab (no
     // splash). Otherwise show the WPS-style startup splash, then reveal the
     // shell on the Home tab once it finishes.
-    auto revealApp = [&shell, openedFromCli]() {
+    // Kick the one-shot update scan the moment the home screen becomes visible,
+    // so the "scanning for updates" box is actually seen and the home stays
+    // locked until the (fast) check resolves. Guarded to run once per process.
+    auto beginUpdateScan = [] {
+        NativeOffice::UpdateChecker::instance().checkForUpdates();
+    };
+    auto revealApp = [&shell, openedFromCli, beginUpdateScan]() {
         const bool showSplash = QSettings().value("app/showSplash", true).toBool();
         if (openedFromCli || !showSplash) {
             shell.show();
             shell.raise();
             shell.activateWindow();
+            beginUpdateScan();
         } else {
             auto* splash = new NativeOffice::SplashScreen;
             QObject::connect(splash, &NativeOffice::SplashScreen::finished,
-                             &shell, [&shell]() {
+                             &shell, [&shell, beginUpdateScan]() {
                 shell.show();
                 shell.raise();
                 shell.activateWindow();
+                beginUpdateScan();
             });
             splash->start(2200);
         }

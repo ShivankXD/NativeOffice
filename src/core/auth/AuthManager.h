@@ -50,6 +50,10 @@ public:
     QString avatarPath() const;
     bool    premiumActive() const;
     QString premiumPlan() const;
+    // Expiry for time-limited plans; invalid for Free or Lifetime.
+    QDateTime premiumUntil() const;
+    // "Premium · 1-year", "Premium · Lifetime", "Free" — for profile display.
+    QString premiumPlanLabel() const;
 
     // Current pairing state (valid between deviceFlowStarted and completion).
     QString pairingCode() const     { return m_code; }

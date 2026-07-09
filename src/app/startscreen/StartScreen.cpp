@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "StartScreen.h"
 #include "core/application/RecentFilesManager.h"
+#include "core/application/UpdateChecker.h"
 #include "core/auth/AuthManager.h"
 #include "core/theme/ThemeManager.h"
 #include "common/Avatars.h"
@@ -195,7 +196,92 @@ StartScreen::StartScreen(AppController* controller, QWidget* parent)
     buildUi();
 }
 
+// While the startup update scan is running, launch actions are suppressed so
+// the user can't open an editor before we know whether an update is pending.
+bool StartScreen::launchLocked() const {
+    return UpdateChecker::instance().isScanning();
+}
+
+// Blue rounded banner shown at the top of the home body. It mirrors
+// UpdateChecker's state: a spinner while scanning/downloading, a plain notice
+// when up to date or offline, and a "Restart to update" button when ready.
+QWidget* StartScreen::buildUpdateBanner() {
+    auto* box = new QFrame(this);
+    box->setObjectName("updateBanner");
+    m_updateBanner = box;
+    auto* h = new QHBoxLayout(box);
+    h->setContentsMargins(16, 10, 12, 10);
+    h->setSpacing(10);
+
+    m_updateSpin = new QLabel(box);
+    m_updateSpin->setStyleSheet("background:transparent;color:#FFFFFF;font:700 15px 'Segoe UI';");
+    m_updateSpin->setFixedWidth(16);
+    h->addWidget(m_updateSpin);
+
+    m_updateText = new QLabel(box);
+    m_updateText->setStyleSheet("background:transparent;color:#FFFFFF;font:600 13px 'Segoe UI';");
+    h->addWidget(m_updateText);
+    h->addStretch();
+
+    m_updateBtn = new QPushButton("Restart to update", box);
+    m_updateBtn->setCursor(Qt::PointingHandCursor);
+    m_updateBtn->setStyleSheet(
+        "QPushButton { background:#FFFFFF; color:#1D4ED8; border:none; border-radius:8px;"
+        "  padding:6px 14px; font:700 12px 'Segoe UI'; }"
+        "QPushButton:hover { background:#EAF0FF; }");
+    m_updateBtn->hide();
+    connect(m_updateBtn, &QPushButton::clicked, this,
+            [] { UpdateChecker::instance().relaunchForUpdate(); });
+    h->addWidget(m_updateBtn);
+
+    box->setStyleSheet(
+        "QFrame#updateBanner { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+        "  stop:0 #2563EB, stop:1 #4F46E5); border:none; border-radius:12px; }");
+
+    // Spinner animation.
+    m_spinTimer = new QTimer(this);
+    connect(m_spinTimer, &QTimer::timeout, this, [this] {
+        static const char* frames[] = { "◜", "◝", "◞", "◟" };
+        m_updateSpin->setText(QString::fromUtf8(frames[m_spinPhase++ & 3]));
+    });
+
+    // React to state + progress changes for the app's lifetime.
+    auto& u = UpdateChecker::instance();
+    connect(&u, &UpdateChecker::stateChanged, this, [this] { refreshUpdateBanner(); });
+    connect(&u, &UpdateChecker::downloadProgress, this, [this](int pct) {
+        if (m_updateText)
+            m_updateText->setText(tr("Downloading the latest version… %1%").arg(pct));
+    });
+
+    refreshUpdateBanner();
+    return box;
+}
+
+void StartScreen::refreshUpdateBanner() {
+    if (!m_updateBanner) return;
+    using S = UpdateChecker::State;
+    auto& u = UpdateChecker::instance();
+    const S s = u.state();
+
+    // Idle/Failed are not worth a banner; everything else is user-relevant.
+    const bool show = s != S::Idle && s != S::Failed;
+    m_updateBanner->setVisible(show);
+    if (!show) { m_spinTimer->stop(); return; }
+
+    const bool spinning = s == S::Scanning || s == S::UpdateAvailable || s == S::Downloading;
+    m_updateText->setText(u.bannerMessage());
+    m_updateBtn->setVisible(s == S::ReadyToRestart);
+    if (spinning) {
+        m_updateSpin->show();
+        if (!m_spinTimer->isActive()) m_spinTimer->start(90);
+    } else {
+        m_spinTimer->stop();
+        m_updateSpin->hide();
+    }
+}
+
 void StartScreen::openFileDialog() {
+    if (launchLocked()) return;
     const QString path = QFileDialog::getOpenFileName(
         this, "Open Document", QDir::homePath(),
         "All Supported Files (*.docx *.noff *.html *.txt *.csv *.tsv "
@@ -302,6 +388,7 @@ QWidget* StartScreen::buildSidebar() {
         il->addWidget(ic); il->addWidget(tx); il->addStretch();
         const int action = n.action;
         item->onClick = [this, action]{
+            if (launchLocked()) return;
             switch (action) {
             case 1: emit newDocumentRequested(DocumentType::Writer);  break;
             case 2: emit newDocumentRequested(DocumentType::Calc);    break;
@@ -465,6 +552,9 @@ QWidget* StartScreen::buildCenterColumn() {
     auto* v = new QVBoxLayout(col);
     v->setContentsMargins(0, 0, 0, 0); v->setSpacing(22);
 
+    // Update status banner (blue box), pinned at the very top of the home body.
+    v->addWidget(buildUpdateBanner());
+
     // Welcome row + Import button
     auto* welcome = new QWidget(col);
     auto* wl = new QHBoxLayout(welcome);
@@ -557,6 +647,7 @@ QWidget* StartScreen::buildCreateCards() {
 
         const int action = c.action;
         card->onClick = [this, action]{
+            if (launchLocked()) return;
             if (action == 0) openFileDialog();
             else emit newDocumentRequested(action == 1 ? DocumentType::Writer
                                           : action == 2 ? DocumentType::Calc
@@ -612,7 +703,7 @@ QWidget* StartScreen::buildRecentPanel() {
         rh->addLayout(meta); rh->addStretch();
         rh->addWidget(heading(e.lastOpened.toString("MMM d, hh:mm"), 11, "#7B8494", false, rowf));
         const QString path = e.path;
-        rowf->onClick = [this, path]{ emit fileOpenRequested(path); };
+        rowf->onClick = [this, path]{ if (launchLocked()) return; emit fileOpenRequested(path); };
         v->addWidget(rowf);
     }
     v->addStretch();
@@ -676,7 +767,7 @@ QWidget* StartScreen::buildTemplatesPanel() {
         cv->addLayout(foot);
         const DocumentType type = t.type;
         const QString name = t.title;
-        c->onClick = [this, type, name]{ emit templateChosen(type, name); };
+        c->onClick = [this, type, name]{ if (launchLocked()) return; emit templateChosen(type, name); };
         grid->addWidget(c, i / 2, i % 2);
         ++i;
     }
@@ -746,7 +837,7 @@ QWidget* StartScreen::buildRightColumn() {
     // Tools
     { auto [p, pv] = makePanel("Tools");
       pv->addWidget(twoCol(p, Lucide::kImage, "Image Resizer", "Open", "#3B82F6",
-                           [this] { emit imageResizerRequested(); }));
+                           [this] { if (launchLocked()) return; emit imageResizerRequested(); }));
       v->addWidget(p); }
 
     v->addStretch();
@@ -1090,6 +1181,7 @@ void StartScreen::showTemplatesDialog(int initialCategory) {
             const bool blank = name.startsWith("Blank");
             const QString tplName = name;
             c->onClick = [this, type, blank, tplName, &dlg]{
+                if (launchLocked()) return;
                 if (blank) emit newDocumentRequested(type);
                 else       emit templateChosen(type, tplName);
                 dlg.accept();

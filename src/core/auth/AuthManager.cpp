@@ -106,6 +106,29 @@ QString AuthManager::premiumPlan() const {
     return QSettings().value("license/premiumPlan").toString();
 }
 
+QDateTime AuthManager::premiumUntil() const {
+    const qint64 t = QSettings().value("license/premiumUntil", 0).toLongLong();
+    return t > 0 ? QDateTime::fromSecsSinceEpoch(t) : QDateTime();
+}
+
+QString AuthManager::premiumPlanLabel() const {
+    if (!premiumActive()) return QStringLiteral("Free");
+    const QString plan = premiumPlan().toLower();
+    QString pretty;
+    if      (plan == QLatin1String("lifetime")) pretty = QStringLiteral("Lifetime");
+    else if (plan == QLatin1String("monthly"))  pretty = QStringLiteral("Monthly");
+    else if (plan == QLatin1String("yearly"))   pretty = QStringLiteral("1-year");
+    else if (!plan.isEmpty()) {
+        // "6-month", "1-year", "2-year", "<n>-day" → Title Case with spaces.
+        pretty = plan;
+        pretty.replace(QLatin1Char('-'), QLatin1Char(' '));
+        if (!pretty.isEmpty()) pretty[0] = pretty[0].toUpper();
+    } else {
+        pretty = QStringLiteral("Premium");
+    }
+    return QStringLiteral("Premium · ") + pretty;
+}
+
 // ── Requests ──────────────────────────────────────────────────────────────────
 
 QNetworkReply* AuthManager::getWithToken(const QString& path) {

@@ -16,6 +16,9 @@
 #include <QWidget>
 
 class QVBoxLayout;
+class QLabel;
+class QPushButton;
+class QTimer;
 
 namespace NativeOffice {
 
@@ -38,6 +41,9 @@ private:
     void     buildUi();
     QWidget* buildSidebar();
     QWidget* buildTopBar();
+    QWidget* buildUpdateBanner();       // blue "scanning for updates" box
+    void     refreshUpdateBanner();     // sync the banner to UpdateChecker state
+    bool     launchLocked() const;      // true while the update scan is running
     QWidget* buildCenterColumn();
     QWidget* buildCreateCards();
     QWidget* buildRecentPanel();
@@ -52,6 +58,14 @@ private:
     void showWhatsNewDialog();                          // release highlights
 
     AppController* m_controller { nullptr };
+
+    // Update banner widgets (owned by the layout).
+    QWidget*     m_updateBanner { nullptr };
+    QLabel*      m_updateSpin   { nullptr };
+    QLabel*      m_updateText   { nullptr };
+    QPushButton* m_updateBtn    { nullptr };
+    QTimer*      m_spinTimer    { nullptr };
+    int          m_spinPhase    { 0 };
 };
 
 } // namespace NativeOffice
