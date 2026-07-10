@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(NativeOffice
     VERSION 0.1.0
     DESCRIPTION "NativeOffice - High-Performance Cross-Platform Desktop Office Suite"
-    LANGUAGES CXX
+    LANGUAGES CXX C
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +59,23 @@ set_target_properties(pdfium PROPERTIES
     IMPORTED_IMPLIB               "${CMAKE_SOURCE_DIR}/third_party/pdfium/lib/pdfium.dll.lib"
     INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/third_party/pdfium/include"
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# md4c (vendored source, third_party/md4c) — the CommonMark parser behind the
+# Markdown Editor tool (Home → Tools). MIT-licensed; a single small C library
+# with no dependencies beyond the C standard library, compiled straight into
+# the app (no DLL, unlike pdfium). md4c.c parses; md4c-html.c renders the
+# parse tree to an HTML fragment we style + colorize ourselves.
+# ─────────────────────────────────────────────────────────────────────────────
+add_library(md4c STATIC
+    third_party/md4c/md4c.c
+    third_party/md4c/md4c.h
+    third_party/md4c/md4c-html.c
+    third_party/md4c/md4c-html.h
+    third_party/md4c/entity.c
+    third_party/md4c/entity.h
+)
+target_include_directories(md4c PUBLIC ${CMAKE_SOURCE_DIR}/third_party/md4c)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Subdirectories

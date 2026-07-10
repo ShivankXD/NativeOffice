@@ -15,6 +15,7 @@
 #include "startscreen/StartScreen.h"
 #include "startscreen/SplashScreen.h"
 #include "tools/ImageResizer.h"
+#include "tools/MarkdownEditor.h"
 #include "auth/LoginGate.h"
 #include "auth/InstanceGuard.h"
 #include "core/theme/ThemeManager.h"
@@ -119,6 +120,7 @@ static class CalcWindow*   createCalcWindow(const QString& filePath = {});
 static class ImpressWindow* createImpressWindow(const QString& filePath = {});
 static class PdfWindow*    createPdfWindow(const QString& filePath = {});
 static class ImageResizerWindow* createImageResizerWindow();
+static class MarkdownEditorWindow* createMarkdownEditorWindow();
 
 // Adds an editor window as a new tab in the main shell (defined after MainShell).
 static void presentEditor(EditorWindow* win);
@@ -518,6 +520,36 @@ public:
 
 static ImageResizerWindow* createImageResizerWindow() {
     auto* win = new ImageResizerWindow;
+    const QScreen* screen = QApplication::primaryScreen();
+    win->move(screen->availableGeometry().center() - win->rect().center());
+    return win;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MarkdownEditorWindow — the Markdown Editor tool tab (Home → Tools). Like the
+// Image Resizer, it holds no persistent document, so closing never prompts.
+// ─────────────────────────────────────────────────────────────────────────────
+class MarkdownEditorWindow : public EditorWindow {
+    Q_OBJECT
+public:
+    explicit MarkdownEditorWindow(QWidget* parent = nullptr)
+        : EditorWindow(parent)
+    {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setMinimumSize(900, 600);
+        resize(1200, 800);
+        setWindowTitle("Markdown Editor");
+        setCentralWidget(new NativeOffice::MarkdownEditorWidget(this));
+    }
+
+    bool    requestClose()          override { return true; }
+    QString docKindName()     const override { return QStringLiteral("Markdown Editor"); }
+    QString currentDocPath()  const override { return {}; }
+    bool    docDirty()        const override { return false; }
+};
+
+static MarkdownEditorWindow* createMarkdownEditorWindow() {
+    auto* win = new MarkdownEditorWindow;
     const QScreen* screen = QApplication::primaryScreen();
     win->move(screen->availableGeometry().center() - win->rect().center());
     return win;
@@ -1643,6 +1675,8 @@ int main(int argc, char* argv[]) {
         });
         QObject::connect(s, &NativeOffice::StartScreen::imageResizerRequested,
                          s, [] { presentEditor(createImageResizerWindow()); });
+        QObject::connect(s, &NativeOffice::StartScreen::markdownEditorRequested,
+                         s, [] { presentEditor(createMarkdownEditorWindow()); });
         return s;
     };
 
@@ -1670,6 +1704,8 @@ int main(int argc, char* argv[]) {
         });
         QObject::connect(s, &NativeOffice::StartScreen::imageResizerRequested,
                          s, [s, &shell] { shell.presentInHomeTab(s, createImageResizerWindow()); });
+        QObject::connect(s, &NativeOffice::StartScreen::markdownEditorRequested,
+                         s, [s, &shell] { shell.presentInHomeTab(s, createMarkdownEditorWindow()); });
         QObject::connect(s, &NativeOffice::StartScreen::settingsRequested,
                          &controller, &NativeOffice::AppController::openSettings);
         return s;
@@ -1706,6 +1742,8 @@ int main(int argc, char* argv[]) {
     // Image Resizer tab on startup so it can be verified without UI clicks.
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_RESIZER"))
         presentEditor(createImageResizerWindow());
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_MARKDOWN"))
+        presentEditor(createMarkdownEditorWindow());
 
     auto& auth = NativeOffice::AuthManager::instance();
     QObject::connect(&guard, &NativeOffice::InstanceGuard::urlReceived,

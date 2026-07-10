@@ -36,6 +36,8 @@ signals:
     void templateChosen(DocumentType type, const QString& name);
     // The Image Resizer tool card (right column) was clicked.
     void imageResizerRequested();
+    // The Markdown Editor tool card (right column) was clicked.
+    void markdownEditorRequested();
 
 private:
     void     buildUi();

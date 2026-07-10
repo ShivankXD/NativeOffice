@@ -848,6 +848,8 @@ QWidget* StartScreen::buildRightColumn() {
     { auto [p, pv] = makePanel("Tools");
       pv->addWidget(twoCol(p, Lucide::kImage, "Image Resizer", "Open", "#3B82F6",
                            [this] { if (launchLocked()) return; emit imageResizerRequested(); }));
+      pv->addWidget(twoCol(p, Lucide::kCode, "Markdown Editor", "Open", "#3B82F6",
+                           [this] { if (launchLocked()) return; emit markdownEditorRequested(); }));
       v->addWidget(p); }
 
     v->addStretch();

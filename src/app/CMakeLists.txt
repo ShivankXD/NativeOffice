@@ -24,6 +24,8 @@ qt_add_executable(NativeOffice
     settings/SettingsDialog.h
     tools/ImageResizer.cpp
     tools/ImageResizer.h
+    tools/MarkdownEditor.cpp
+    tools/MarkdownEditor.h
     common/Avatars.h
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc
 )
@@ -42,6 +44,7 @@ target_link_libraries(NativeOffice PRIVATE
     CalcModule
     ImpressModule
     PdfModule
+    md4c
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
