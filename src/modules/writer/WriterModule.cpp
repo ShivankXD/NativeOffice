@@ -316,6 +316,18 @@ void WriterModule::buildUi() {
     // For an untitled session, offer crash recovery once shown (loadFromPath
     // handles the case where a file is opened).
     QTimer::singleShot(500, this, [this]{ if (m_currentPath.isEmpty()) checkCrashRecovery(); });
+
+    // A brand-new, untouched document must start CLEAN: contentsChanged fired
+    // while assembling the initial empty page is not a real user edit. Without
+    // this the tab shows a spurious "*" and closing an untouched doc wrongly
+    // prompts to save. Cleared once construction + first layout settle; a real
+    // keystroke afterwards re-dirties it as normal.
+    QTimer::singleShot(0, this, [this]{
+        if (m_currentPath.isEmpty() && m_editor && m_editor->document()->isEmpty()) {
+            m_dirty = false;
+            emit documentModified();
+        }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

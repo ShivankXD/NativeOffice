@@ -910,6 +910,14 @@ CalcModule::CalcModule(QWidget* parent)
     auto repaintOverlays = [this]{ m_selOverlay->update(); m_ants->update(); updateFrozenViews(); repositionFloatingObjects(); };
     connect(m_tableView->horizontalScrollBar(), &QScrollBar::valueChanged, this, repaintOverlays);
     connect(m_tableView->verticalScrollBar(),   &QScrollBar::valueChanged, this, repaintOverlays);
+
+    // A freshly-built, untouched spreadsheet must start CLEAN: any modification
+    // signal fired while assembling the initial empty grid is not a real user
+    // edit. Without this the tab shows a spurious "*" and closing an untouched
+    // sheet wrongly prompts to save. A real edit afterwards re-dirties it.
+    QTimer::singleShot(0, this, [this]{
+        if (m_currentPath.isEmpty()) { m_dirty = false; emit documentModified(); }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

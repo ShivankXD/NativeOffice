@@ -165,6 +165,12 @@ ImpressModule::ImpressModule(QWidget* parent)
     // history so the Undo button is disabled until the user actually changes
     // something (and so undo can never empty the whole deck).
     m_undoStack->clear();
+
+    // …and clean the dirty flag: a freshly-created deck has no unsaved user
+    // edits, so the tab must show no "*" and closing it must not prompt to save.
+    QTimer::singleShot(0, this, [this]{
+        if (m_currentPath.isEmpty()) { m_dirty = false; emit documentModified(); }
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
