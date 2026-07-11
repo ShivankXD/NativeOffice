@@ -49,7 +49,10 @@ SplashScreen::SplashScreen(QWidget* parent)
     // ── Brand logo ────────────────────────────────────────────────────────
     auto* logo = new QLabel(card);
     logo->setAlignment(Qt::AlignCenter);
-    QPixmap pm(":/assets/nativeoffice-logo.png");
+    // The transparent-background lockup (logo_white_bg.png) so it sits flush on
+    // the white card — the light-bg variant baked in an off-white rectangle
+    // that read as a mismatched box.
+    QPixmap pm(":/assets/nativeoffice-logo-mark.png");
     if (!pm.isNull()) {
         // Fit inside a bounded box (keeping aspect ratio) so the tall wordmark
         // logo never overflows the card and pushes the status text off-screen.
@@ -63,8 +66,8 @@ SplashScreen::SplashScreen(QWidget* parent)
 
     cl->addSpacing(28);
 
-    // ── "Initializing....." status line ───────────────────────────────────
-    m_status = new QLabel(QStringLiteral("Initializing....."), card);
+    // ── Status line (base text + animated dots) ────────────────────────────
+    m_status = new QLabel(card);
     m_status->setAlignment(Qt::AlignCenter);
     m_status->setStyleSheet(
         "color:#5B6473; font-family:'Segoe UI','Inter',sans-serif;"
@@ -87,30 +90,40 @@ SplashScreen::SplashScreen(QWidget* parent)
 
     cl->addStretch();
 
-    // Animate the trailing dots of "Initializing....." (1..5 dots).
+    // Animate the trailing dots of the status line (1..5 dots).
     m_dotTimer = new QTimer(this);
     connect(m_dotTimer, &QTimer::timeout, this, [this]() {
         m_dotCount = (m_dotCount % 5) + 1;
-        m_status->setText("Initializing" + QString(m_dotCount, '.'));
+        refreshStatus();
     });
 }
 
-void SplashScreen::start(int durationMs)
-{
+void SplashScreen::refreshStatus() {
+    m_status->setText(m_base + QString(m_dotCount, '.'));
+}
+
+void SplashScreen::beginWith(const QString& baseText) {
     if (const QScreen* screen = QApplication::primaryScreen())
         move(screen->geometry().center() - rect().center());
 
-    m_status->setText(QStringLiteral("Initializing....."));
+    m_base = baseText;
+    m_dotCount = 3;
+    refreshStatus();
     m_dotTimer->start(280);
 
     show();
     raise();
+}
 
-    QTimer::singleShot(durationMs, this, [this]() {
-        m_dotTimer->stop();
-        emit finished();
-        close();              // WA_DeleteOnClose handles cleanup
-    });
+void SplashScreen::setStatus(const QString& baseText) {
+    m_base = baseText;
+    refreshStatus();
+}
+
+void SplashScreen::finish() {
+    m_dotTimer->stop();
+    emit finished();
+    close();                   // WA_DeleteOnClose handles cleanup
 }
 
 } // namespace NativeOffice

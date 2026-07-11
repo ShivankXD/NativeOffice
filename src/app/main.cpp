@@ -50,6 +50,8 @@
 #include <QTime>
 #include <QDate>
 #include <QSettings>
+#include <QPointer>
+#include <QTimer>
 #include <QTabWidget>
 #include <QTabBar>
 #include <QToolButton>
@@ -1847,32 +1849,41 @@ int main(int argc, char* argv[]) {
     auto beginUpdateScan = [] {
         NativeOffice::UpdateChecker::instance().checkForUpdates();
     };
-    auto revealApp = [&shell, openedFromCli, beginUpdateScan]() {
-        const bool showSplash = QSettings().value("app/showSplash", true).toBool();
-        if (openedFromCli || !showSplash) {
-            shell.show();
-            shell.raise();
-            shell.activateWindow();
-            beginUpdateScan();
-        } else {
-            auto* splash = new NativeOffice::SplashScreen;
-            QObject::connect(splash, &NativeOffice::SplashScreen::finished,
-                             &shell, [&shell, beginUpdateScan]() {
-                shell.show();
-                shell.raise();
-                shell.activateWindow();
-                beginUpdateScan();
-            });
-            splash->start(2200);
-        }
+    auto revealShell = [&shell, beginUpdateScan]() {
+        shell.show();
+        shell.raise();
+        shell.activateWindow();
+        beginUpdateScan();
     };
 
-    // ── Sign-in gate: the app is gated until a session exists ─────────────
+    // ── Unified startup: one splash card + the sign-in gate ────────────────
+    // A single card carries the whole launch — it shows "Restoring your
+    // session" while the stored session validates, then "Initializing" until
+    // the shell is ready (only the text changes). If sign-in is actually
+    // needed, the splash steps aside and the gate's window takes over.
     {
+        const bool useSplash =
+            !openedFromCli && QSettings().value("app/showSplash", true).toBool();
+        QPointer<NativeOffice::SplashScreen> splash =
+            useSplash ? new NativeOffice::SplashScreen : nullptr;
+        if (splash) splash->beginWith(QStringLiteral("Restoring your session"));
+
         auto* gate = new NativeOffice::LoginGate;
         QObject::connect(gate, &NativeOffice::LoginGate::proceed,
-                         &shell, [revealApp]() { revealApp(); });
-        gate->begin();
+                         &shell, [splash, revealShell]() {
+            if (splash) {
+                splash->setStatus(QStringLiteral("Initializing"));
+                QTimer::singleShot(1400, splash, [splash, revealShell]() {
+                    revealShell();
+                    if (splash) splash->finish();
+                });
+            } else {
+                revealShell();
+            }
+        });
+        QObject::connect(gate, &NativeOffice::LoginGate::signInRequired,
+                         gate, [splash]() { if (splash) splash->finish(); });
+        gate->begin(/*silentChecking=*/splash != nullptr);
     }
 
     // Signing out (from Settings) hides the shell and re-gates.

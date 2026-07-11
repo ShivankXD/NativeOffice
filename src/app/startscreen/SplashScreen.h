@@ -1,13 +1,16 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// SplashScreen.h — WPS-style startup splash
+// SplashScreen.h — WPS-style startup splash (single unified card)
 //
 // A frameless, translucent splash window shown the moment the app launches.
 // It displays the NativeOffice brand logo over a rounded white card with an
-// animated "Initializing....." status line and a thin indeterminate progress
-// bar, then emits finished() so the home screen can take over.
+// animated status line (dots) and a thin indeterminate progress bar. One card
+// carries the whole startup: it shows "Restoring your session" while the gate
+// validates the stored session, then setStatus("Initializing") until the shell
+// is ready — only the text changes; the card and progress bar stay put.
 // ─────────────────────────────────────────────────────────────────────────────
 #pragma once
 
+#include <QString>
 #include <QWidget>
 
 class QLabel;
@@ -20,17 +23,23 @@ class SplashScreen : public QWidget {
 public:
     explicit SplashScreen(QWidget* parent = nullptr);
 
-    // Centre on the primary screen, show the splash and start the animation.
-    // finished() is emitted after durationMs and the splash closes itself.
-    void start(int durationMs = 2200);
+    // Centre on the primary screen, set the initial status and show the card.
+    void beginWith(const QString& baseText);
+    // Swap the status line's base text (the animated dots continue).
+    void setStatus(const QString& baseText);
+    // Stop the animation, emit finished() and close (WA_DeleteOnClose cleans up).
+    void finish();
 
 signals:
     void finished();
 
 private:
-    QLabel* m_status   { nullptr };
-    QTimer* m_dotTimer { nullptr };
-    int     m_dotCount { 5 };
+    void refreshStatus();
+
+    QLabel*  m_status   { nullptr };
+    QTimer*  m_dotTimer { nullptr };
+    QString  m_base     { QStringLiteral("Initializing") };
+    int      m_dotCount { 3 };
 };
 
 } // namespace NativeOffice

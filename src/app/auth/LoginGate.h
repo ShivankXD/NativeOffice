@@ -28,10 +28,16 @@ public:
     explicit LoginGate(QWidget* parent = nullptr);
 
     // Show the gate: validates any stored session first, otherwise sign-in.
-    void begin();
+    // When silentChecking is true, the gate window stays hidden while a stored
+    // session is validated (the startup splash shows "Restoring your session"
+    // instead); it only becomes visible if sign-in is actually needed.
+    void begin(bool silentChecking = false);
 
 signals:
     void proceed();
+    // Emitted when the gate must show its sign-in UI, so a covering splash can
+    // step aside.
+    void signInRequired();
 
 protected:
     void closeEvent(QCloseEvent* e) override;

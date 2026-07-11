@@ -241,15 +241,15 @@ QWidget* LoginGate::buildWaitingPage() {
 
 // ── Flow ──────────────────────────────────────────────────────────────────────
 
-void LoginGate::begin() {
+void LoginGate::begin(bool silentChecking) {
     if (const QScreen* screen = QApplication::primaryScreen())
         move(screen->geometry().center() - rect().center());
-    show();
-    raise();
-    activateWindow();
 
     if (AuthManager::instance().hasToken()) {
         m_stack->setCurrentIndex(0);
+        // When a splash is covering startup, stay hidden and let it show
+        // "Restoring your session"; otherwise show our own checking card.
+        if (!silentChecking) { show(); raise(); activateWindow(); }
         AuthManager::instance().validateStoredToken();
     } else {
         showSignIn();
@@ -271,6 +271,11 @@ void LoginGate::showSignIn(const QString& error) {
         m_errorLabel->show();
     }
     m_stack->setCurrentIndex(1);
+    // Sign-in is interactive: tell any covering splash to step aside, and make
+    // sure our window is on screen (it may have stayed hidden during a silent
+    // stored-session check).
+    emit signInRequired();
+    if (!isVisible()) { show(); raise(); activateWindow(); }
 }
 
 void LoginGate::finishGate() {
