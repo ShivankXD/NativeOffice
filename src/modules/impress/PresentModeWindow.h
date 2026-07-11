@@ -11,6 +11,7 @@
 #include "SlideData.h"
 
 #include <QWidget>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QList>
 #include <QPointF>
@@ -110,6 +111,7 @@ private:
 
     QVariantAnimation* m_transitionAnim { nullptr };
     QVariantAnimation* m_objectAnim     { nullptr };
+    QElapsedTimer      m_frameClock;    // throttles per-frame scene re-renders
 
     struct OrigState { QPointF pos; qreal opacity; qreal scale; qreal rotation; };
     QList<QGraphicsItem*>            m_animItems;

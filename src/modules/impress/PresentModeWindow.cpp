@@ -337,7 +337,8 @@ void PresentModeWindow::runTransition(const QPixmap& oldPm, const QPixmap& newPm
 
     connect(m_transitionAnim, &QVariantAnimation::valueChanged, this,
             [this, oldPm, newPm, type](const QVariant& v) {
-        if (m_black) return;
+        if (m_black || m_frameClock.elapsed() < 30) return;   // cap at ~30fps
+        m_frameClock.restart();
         m_slideLabel->setPixmap(compositeFrame(size(), oldPm, newPm, type, v.toDouble()));
     });
     connect(m_transitionAnim, &QVariantAnimation::finished, this,
@@ -345,6 +346,7 @@ void PresentModeWindow::runTransition(const QPixmap& oldPm, const QPixmap& newPm
         if (!m_black) m_slideLabel->setPixmap(newPm);
         if (onDone) onDone();
     });
+    m_frameClock.restart();
     m_transitionAnim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
@@ -420,7 +422,8 @@ void PresentModeWindow::runSlideAnimation(const QPixmap& oldPm, const QPixmap& n
 
     connect(m_transitionAnim, &QVariantAnimation::valueChanged, this,
             [this, oldPm, newPm, type](const QVariant& v) {
-        if (m_black) return;
+        if (m_black || m_frameClock.elapsed() < 30) return;   // cap at ~30fps
+        m_frameClock.restart();
         m_slideLabel->setPixmap(compositeSlideAnim(size(), oldPm, newPm, type, v.toDouble()));
     });
     connect(m_transitionAnim, &QVariantAnimation::finished, this,
@@ -428,6 +431,7 @@ void PresentModeWindow::runSlideAnimation(const QPixmap& oldPm, const QPixmap& n
         if (!m_black) m_slideLabel->setPixmap(newPm);
         if (onDone) onDone();
     });
+    m_frameClock.restart();
     m_transitionAnim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
@@ -573,12 +577,19 @@ void PresentModeWindow::playObjectAnimations(SlideScene* scene) {
             const OrigState& o = m_orig[it];
             applyItemAnimFrame(it, animOf(it), { o.pos, o.opacity, o.scale, o.rotation }, t);
         }
-        if (!m_black) m_slideLabel->setPixmap(renderScene(scene));
+        // Re-rendering the whole scene every animation tick (~60fps) is the main
+        // slide-show stutter; cap it at ~30fps. The final frame is drawn by the
+        // finished handler below, so nothing is lost visually.
+        if (!m_black && m_frameClock.elapsed() >= 30) {
+            m_frameClock.restart();
+            m_slideLabel->setPixmap(renderScene(scene));
+        }
     });
     connect(m_objectAnim, &QVariantAnimation::finished, this, [this, scene]() {
         finishPendingAnimations();
         if (!m_black) m_slideLabel->setPixmap(renderScene(scene));
     });
+    m_frameClock.restart();
     m_objectAnim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
@@ -629,12 +640,16 @@ void PresentModeWindow::playExitAnimations(SlideScene* scene, std::function<void
             const OrigState& o = m_orig[it];
             applyItemAnimFrame(it, animOf(it), { o.pos, o.opacity, o.scale, o.rotation }, t);
         }
-        if (!m_black) m_slideLabel->setPixmap(renderScene(scene));
+        if (!m_black && m_frameClock.elapsed() >= 30) {   // cap re-renders at ~30fps
+            m_frameClock.restart();
+            m_slideLabel->setPixmap(renderScene(scene));
+        }
     });
     connect(m_objectAnim, &QVariantAnimation::finished, this, [this, onDone]() {
         finishPendingAnimations();   // restore objects so returning to the slide is clean
         if (onDone) onDone();
     });
+    m_frameClock.restart();
     m_objectAnim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
