@@ -2261,6 +2261,27 @@ bool ImpressModule::exportPptxTo(const QString& path) {
             }
         }
 
+        // Slide-number field: a deck-wide flag (not a saved item), so emit it as
+        // a small text shape carrying this slide's 1-based number.
+        if (slide.showSlideNumber) {
+            QPointF np = slide.slideNumberPos;
+            if (np.x() < 0)
+                np = QPointF(SlideScene::SLIDE_W - 80, SlideScene::SLIDE_H - 44);
+            const QRectF numRect(np, QSizeF(80, 40));
+            const QString numBody = QString(
+                "<a:p><a:pPr algn=\"ctr\"/><a:r>"
+                "<a:rPr lang=\"en-US\" sz=\"1300\" b=\"1\" dirty=\"0\">"
+                "<a:solidFill><a:srgbClr val=\"3A3F4B\"/></a:solidFill></a:rPr>"
+                "<a:t>%1</a:t></a:r></a:p>").arg(s + 1);
+            shapes += QString(
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"%1\" name=\"SlideNumber %1\"/>"
+                "<p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>"
+                "<p:spPr>%2<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>"
+                "<p:txBody><a:bodyPr wrap=\"none\" rtlCol=\"0\"/><a:lstStyle/>%3</p:txBody>"
+                "</p:sp>").arg(shapeId).arg(xfrmXml(numRect, 0), numBody);
+            ++shapeId;
+        }
+
         const QString slideXml = QString(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
             "<p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "

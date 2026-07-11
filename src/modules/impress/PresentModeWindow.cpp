@@ -55,9 +55,14 @@ PresentModeWindow::PresentModeWindow(const std::vector<SlideData>& deck,
     setFocusPolicy(Qt::StrongFocus);
 
     // Build private scenes from the data so we never touch the editor's scenes.
-    for (const auto& data : deck) {
+    for (int i = 0; i < static_cast<int>(deck.size()); ++i) {
+        const auto& data = deck[i];
         auto* scene = new SlideScene(this);
         scene->loadFromData(data);
+        // The slide-number field isn't a saved item, so re-add it from the deck
+        // flag/position (with this slide's 1-based number) for the show.
+        if (data.showSlideNumber)
+            scene->setSlideNumber(true, i + 1, data.slideNumberPos);
         m_scenes.push_back(scene);
         m_transitions.push_back(data.transition);
         m_slideAnims.push_back(data.slideAnimation);
