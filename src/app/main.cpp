@@ -18,6 +18,7 @@
 #include "tools/MarkdownEditor.h"
 #include "auth/LoginGate.h"
 #include "auth/InstanceGuard.h"
+#include "core/common/BrandBar.h"
 #include "core/theme/ThemeManager.h"
 #include "core/application/AppController.h"
 #include "core/application/RecentFilesManager.h"
@@ -112,6 +113,54 @@ public:
     virtual QString docKindName()   const = 0;  // "Document"/"Spreadsheet"/"Presentation"
     virtual QString currentDocPath() const = 0;  // empty while untitled
     virtual bool    docDirty()      const = 0;
+
+    // ── On-screen name model (drives the tab label + BrandBar rename field) ──
+    // kindWord(): noun used in the "untitled <word>" tab label. Empty ⇒ a tool
+    //   (no rename bar; the tab just shows docKindName()).
+    // nameExt(): the format suffix shown outside the rename field (".docx", …).
+    virtual QString kindWord() const { return {}; }
+    virtual QString nameExt()  const { return {}; }
+
+    QString baseName() const { return m_baseName; }
+    bool    isNamed()  const { return m_named; }
+
+    void setBaseName(const QString& n) {
+        const QString t = n.trimmed();
+        if (t.isEmpty() || t == m_baseName) return;
+        m_baseName = t;
+        m_named = true;
+        emit displayNameChanged();
+    }
+    // Adopt the base name from the current file path (after open / save-as).
+    void syncNameFromPath() {
+        const QString p = currentDocPath();
+        if (p.isEmpty()) return;
+        const QString b = QFileInfo(p).completeBaseName();
+        if (b.isEmpty() || (m_named && b == m_baseName)) return;
+        m_baseName = b;
+        m_named = true;
+        emit displayNameChanged();
+    }
+    // Bind the module's embedded BrandBar rename field to this window's name.
+    // Call at the end of each subclass constructor (once the central widget —
+    // which owns the BrandBar — is in place).
+    void wireDocNameBar() {
+        if (kindWord().isEmpty()) return;             // tools have no rename bar
+        auto* bb = findChild<NativeOffice::BrandBar*>();
+        if (!bb) return;
+        bb->setDocName(m_baseName, nameExt());
+        connect(bb, &NativeOffice::BrandBar::docNameEdited,
+                this, [this](const QString& n) { setBaseName(n); });
+        connect(this, &EditorWindow::displayNameChanged, bb,
+                [this, bb] { bb->setDocName(m_baseName, nameExt()); });
+    }
+
+signals:
+    void displayNameChanged();
+
+protected:
+    QString m_baseName { QStringLiteral("untitled") };
+    bool    m_named    { false };
 };
 
 // Forward declarations for free-function helpers
@@ -143,6 +192,8 @@ public:
         m_writer = w;
         setCentralWidget(w);
         updateTitle();
+        syncNameFromPath();
+        wireDocNameBar();
 
         // Keep title in sync with dirty state
         connect(w, &NativeOffice::WriterModule::documentModified,
@@ -160,7 +211,7 @@ public:
         QString path = QFileDialog::getSaveFileName(
             this, "Save As…",
             m_writer->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/Untitled.docx"
+                ? QDir::homePath() + "/" + baseName() + ".docx"
                 : m_writer->currentFilePath(),
             WRITER_SAVE_FILTER, &selectedFilter);
 
@@ -186,6 +237,8 @@ public slots:
 
 public:
     QString docKindName()    const override { return QStringLiteral("Document"); }
+    QString kindWord()       const override { return QStringLiteral("document"); }
+    QString nameExt()        const override { return QStringLiteral(".docx"); }
     QString currentDocPath() const override { return m_writer ? m_writer->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_writer && m_writer->isDirty(); }
 
@@ -246,6 +299,8 @@ public:
         m_calc = c;
         setCentralWidget(c);
         updateTitle();
+        syncNameFromPath();
+        wireDocNameBar();
 
         connect(c, &NativeOffice::CalcModule::documentModified,
                 this, &CalcWindow::updateTitle);
@@ -260,7 +315,7 @@ public:
         QString path = QFileDialog::getSaveFileName(
             this, "Save As…",
             m_calc->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/Untitled.xlsx"
+                ? QDir::homePath() + "/" + baseName() + ".xlsx"
                 : m_calc->currentFilePath(),
             CALC_SAVE_FILTER, &selectedFilter);
 
@@ -286,6 +341,8 @@ public slots:
 
 public:
     QString docKindName()    const override { return QStringLiteral("Spreadsheet"); }
+    QString kindWord()       const override { return QStringLiteral("sheet"); }
+    QString nameExt()        const override { return QStringLiteral(".xlsx"); }
     QString currentDocPath() const override { return m_calc ? m_calc->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_calc && m_calc->isDirty(); }
 
@@ -345,6 +402,8 @@ public:
         m_impress = im;
         setCentralWidget(im);
         updateTitle();
+        syncNameFromPath();
+        wireDocNameBar();
 
         connect(im, &NativeOffice::ImpressModule::documentModified,
                 this, &ImpressWindow::updateTitle);
@@ -357,7 +416,7 @@ public:
     bool saveAs() {
         const QString suggested =
             m_impress->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/Untitled.pptx"
+                ? QDir::homePath() + "/" + baseName() + ".pptx"
                 : QFileInfo(m_impress->currentFilePath()).absolutePath() + "/"
                       + QFileInfo(m_impress->currentFilePath()).completeBaseName() + ".pptx";
         const QString path = QFileDialog::getSaveFileName(
@@ -379,6 +438,8 @@ public slots:
 
 public:
     QString docKindName()    const override { return QStringLiteral("Presentation"); }
+    QString kindWord()       const override { return QStringLiteral("presentation"); }
+    QString nameExt()        const override { return QStringLiteral(".pptx"); }
     QString currentDocPath() const override { return m_impress ? m_impress->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_impress && m_impress->isDirty(); }
 
@@ -445,6 +506,8 @@ public:
         m_pdf = pdf;
         setCentralWidget(pdf);
         updateTitle();
+        syncNameFromPath();
+        wireDocNameBar();
         connect(pdf, &NativeOffice::PdfModule::documentModified,
                 this, &PdfWindow::updateTitle);
         connect(pdf, &NativeOffice::PdfModule::filePathChanged, this,
@@ -468,6 +531,8 @@ public slots:
 
 public:
     QString docKindName()    const override { return QStringLiteral("PDF"); }
+    QString kindWord()       const override { return QStringLiteral("pdf"); }
+    QString nameExt()        const override { return QStringLiteral(".pdf"); }
     QString currentDocPath() const override { return m_pdf ? m_pdf->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_pdf && m_pdf->isDirty(); }
 
@@ -539,13 +604,23 @@ public:
         setMinimumSize(900, 600);
         resize(1200, 800);
         setWindowTitle("Markdown Editor");
-        setCentralWidget(new NativeOffice::MarkdownEditorWidget(this));
+        m_md = new NativeOffice::MarkdownEditorWidget(this);
+        setCentralWidget(m_md);
+        wireDocNameBar();
+        m_md->setDocName(baseName());
+        connect(this, &EditorWindow::displayNameChanged, this,
+                [this] { m_md->setDocName(baseName()); });
     }
 
     bool    requestClose()          override { return true; }
     QString docKindName()     const override { return QStringLiteral("Markdown Editor"); }
+    QString kindWord()        const override { return QStringLiteral("markdown"); }
+    QString nameExt()         const override { return QStringLiteral(".md"); }
     QString currentDocPath()  const override { return {}; }
     bool    docDirty()        const override { return false; }
+
+private:
+    NativeOffice::MarkdownEditorWidget* m_md { nullptr };
 };
 
 static MarkdownEditorWindow* createMarkdownEditorWindow() {
@@ -730,7 +805,7 @@ public:
         win->setAttribute(Qt::WA_DeleteOnClose, false);
         win->setWindowFlags(Qt::Widget);   // behave as a plain child widget
 
-        assignAutoName(win);
+        win->syncNameFromPath();       // adopt the file's name if already open
         addPage(win, labelFor(win));
         watchTitle(win);
     }
@@ -746,7 +821,7 @@ public:
 
         win->setAttribute(Qt::WA_DeleteOnClose, false);
         win->setWindowFlags(Qt::Widget);
-        assignAutoName(win);
+        win->syncNameFromPath();
 
         m_stack->removeWidget(homeWidget);
         homeWidget->deleteLater();
@@ -803,36 +878,27 @@ private:
         return idx;
     }
 
-    // Assign a per-type sequential name ("Document 1", "Spreadsheet 1", "PDF 1", …).
-    void assignAutoName(EditorWindow* win) {
-        const QString kind = win->docKindName();
-        int n = 0;
-        if      (kind == QLatin1String("Spreadsheet"))  n = ++m_nSheet;
-        else if (kind == QLatin1String("Presentation")) n = ++m_nPres;
-        else if (kind == QLatin1String("PDF"))          n = ++m_nPdf;
-        else                                             n = ++m_nDoc;
-        win->setProperty("autoName", QStringLiteral("%1 %2").arg(kind).arg(n));
-    }
-
-    // Keep the tab label in sync with the document's save/dirty state.
+    // Keep the tab label in sync with the document's name + save/dirty state.
     void watchTitle(EditorWindow* win) {
-        connect(win, &QWidget::windowTitleChanged, this, [this, win](const QString&) {
+        auto refresh = [this, win] {
             const int i = m_stack->indexOf(win);
             if (i >= 0) m_bar->setTabText(i, labelFor(win));
-        });
+        };
+        connect(win, &QWidget::windowTitleChanged, this,
+                [win, refresh](const QString&) { win->syncNameFromPath(); refresh(); });
+        connect(win, &EditorWindow::displayNameChanged, this, refresh);
     }
 
-    // Tab label: the auto-assigned name while untitled ("Document 1"), or the
-    // file name once saved, prefixed "* " when a saved file has unsaved edits.
+    // Tab label: tools show their kind name ("Image Resizer"); documents show
+    // "untitled <kind>" until named, then the base name, with a "* " prefix
+    // while a saved file has unsaved edits.
     QString labelFor(EditorWindow* win) const {
-        const QString path = win->currentDocPath();
-        if (path.isEmpty()) {
-            QString base = win->property("autoName").toString();
-            if (base.isEmpty()) base = win->docKindName();
-            return elide(base);
-        }
-        return (win->docDirty() ? QStringLiteral("* ") : QString())
-               + elide(QFileInfo(path).fileName());
+        if (win->kindWord().isEmpty())
+            return elide(win->docKindName());
+        if (!win->isNamed())                       // fresh doc: no dirty marker
+            return elide(QStringLiteral("untitled ") + win->kindWord());
+        const QString star = win->docDirty() ? QStringLiteral("* ") : QString();
+        return star + elide(win->baseName());
     }
 
     static QString elide(QString s) {
@@ -854,10 +920,6 @@ private:
     ShellTabBar*               m_bar   { nullptr };
     QStackedWidget*            m_stack { nullptr };
     std::function<QWidget*()>  m_homeFactory;
-    int m_nDoc   { 0 };
-    int m_nSheet { 0 };
-    int m_nPres  { 0 };
-    int m_nPdf   { 0 };
 };
 
 // The single shell instance; document windows route their tabs through it.
@@ -1744,6 +1806,12 @@ int main(int argc, char* argv[]) {
         presentEditor(createImageResizerWindow());
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_MARKDOWN"))
         presentEditor(createMarkdownEditorWindow());
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_WRITER"))
+        presentEditor(createWriterWindow());
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_CALC"))
+        presentEditor(createCalcWindow());
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_IMPRESS"))
+        presentEditor(createImpressWindow());
 
     auto& auth = NativeOffice::AuthManager::instance();
     QObject::connect(&guard, &NativeOffice::InstanceGuard::urlReceived,

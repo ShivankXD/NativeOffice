@@ -51,6 +51,10 @@ public:
     explicit MarkdownEditorWidget(QWidget* parent = nullptr);
     ~MarkdownEditorWidget() override;
 
+    // The document base name used to seed the Export dialogs (set by the window
+    // from the on-screen rename bar).
+    void setDocName(const QString& name);
+
 private:
     // ── build / theming ────────────────────────────────────────────────────
     QWidget* buildToolbar();

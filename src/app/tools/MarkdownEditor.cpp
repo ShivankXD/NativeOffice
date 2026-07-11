@@ -5,6 +5,7 @@
 
 #include "startscreen/LucideIcons.h"
 #include "DocxIo.h"   // WriterModule's OOXML writer, reused for markdown → .docx
+#include "core/common/BrandBar.h"
 
 #include <QByteArray>
 #include <QDir>
@@ -337,6 +338,12 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget* parent)
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
+    // The shared NativeOffice brand strip (mark + wordmark + Free/Premium pill
+    // + on-screen rename bar) sits above the editor's own toolbar, matching the
+    // other editors. It follows the app chrome theme, independent of the
+    // editor's light/dark preview toggle below it.
+    root->addWidget(new BrandBar(this));
+
     m_toolbar = buildToolbar();
     root->addWidget(m_toolbar);
 
@@ -425,6 +432,10 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget* parent)
 }
 
 MarkdownEditorWidget::~MarkdownEditorWidget() { saveState(); }
+
+void MarkdownEditorWidget::setDocName(const QString& name) {
+    if (!name.trimmed().isEmpty()) m_docName = name.trimmed();
+}
 
 // ── toolbar (monochrome Lucide icon buttons) ──────────────────────────────────
 QWidget* MarkdownEditorWidget::buildToolbar() {

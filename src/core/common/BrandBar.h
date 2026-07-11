@@ -11,6 +11,9 @@
 #include <QPixmap>
 #include <QWidget>
 
+class QLabel;
+class QLineEdit;
+
 namespace NativeOffice {
 
 class BrandBar : public QWidget {
@@ -18,12 +21,27 @@ class BrandBar : public QWidget {
 public:
     explicit BrandBar(QWidget* parent = nullptr);
 
+    // Show an editable document name (e.g. "untitled") just after the wordmark,
+    // with the immutable format suffix (".docx", ".md", …) pinned outside the
+    // field. An empty ext hides the whole rename control (used by tools).
+    void setDocName(const QString& base, const QString& ext);
+
+signals:
+    // Emitted as the user edits the name field (live).
+    void docNameEdited(const QString& base);
+
 protected:
     void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
 
 private:
-    QPixmap m_mark;               // brand mark cropped out of the full logo art
-    bool    m_premium { false };
+    void styleNameField();        // theme the rename field for light/dark chrome
+    void layoutNameField();       // position the field + suffix after the wordmark
+
+    QPixmap    m_mark;            // brand mark cropped out of the full logo art
+    bool       m_premium { false };
+    QLineEdit* m_nameEdit { nullptr };
+    QLabel*    m_extLabel { nullptr };
 };
 
 } // namespace NativeOffice

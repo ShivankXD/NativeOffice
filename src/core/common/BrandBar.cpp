@@ -8,6 +8,8 @@
 
 #include <QFont>
 #include <QFontMetrics>
+#include <QLabel>
+#include <QLineEdit>
 #include <QLinearGradient>
 #include <QPainter>
 
@@ -37,8 +39,64 @@ BrandBar::BrandBar(QWidget* parent)
     connect(&auth, &AuthManager::entitlementChanged,
             this, [this](bool on) { m_premium = on; update(); });
     connect(&ThemeManager::instance(), &ThemeManager::modeChanged,
-            this, [this](ThemeMode) { update(); });
+            this, [this](ThemeMode) { update(); styleNameField(); });
+
+    // ── On-screen rename field (hidden until a document sets its name) ────────
+    m_nameEdit = new QLineEdit(this);
+    m_nameEdit->setObjectName("brandNameEdit");
+    m_nameEdit->setPlaceholderText(QStringLiteral("untitled"));
+    m_nameEdit->setMaxLength(80);
+    m_nameEdit->hide();
+    m_extLabel = new QLabel(this);
+    m_extLabel->setObjectName("brandExtLabel");
+    m_extLabel->hide();
+    connect(m_nameEdit, &QLineEdit::textEdited, this,
+            [this](const QString& t) { emit docNameEdited(t); });
+    styleNameField();
 }
+
+// The name lives in a rounded field; the extension sits just outside it, so
+// the whole thing reads as "untitled.docx" with only "untitled" editable.
+void BrandBar::setDocName(const QString& base, const QString& ext) {
+    if (ext.isEmpty()) {                 // a tool (no document name)
+        m_nameEdit->hide();
+        m_extLabel->hide();
+        return;
+    }
+    // Don't clobber the caret while the user is actively typing.
+    if (!m_nameEdit->hasFocus() && m_nameEdit->text() != base)
+        m_nameEdit->setText(base);
+    m_extLabel->setText(ext);
+    m_nameEdit->show();
+    m_extLabel->show();
+    layoutNameField();
+}
+
+void BrandBar::styleNameField() {
+    const bool dark = ThemeManager::instance().isDark();
+    m_nameEdit->setStyleSheet(QString(
+        "QLineEdit#brandNameEdit { background:%1; border:1px solid %2; border-radius:7px;"
+        " padding:2px 9px; color:%3; font:600 12px 'Segoe UI'; }"
+        "QLineEdit#brandNameEdit:focus { border:1px solid #6D5BE8; }")
+        .arg(dark ? "#151A24" : "#F4F5F8",
+             dark ? "#2A3140" : "#DADDE4",
+             dark ? "#E6E9F0" : "#1C2333"));
+    m_extLabel->setStyleSheet(QString("QLabel#brandExtLabel { color:%1; font:600 12px 'Segoe UI'; }")
+        .arg(dark ? "#7B8494" : "#9098A8"));
+}
+
+void BrandBar::layoutNameField() {
+    if (m_nameEdit->isHidden()) return;
+    const int h = 26;
+    const int y = (height() - h) / 2;
+    const int x = 172;               // just past the "NativeOffice" wordmark
+    const int fw = 190;
+    m_nameEdit->setGeometry(x, y, fw, h);
+    const int ew = m_extLabel->sizeHint().width();
+    m_extLabel->setGeometry(x + fw + 6, y, ew + 4, h);
+}
+
+void BrandBar::resizeEvent(QResizeEvent*) { layoutNameField(); }
 
 void BrandBar::paintEvent(QPaintEvent*) {
     QPainter p(this);
