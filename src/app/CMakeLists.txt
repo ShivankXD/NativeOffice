@@ -22,6 +22,8 @@ qt_add_executable(NativeOffice
     auth/InstanceGuard.h
     settings/SettingsDialog.cpp
     settings/SettingsDialog.h
+    settings/SettingsTray.cpp
+    settings/SettingsTray.h
     tools/ImageResizer.cpp
     tools/ImageResizer.h
     tools/MarkdownEditor.cpp

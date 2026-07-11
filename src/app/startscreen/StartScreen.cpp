@@ -7,7 +7,7 @@
 #include "core/auth/AuthManager.h"
 #include "core/theme/ThemeManager.h"
 #include "common/Avatars.h"
-#include "settings/SettingsDialog.h"
+#include "settings/SettingsTray.h"
 #include "LucideIcons.h"
 
 #include <QMessageBox>
@@ -344,8 +344,12 @@ void StartScreen::buildUi() {
     // screen grab itself shortly after startup.
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB")) {
         const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_HOME_GRAB");
-        QTimer::singleShot(6000, this, [this, grabPath] {
-            grab().save(grabPath, "PNG");
+        const bool grabSettings = qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_SETTINGS");
+        if (grabSettings)
+            QTimer::singleShot(4500, this, [this] { showSettingsDialog(); });
+        QTimer::singleShot(6000, this, [this, grabPath, grabSettings] {
+            QWidget* target = grabSettings ? window() : this;
+            target->grab().save(grabPath, "PNG");
         });
     }
 }
@@ -862,10 +866,13 @@ QWidget* StartScreen::buildRightColumn() {
     return col;
 }
 
-// ── Settings ── the full sectioned window lives in settings/SettingsDialog ───────
+// ── Settings ── a right-side slide-in tray overlaying the home screen ────────────
 void StartScreen::showSettingsDialog() {
-    SettingsDialog dlg(this);
-    dlg.exec();
+    // Parent to the top-level window so the tray overlays the whole app and is
+    // sized from a stable, full-size widget (the StartScreen page inside the
+    // stack can momentarily report a smaller rect during startup).
+    if (!m_settingsTray) m_settingsTray = new SettingsTray(window());
+    m_settingsTray->openTray();
 }
 
 // ── Notifications ── dropdown anchored under the bell icon ────────────────────

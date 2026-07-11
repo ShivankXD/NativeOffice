@@ -23,6 +23,8 @@ class QTimer;
 
 namespace NativeOffice {
 
+class SettingsTray;
+
 class StartScreen : public QWidget {
     Q_OBJECT
 
@@ -61,6 +63,7 @@ private:
     void showWhatsNewDialog();                          // release highlights
 
     AppController* m_controller { nullptr };
+    SettingsTray*  m_settingsTray { nullptr };   // right-side slide-in settings
 
     // Update banner widgets (owned by the layout).
     QWidget*     m_updateBanner { nullptr };   // compact top-right status pill
