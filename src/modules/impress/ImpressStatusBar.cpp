@@ -63,12 +63,10 @@ ImpressStatusBar::ImpressStatusBar(QWidget* parent)
 
     m_btnNormal  = makeBtn("▭ Normal",  "Normal view");
     m_btnOutline = makeBtn("≡ Outline", "Outline view");
-    m_btnSorter  = makeBtn("▦ Sorter",  "Slide Sorter view");
     m_btnNormal->setChecked(true);
 
     group->addButton(m_btnNormal,  static_cast<int>(ImpressViewMode::Normal));
     group->addButton(m_btnOutline, static_cast<int>(ImpressViewMode::Outline));
-    group->addButton(m_btnSorter,  static_cast<int>(ImpressViewMode::SlideSorter));
 
     connect(group, &QButtonGroup::idClicked, this, [this](int id) {
         emit viewModeChanged(static_cast<ImpressViewMode>(id));
@@ -76,7 +74,6 @@ ImpressStatusBar::ImpressStatusBar(QWidget* parent)
 
     layout->addWidget(m_btnNormal);
     layout->addWidget(m_btnOutline);
-    layout->addWidget(m_btnSorter);
 
     // ── Zoom slider ─────────────────────────────────────────────────────
     m_zoomSlider = new QSlider(Qt::Horizontal, this);
@@ -168,7 +165,7 @@ void ImpressStatusBar::setViewMode(ImpressViewMode mode) {
     switch (mode) {
     case ImpressViewMode::Normal:      m_btnNormal->setChecked(true);  break;
     case ImpressViewMode::Outline:     m_btnOutline->setChecked(true); break;
-    case ImpressViewMode::SlideSorter: m_btnSorter->setChecked(true);  break;
+    case ImpressViewMode::SlideSorter: break;   // Sorter view removed
     }
 }
 

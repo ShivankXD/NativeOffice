@@ -870,11 +870,21 @@ void StartScreen::showSettingsDialog() {
 
 // ── Notifications ── dropdown anchored under the bell icon ────────────────────
 void StartScreen::showNotificationsPopup(QWidget* anchor) {
+    // Toggle behaviour without flicker: a Qt::Popup dismisses itself on the very
+    // press that opens the bell again, so the button's release would otherwise
+    // re-open it (open → close → open flash). If a popup is live, or one was
+    // just dismissed by this same click, do nothing.
+    if (m_notifPopup) { m_notifPopup->close(); return; }
+    if (QDateTime::currentMSecsSinceEpoch() - m_notifClosedMs < 250) return;
+
     auto* pop = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
     pop->setObjectName("notifPop");
     pop->setAttribute(Qt::WA_DeleteOnClose);
     pop->setAttribute(Qt::WA_StyledBackground, true);
     pop->setFixedWidth(360);
+    m_notifPopup = pop;
+    connect(pop, &QObject::destroyed, this,
+            [this] { m_notifClosedMs = QDateTime::currentMSecsSinceEpoch(); });
 
     auto* v = new QVBoxLayout(pop);
     v->setContentsMargins(14, 12, 14, 12);
@@ -926,6 +936,11 @@ void StartScreen::showNotificationsPopup(QWidget* anchor) {
         #notifItem { background:transparent; border-radius:8px; }
         #notifItem:hover { background:#161C28; }
     )");
+    // Compute the final size BEFORE showing so the popup doesn't pop in at one
+    // size and resize on screen (the word-wrapped rows need the layout activated
+    // first, otherwise adjustSize uses a stale height).
+    pop->ensurePolished();
+    pop->layout()->activate();
     pop->adjustSize();
     const QPoint bottomRight =
         anchor->mapToGlobal(QPoint(anchor->width(), anchor->height() + 8));

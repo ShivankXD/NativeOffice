@@ -50,6 +50,11 @@ public:
     // internal drop-enabled list container)
     [[nodiscard]] int dropIndexForY(int y) const;
 
+    [[nodiscard]] int activeSlide() const noexcept { return m_activeIdx; }
+
+protected:
+    void keyPressEvent(QKeyEvent* e) override;   // Delete removes, arrows navigate
+
 signals:
     void slideClicked(int slideIndex);
     void addSlideRequested();

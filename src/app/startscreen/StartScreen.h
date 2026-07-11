@@ -13,6 +13,7 @@
 
 #include "core/application/AppController.h"
 
+#include <QPointer>
 #include <QWidget>
 
 class QVBoxLayout;
@@ -67,6 +68,11 @@ private:
     QLabel*      m_updateText   { nullptr };
     QTimer*      m_spinTimer    { nullptr };
     int          m_spinPhase    { 0 };
+
+    // Notifications popup (bell): tracked so the bell toggles it cleanly and the
+    // dismiss-then-reopen flicker is suppressed.
+    QPointer<QWidget> m_notifPopup;
+    qint64            m_notifClosedMs { 0 };
 };
 
 } // namespace NativeOffice

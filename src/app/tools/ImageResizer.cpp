@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "ImageResizer.h"
 #include "startscreen/LucideIcons.h"
+#include "core/common/BrandBar.h"
 
 #include <QAction>
 #include <QBuffer>
@@ -109,11 +110,20 @@ ImageResizerWidget::ImageResizerWidget(QWidget* parent)
     // would silently fail to load; this tool legitimately handles them.
     QImageReader::setAllocationLimit(0);
 
-    auto* root = new QHBoxLayout(this);
+    // The shared NativeOffice brand strip (mark + wordmark + Free/Premium pill)
+    // sits above the tool, matching the editors. As a tool it carries no
+    // document name, so the rename field stays hidden (never given a name).
+    auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
-    root->addWidget(buildSettingsPanel());
-    root->addWidget(buildCanvas(), 1);
+    root->addWidget(new BrandBar(this));
+
+    auto* body = new QHBoxLayout();
+    body->setContentsMargins(0, 0, 0, 0);
+    body->setSpacing(0);
+    body->addWidget(buildSettingsPanel());
+    body->addWidget(buildCanvas(), 1);
+    root->addLayout(body, 1);
 
     applyStyles();
     setMode(true);

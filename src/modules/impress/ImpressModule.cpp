@@ -16,6 +16,7 @@
 #include "core/common/BrandBar.h"
 
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QVBoxLayout>
 #include <QHash>
 #include <QGraphicsView>
@@ -517,6 +518,18 @@ void ImpressModule::buildUi() {
     // ── Status bar wiring ───────────────────────────────────────────────
     connect(m_statusBar, &ImpressStatusBar::zoomChanged,    this, &ImpressModule::setZoomPercent);
     connect(m_statusBar, &ImpressStatusBar::viewModeChanged, this, &ImpressModule::setViewMode);
+
+    // Clicking the left Slides/Outline tab directly keeps the view-mode buttons
+    // in sync and (re)populates the outline so it always reflects the deck.
+    connect(m_leftTabs, &QTabWidget::currentChanged, this, [this](int idx) {
+        const bool outline = (m_leftTabs->widget(idx) == m_outline);
+        if (outline) {
+            m_outline->rebuild(m_slideData);
+            if (m_currentIdx >= 0) m_outline->setActiveSlide(m_currentIdx);
+        }
+        m_statusBar->setViewMode(outline ? ImpressViewMode::Outline
+                                         : ImpressViewMode::Normal);
+    });
 
     // ── Notes panel ────────────────────────────────────────────────────
     connect(m_notesEdit, &QTextEdit::textChanged, this, [this] {
@@ -1384,8 +1397,33 @@ void ImpressModule::resizeEvent(QResizeEvent* event) {
 }
 
 bool ImpressModule::eventFilter(QObject* obj, QEvent* event) {
-    if (m_view && obj == m_view->viewport() && event->type() == QEvent::Resize)
-        refitView();
+    if (m_view && obj == m_view->viewport()) {
+        if (event->type() == QEvent::Resize) {
+            refitView();
+        } else if (event->type() == QEvent::KeyPress) {
+            auto* ke = static_cast<QKeyEvent*>(event);
+            // Arrow keys page through slides — but only when nothing on the
+            // canvas is selected or being text-edited (those consume arrows to
+            // nudge shapes / move the caret).
+            const bool busy = m_currentIdx >= 0 &&
+                m_currentIdx < static_cast<int>(m_scenes.size()) &&
+                (m_scenes[m_currentIdx]->hasSelection() ||
+                 m_scenes[m_currentIdx]->focusItem() != nullptr);
+            if (!busy) {
+                switch (ke->key()) {
+                case Qt::Key_Left:
+                case Qt::Key_Up:
+                    if (m_currentIdx > 0) switchToSlide(m_currentIdx - 1);
+                    return true;
+                case Qt::Key_Right:
+                case Qt::Key_Down:
+                    if (m_currentIdx < static_cast<int>(m_scenes.size()) - 1)
+                        switchToSlide(m_currentIdx + 1);
+                    return true;
+                }
+            }
+        }
+    }
     return QWidget::eventFilter(obj, event);
 }
 

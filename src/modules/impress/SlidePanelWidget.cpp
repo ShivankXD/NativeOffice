@@ -10,6 +10,7 @@
 #include <QFrame>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QKeyEvent>
 #include <QMimeData>
 
 namespace NativeOffice {
@@ -48,6 +49,8 @@ SlidePanelWidget::SlidePanelWidget(QWidget* parent)
 {
     setObjectName("slidePanelWidget");
     setFixedWidth(200);
+    // Focusable so the panel receives Delete / arrow keys once a slide is picked.
+    setFocusPolicy(Qt::StrongFocus);
 
     auto* rootLayout = new QVBoxLayout(this);
     rootLayout->setContentsMargins(0, 0, 0, 0);
@@ -132,8 +135,10 @@ void SlidePanelWidget::addSlide(int slideIndex, SlideScene* scene) {
     const int insertPos = m_listLayout->count() - 1;
     m_listLayout->insertWidget(insertPos, thumb, 0, Qt::AlignHCenter);
 
-    connect(thumb, &SlideThumbnailWidget::clicked,
-            this,  &SlidePanelWidget::slideClicked);
+    connect(thumb, &SlideThumbnailWidget::clicked, this, [this](int i) {
+        setFocus(Qt::MouseFocusReason);   // so Delete / arrows act on this panel
+        emit slideClicked(i);
+    });
     connect(thumb, &SlideThumbnailWidget::duplicateRequested,
             this,  &SlidePanelWidget::duplicateRequested);
     connect(thumb, &SlideThumbnailWidget::deleteRequested,
@@ -174,6 +179,29 @@ void SlidePanelWidget::clear() {
 
 int SlidePanelWidget::slideCount() const noexcept {
     return static_cast<int>(m_thumbnails.size());
+}
+
+void SlidePanelWidget::keyPressEvent(QKeyEvent* e) {
+    const int n = slideCount();
+    switch (e->key()) {
+    case Qt::Key_Delete:
+    case Qt::Key_Backspace:
+        if (n > 1) emit deleteRequested(m_activeIdx);
+        e->accept();
+        return;
+    case Qt::Key_Up:
+    case Qt::Key_Left:
+        if (m_activeIdx > 0) emit slideClicked(m_activeIdx - 1);
+        e->accept();
+        return;
+    case Qt::Key_Down:
+    case Qt::Key_Right:
+        if (m_activeIdx < n - 1) emit slideClicked(m_activeIdx + 1);
+        e->accept();
+        return;
+    default:
+        QWidget::keyPressEvent(e);
+    }
 }
 
 } // namespace NativeOffice

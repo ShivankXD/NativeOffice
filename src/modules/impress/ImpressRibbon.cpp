@@ -1145,16 +1145,14 @@ QWidget* ImpressRibbon::buildViewTab() {
     group->setExclusive(true);
     auto* btnNormal  = makeCmdBtn("Normal",  "Normal editing view", 78, true);
     auto* btnOutline = makeCmdBtn("Outline", "Outline view", 78, true);
-    auto* btnSorter  = makeCmdBtn("Sorter",  "Slide Sorter view", 78, true);
     btnNormal->setChecked(true);
     group->addButton(btnNormal,  static_cast<int>(ImpressViewMode::Normal));
     group->addButton(btnOutline, static_cast<int>(ImpressViewMode::Outline));
-    group->addButton(btnSorter,  static_cast<int>(ImpressViewMode::SlideSorter));
     connect(group, &QButtonGroup::idToggled, this, [this](int id, bool checked) {
         if (checked) emit viewModeChanged(static_cast<ImpressViewMode>(id));
     });
 
-    layout->addWidget(makeGroup("Presentation Views", { btnNormal, btnOutline, btnSorter }));
+    layout->addWidget(makeGroup("Presentation Views", { btnNormal, btnOutline }));
     layout->addStretch();
     return tab;
 }
