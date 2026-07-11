@@ -3,16 +3,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "MarkdownEditor.h"
 
-#include "theme/ThemeManager.h"
+#include "startscreen/LucideIcons.h"
 
 #include <QByteArray>
+#include <QEnterEvent>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSplitter>
+#include <QSplitterHandle>
 #include <QSyntaxHighlighter>
 #include <QTextBrowser>
 #include <QTextCursor>
@@ -20,6 +23,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <functional>
 #include <set>
 
 // md4c — vendored CommonMark parser (third_party/md4c). Header self-guards with
@@ -138,19 +142,19 @@ QString colorizeCodeBlocks(const QString& html, bool dark) {
 QString previewCss(bool dark) {
     if (dark) {
         return R"(
-            body { background:#0d1117; color:#e6edf3; font-family:'Segoe UI',Arial,sans-serif;
+            body { background:#1e1e1e; color:#e6e6e6; font-family:'Segoe UI',Arial,sans-serif;
                    font-size:14px; }
             a { color:#4493f8; }
-            h1,h2,h3,h4 { color:#e6edf3; font-weight:600; }
+            h1,h2,h3,h4 { color:#ffffff; font-weight:600; }
             h1 { font-size:26px; } h2 { font-size:21px; } h3 { font-size:17px; }
-            code { background:#161b22; color:#e6edf3; font-family:Consolas,'Courier New',monospace; }
-            pre { background:#161b22; color:#e6edf3; padding:10px;
+            code { background:#2d2d2d; color:#e6e6e6; font-family:Consolas,'Courier New',monospace; }
+            pre { background:#252526; color:#e6e6e6; padding:10px;
                   font-family:Consolas,'Courier New',monospace; }
-            blockquote { color:#8b949e; border-left:3px solid #30363d; padding-left:12px; }
-            table { border:1px solid #30363d; }
-            th,td { border:1px solid #30363d; padding:4px 9px; }
-            th { background:#161b22; }
-            hr { color:#30363d; }
+            blockquote { color:#9aa0a6; border-left:3px solid #3a3a3a; padding-left:12px; }
+            table { border:1px solid #3a3a3a; }
+            th,td { border:1px solid #3a3a3a; padding:4px 9px; }
+            th { background:#252526; }
+            hr { color:#3a3a3a; }
         )";
     }
     return R"(
@@ -174,6 +178,61 @@ QString previewCss(bool dark) {
 void mdSink(const MD_CHAR* text, MD_SIZE size, void* userdata) {
     static_cast<QByteArray*>(userdata)->append(text, int(size));
 }
+
+// ── editor chrome palette (self-themed, decoupled from app ThemeManager) ──────
+struct Chrome {
+    QString paneBg, toolbarBg, border, sep, icon, iconHover, iconHoverBg, divider;
+};
+Chrome chrome(bool dark) {
+    return dark
+        ? Chrome{ "#1E1E1E", "#1E1E1E", "#2E2E2E", "#3A3A3A",
+                  "#C7C7C7", "#FFFFFF", "#2E2E2E", "#3A3A3A" }
+        : Chrome{ "#FFFFFF", "#F6F7F9", "#E2E4E9", "#DADCE2",
+                  "#4B5262", "#111318", "#E9EBEF", "#E2E4E9" };
+}
+
+// A pane divider that LOOKS like a 1px hairline but keeps a comfortable grab
+// area (the handle is several px wide; only a centered 1px line is painted).
+class HairlineHandle : public QSplitterHandle {
+public:
+    HairlineHandle(Qt::Orientation o, QSplitter* parent)
+        : QSplitterHandle(o, parent) {
+        setAttribute(Qt::WA_OpaquePaintEvent, true);   // we cover the whole rect
+    }
+    void setColors(const QColor& bg, const QColor& line) {
+        m_bg = bg; m_line = line; update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), m_bg);                       // blend with the panes…
+        const QColor c = m_hover ? m_line.lighter(150) : m_line;
+        p.fillRect(width() / 2, 0, 1, height(), c);     // …then a 1px hairline
+    }
+    void enterEvent(QEnterEvent*) override { m_hover = true;  update(); }
+    void leaveEvent(QEvent*)      override { m_hover = false; update(); }
+
+private:
+    QColor m_bg   { "#1E1E1E" };
+    QColor m_line { "#3A3A3A" };
+    bool   m_hover { false };
+};
+
+class HairlineSplitter : public QSplitter {
+public:
+    using QSplitter::QSplitter;
+    void setDividerColors(const QColor& bg, const QColor& line) {
+        // Every handle we create is a HairlineHandle, so the cast is safe.
+        for (int i = 1; i < count(); ++i)
+            static_cast<HairlineHandle*>(handle(i))->setColors(bg, line);
+    }
+
+protected:
+    QSplitterHandle* createHandle() override {
+        return new HairlineHandle(orientation(), this);
+    }
+};
 
 } // namespace
 
@@ -262,7 +321,7 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget* parent)
     setObjectName("markdownEditor");
     setAttribute(Qt::WA_StyledBackground, true);
 
-    m_previewDark = QSettings().value("tools/markdownEditor/previewDark", false).toBool();
+    m_dark = QSettings().value("tools/markdownEditor/dark", true).toBool();
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -284,24 +343,29 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget* parent)
         m_editor->setFont(mono);
     }
 
+    m_editor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_editor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
     m_preview = new QTextBrowser(this);
     m_preview->setObjectName("mdPreview");
     m_preview->setFrameShape(QFrame::NoFrame);
     m_preview->setOpenLinks(false);          // a preview shouldn't navigate away
     m_preview->setOpenExternalLinks(false);
+    m_preview->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_preview->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
-    m_split = new QSplitter(Qt::Horizontal, this);
+    auto* split = new HairlineSplitter(Qt::Horizontal, this);
+    m_split = split;
     m_split->addWidget(m_editor);
     m_split->addWidget(m_preview);
     m_split->setChildrenCollapsible(false);
-    m_split->setHandleWidth(6);
+    m_split->setHandleWidth(9);              // wide grab area; paints a 1px line
     m_split->setStretchFactor(0, 7);
     m_split->setStretchFactor(1, 3);
     m_split->setSizes({ 700, 300 });         // 70 / 30 default
     root->addWidget(m_split, 1);
 
-    m_highlighter = new MarkdownHighlighter(m_editor->document(),
-                                            ThemeManager::instance().isDark());
+    m_highlighter = new MarkdownHighlighter(m_editor->document(), m_dark);
 
     // ── debounced live preview ───────────────────────────────────────────────
     m_debounce = new QTimer(this);
@@ -316,12 +380,6 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget* parent)
             &MarkdownEditorWidget::syncPreviewToEditor);
     connect(m_preview->verticalScrollBar(), &QScrollBar::valueChanged, this,
             &MarkdownEditorWidget::syncEditorToPreview);
-
-    // ── follow chrome light/dark for the toolbar + panes ──────────────────────
-    connect(&ThemeManager::instance(), &ThemeManager::modeChanged, this, [this] {
-        applyChrome();
-        m_highlighter->setDark(ThemeManager::instance().isDark());
-    });
 
     // Restore the last split ratio, if any.
     const QByteArray splitState =
@@ -358,99 +416,126 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget* parent)
 
 MarkdownEditorWidget::~MarkdownEditorWidget() { saveState(); }
 
-// ── toolbar ──────────────────────────────────────────────────────────────────
+// ── toolbar (monochrome Lucide icon buttons) ──────────────────────────────────
 QWidget* MarkdownEditorWidget::buildToolbar() {
     auto* bar = new QFrame(this);
     bar->setObjectName("mdToolbar");
     bar->setAttribute(Qt::WA_StyledBackground, true);
     auto* h = new QHBoxLayout(bar);
-    h->setContentsMargins(8, 6, 8, 6);
-    h->setSpacing(3);
+    h->setContentsMargins(8, 5, 8, 5);
+    h->setSpacing(2);
 
-    auto addBtn = [&](const QString& label, const QString& tip,
+    auto addBtn = [&](const char* svg, const QString& tip,
                       std::function<void()> slot) {
         auto* b = new QToolButton(bar);
-        b->setText(label);
         b->setToolTip(tip);
-        b->setCursor(Qt::PointingHandCursor);
+        b->setIconSize(QSize(18, 18));
+        b->setFixedSize(30, 30);
         b->setAutoRaise(true);
+        b->setCursor(Qt::PointingHandCursor);
         connect(b, &QToolButton::clicked, this, std::move(slot));
         h->addWidget(b);
+        m_iconButtons.emplace_back(b, svg);       // for theme recolor
         return b;
     };
     auto addSep = [&] {
         auto* line = new QFrame(bar);
         line->setObjectName("mdSep");
         line->setFrameShape(QFrame::VLine);
-        h->addSpacing(3);
+        line->setFixedWidth(1);
+        h->addSpacing(4);
         h->addWidget(line);
-        h->addSpacing(3);
+        h->addSpacing(4);
     };
 
-    addBtn(tr("B"),  tr("Bold  (**text**)"),
-           [this] { wrapSelection("**", "**", tr("bold text")); })
-        ->setObjectName("mdBold");
-    addBtn(tr("I"),  tr("Italic  (_text_)"),
-           [this] { wrapSelection("_", "_", tr("italic text")); })
-        ->setObjectName("mdItalic");
+    // Order mirrors the reference layout exactly.
+    addBtn(Lucide::kHeading, tr("Heading"),
+           [this] { insertHeading(1); });
+    addBtn(Lucide::kBold, tr("Bold  (**text**)"),
+           [this] { wrapSelection("**", "**", tr("bold text")); });
+    addBtn(Lucide::kItalic, tr("Italic  (_text_)"),
+           [this] { wrapSelection("_", "_", tr("italic text")); });
     addSep();
-    addBtn(tr("H1"), tr("Heading 1"), [this] { insertHeading(1); });
-    addBtn(tr("H2"), tr("Heading 2"), [this] { insertHeading(2); });
-    addBtn(tr("H3"), tr("Heading 3"), [this] { insertHeading(3); });
+    addBtn(Lucide::kListOrdered, tr("Numbered list"), [this] { prefixLines("1. "); });
+    addBtn(Lucide::kListBullet,  tr("Bullet list"),   [this] { prefixLines("- "); });
+    addBtn(Lucide::kMinus,       tr("Horizontal rule"), [this] { insertHorizontalRule(); });
     addSep();
-    addBtn(tr("Link"),  tr("Insert link"),          [this] { insertLink(); });
-    addBtn(tr("Image"), tr("Insert image"),         [this] { insertImage(); });
+    addBtn(Lucide::kTerminalSquare, tr("Code block"),           [this] { insertCodeBlock(); });
+    addBtn(Lucide::kCode,           tr("Inline code  (`code`)"), [this] { insertInlineCode(); });
+    addBtn(Lucide::kTable,          tr("Table"),                 [this] { insertTable(); });
+    addBtn(Lucide::kSigma,          tr("Equation  ($…$)"),       [this] { insertEquation(); });
     addSep();
-    addBtn(tr("Code"),  tr("Inline code  (`code`)"), [this] { insertInlineCode(); });
-    addBtn(tr("Block"), tr("Code block"),            [this] { insertCodeBlock(); });
-    addSep();
-    addBtn(tr("• List"), tr("Bullet list"),   [this] { prefixLines("- "); });
-    addBtn(tr("1. List"), tr("Numbered list"), [this] { prefixLines("1. "); });
-    addBtn(tr("Quote"),  tr("Blockquote"),    [this] { prefixLines("> "); });
-    addBtn(tr("HR"),     tr("Horizontal rule"), [this] { insertHorizontalRule(); });
+    addBtn(Lucide::kImage, tr("Image"),      [this] { insertImage(); });
+    addBtn(Lucide::kLink,  tr("Link"),       [this] { insertLink(); });
+    addBtn(Lucide::kQuote, tr("Blockquote"), [this] { prefixLines("> "); });
 
     h->addStretch();
 
-    m_themeBtn = addBtn(QString(), tr("Toggle the preview's light/dark theme"),
-                        [this] { togglePreviewTheme(); });
+    // Light/dark toggle lives in the toolbar tray, far right (sun ⇄ moon).
+    m_themeBtn = addBtn(m_dark ? Lucide::kSun : Lucide::kMoon,
+                        tr("Toggle light / dark theme"),
+                        [this] { toggleTheme(); });
     m_themeBtn->setObjectName("mdThemeToggle");
-    m_themeBtn->setText(m_previewDark ? tr("Preview: Dark") : tr("Preview: Light"));
 
     return bar;
 }
 
-// ── chrome theming (ThemeManager) ─────────────────────────────────────────────
-void MarkdownEditorWidget::applyChrome() {
-    auto& tm = ThemeManager::instance();
-    const QString bg     = tm.chromeBg();
-    const QString panel  = tm.chromePanelBg();
-    const QString hover  = tm.chromeHoverBg();
-    const QString border = tm.chromeBorder();
-    const QString text   = tm.chromeText();
-    const QString muted  = tm.chromeTextMuted();
-    // The raw editor follows the chrome surface; the preview paints its own
-    // GitHub theme, so we leave its viewport to the rendered CSS.
-    const QString editorBg = tm.isDark() ? "#0D1117" : "#FFFFFF";
+// Recolor every toolbar glyph for the current theme (icons are rendered
+// pixmaps, so a theme flip re-renders them at the new tint).
+void MarkdownEditorWidget::refreshToolbarIcons() {
+    const Chrome c = chrome(m_dark);
+    const qreal dpr = devicePixelRatioF();
+    for (auto& [btn, svg] : m_iconButtons)
+        btn->setIcon(NativeOffice::Lucide::icon(svg, c.icon, 18, dpr));
+    if (m_themeBtn)
+        m_themeBtn->setIcon(NativeOffice::Lucide::icon(
+            m_dark ? NativeOffice::Lucide::kSun : NativeOffice::Lucide::kMoon,
+            c.icon, 18, dpr));
+}
 
+// ── self-themed chrome (toolbar / source pane / divider) ──────────────────────
+void MarkdownEditorWidget::applyChrome() {
+    const Chrome c = chrome(m_dark);
+    const QString sbIdle  = m_dark ? "#242424" : "#F1F2F4";  // blends with the pane
+    const QString sbHover = m_dark ? "#4A4A4A" : "#C2C6CE";
+
+    // Toolbar + root only — pane/scrollbar styling is applied on the panes
+    // themselves below (a descendant selector doesn't reliably reach a
+    // scrollbar owned by QPlainTextEdit/QTextBrowser).
     setStyleSheet(QString(R"(
         QWidget#markdownEditor { background:%1; }
         QFrame#mdToolbar { background:%2; border-bottom:1px solid %3; }
-        QFrame#mdSep { color:%3; background:%3; max-width:1px; }
+        QFrame#mdSep { background:%4; border:none; }
         #mdToolbar QToolButton {
-            color:%4; background:transparent; border:1px solid transparent;
-            border-radius:6px; padding:4px 9px; font-size:12px;
+            background:transparent; border:1px solid transparent; border-radius:6px;
         }
-        #mdToolbar QToolButton:hover { background:%5; border:1px solid %3; }
-        QToolButton#mdBold   { font-weight:700; }
-        QToolButton#mdItalic { font-style:italic; }
-        QToolButton#mdThemeToggle { color:%6; }
+        #mdToolbar QToolButton:hover { background:%5; }
+    )").arg(c.paneBg, c.toolbarBg, c.border, c.sep, c.iconHoverBg));
+
+    // A thin, subtle scrollbar shared by both panes.
+    const QString scrollbars = QString(R"(
+        QScrollBar:vertical { background:transparent; width:10px; margin:0; }
+        QScrollBar::handle:vertical { background:%1; min-height:30px; border-radius:5px; }
+        QScrollBar::handle:vertical:hover { background:%2; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+        QScrollBar:horizontal { height:0; }
+    )").arg(sbIdle, sbHover);
+
+    m_editor->setStyleSheet(QString(R"(
         QPlainTextEdit#mdSource {
-            background:%7; color:%4; border:none; padding:12px;
+            background:%1; color:%2; border:none; padding:12px 14px;
             selection-background-color:#2563EB; selection-color:#FFFFFF;
         }
-        QTextBrowser#mdPreview { border:none; }
-        QSplitter::handle { background:%3; }
-    )").arg(bg, panel, border, text, hover, muted, editorBg));
+    )").arg(c.paneBg, c.icon) + scrollbars);
+    m_preview->setStyleSheet(
+        QString("QTextBrowser#mdPreview { background:%1; border:none; }").arg(c.paneBg)
+        + scrollbars);
+
+    // m_split is always a HairlineSplitter (created in the constructor).
+    static_cast<HairlineSplitter*>(m_split)->setDividerColors(
+        QColor(c.paneBg), QColor(c.divider));
+    refreshToolbarIcons();
 }
 
 // ── preview pipeline ──────────────────────────────────────────────────────────
@@ -462,10 +547,10 @@ void MarkdownEditorWidget::renderPreview() {
     md_html(src.constData(), MD_SIZE(src.size()), &mdSink, &body,
             MD_DIALECT_GITHUB, 0);
 
-    QString html = colorizeCodeBlocks(QString::fromUtf8(body), m_previewDark);
+    QString html = colorizeCodeBlocks(QString::fromUtf8(body), m_dark);
     const QString doc = QStringLiteral(
         "<html><head><style>%1</style></head><body>%2</body></html>")
-        .arg(previewCss(m_previewDark), html);
+        .arg(previewCss(m_dark), html);
 
     // Preserve scroll position across the re-render so typing doesn't jump.
     const int pos = m_preview->verticalScrollBar()->value();
@@ -473,11 +558,12 @@ void MarkdownEditorWidget::renderPreview() {
     m_preview->verticalScrollBar()->setValue(pos);
 }
 
-void MarkdownEditorWidget::togglePreviewTheme() {
-    m_previewDark = !m_previewDark;
-    m_themeBtn->setText(m_previewDark ? tr("Preview: Dark") : tr("Preview: Light"));
-    QSettings().setValue("tools/markdownEditor/previewDark", m_previewDark);
-    renderPreview();
+void MarkdownEditorWidget::toggleTheme() {
+    m_dark = !m_dark;
+    QSettings().setValue("tools/markdownEditor/dark", m_dark);
+    m_highlighter->setDark(m_dark);   // recolor the source-pane syntax
+    applyChrome();                    // toolbar / panes / divider + toolbar icons
+    renderPreview();                  // preview CSS + code colors
 }
 
 // ── toolbar formatting actions ────────────────────────────────────────────────
@@ -568,6 +654,20 @@ void MarkdownEditorWidget::insertCodeBlock() {
     const QString sel = c.hasSelection() ? c.selectedText() : tr("code");
     c.insertText(QStringLiteral("```\n%1\n```\n").arg(sel));
     m_editor->setFocus();
+}
+
+void MarkdownEditorWidget::insertTable() {
+    QTextCursor c = m_editor->textCursor();
+    c.movePosition(QTextCursor::EndOfBlock);
+    c.insertText(QStringLiteral(
+        "\n\n| Column A | Column B |\n| --- | --- |\n| Cell 1 | Cell 2 |\n"));
+    m_editor->setFocus();
+}
+
+void MarkdownEditorWidget::insertEquation() {
+    // Inline LaTeX-style math span. (Shown as source text in the preview — we
+    // don't bundle a math renderer — but round-trips as standard markdown.)
+    wrapSelection("$", "$", tr("E = mc^2"));
 }
 
 void MarkdownEditorWidget::insertHorizontalRule() {

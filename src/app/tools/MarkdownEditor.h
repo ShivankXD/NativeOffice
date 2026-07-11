@@ -12,17 +12,26 @@
 //  └───────────────────────────────────────────┴──────────────────────────┘
 //
 // The preview is produced by md4c (third_party/md4c) → HTML fragment, wrapped
-// in a GitHub-style stylesheet (light or dark, toggled in the toolbar tray,
-// independent of the app-wide ThemeManager chrome mode). Fenced code blocks in
-// the preview are colorized by a small rule-based tokenizer (colored <span>s);
-// the raw-markdown pane gets a live QSyntaxHighlighter for its own source.
+// in a GitHub-style stylesheet. The editor is self-themed (its own dark/light
+// look, default dark) toggled by the sun/moon button in the toolbar tray — one
+// switch drives the whole editor: toolbar, source pane, divider and preview.
+// Fenced code blocks in the preview are colorized by a small rule-based
+// tokenizer (colored <span>s); the raw-markdown pane gets a live
+// QSyntaxHighlighter for its own source.
+//
+// The toolbar is a row of monochrome Lucide icon buttons (not text labels),
+// grouped by thin separators. The pane divider is a 1px hairline painted by a
+// custom splitter handle with a comfortable grab area.
 //
 // Re-render is debounced (~220 ms after typing pauses) to avoid flicker on
 // long documents. The two panes scroll-sync by position ratio. The split ratio
-// and preview theme persist across sessions via QSettings.
+// and theme persist across sessions via QSettings.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QWidget>
+
+#include <utility>
+#include <vector>
 
 class QPlainTextEdit;
 class QTextBrowser;
@@ -44,8 +53,9 @@ public:
 private:
     // ── build / theming ────────────────────────────────────────────────────
     QWidget* buildToolbar();
-    void     applyChrome();          // toolbar/splitter chrome from ThemeManager
-    void     togglePreviewTheme();   // editor-local light/dark preview CSS
+    void     applyChrome();          // repaint toolbar/panes/divider for m_dark
+    void     toggleTheme();          // flip the whole editor light ⇄ dark
+    void     refreshToolbarIcons();  // recolor the toolbar glyphs for m_dark
 
     // ── preview pipeline ───────────────────────────────────────────────────
     void     scheduleRender();       // (re)start the debounce timer
@@ -60,6 +70,8 @@ private:
     void insertImage();
     void insertInlineCode();
     void insertCodeBlock();
+    void insertTable();
+    void insertEquation();
     void insertHorizontalRule();
 
     // ── scroll sync (ratio-based, reentrancy-guarded) ──────────────────────
@@ -77,8 +89,12 @@ private:
     MarkdownHighlighter* m_highlighter { nullptr };
     QToolButton*         m_themeBtn    { nullptr };
 
-    bool m_previewDark { false };   // preview CSS theme (default: light)
-    bool m_syncing     { false };   // guard so scroll-sync doesn't feed back
+    // Each toolbar button paired with its Lucide SVG, so a theme flip can
+    // recolor every glyph in one pass.
+    std::vector<std::pair<QToolButton*, const char*>> m_iconButtons;
+
+    bool m_dark    { true };    // whole-editor theme (default dark, per design)
+    bool m_syncing { false };   // guard so scroll-sync doesn't feed back
 };
 
 } // namespace NativeOffice
