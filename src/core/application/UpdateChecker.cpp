@@ -147,9 +147,12 @@ void UpdateChecker::startDownload() {
 
 void UpdateChecker::relaunchForUpdate() {
     if (m_installerPath.isEmpty() || !QFile::exists(m_installerPath)) return;
-    // Launch the installer detached, then quit so this instance releases its
-    // files and the installer can replace them (and relaunch the app on finish).
-    QProcess::startDetached(m_installerPath, {});
+    // Run the installer SILENTLY (/VERYSILENT): no wizard, no splash — it just
+    // downloads + extracts the new build in place (into the remembered install
+    // dir) and relaunches the app on finish. Then quit so this instance releases
+    // its files for replacement. (Previously it launched the installer with no
+    // args, which popped the full setup wizard on every "Restart to update".)
+    QProcess::startDetached(m_installerPath, { "/VERYSILENT", "/NORESTART" });
     QCoreApplication::quit();
 }
 
