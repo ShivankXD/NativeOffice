@@ -28,11 +28,12 @@
 #include <QPointF>
 #include <QRectF>
 #include <QColor>
+#include <QPointer>
+#include <QGraphicsTextItem>   // complete type needed for QPointer<QGraphicsTextItem>
 
 class QGraphicsItem;
 class QGraphicsRectItem;
 class QGraphicsEllipseItem;
-class QGraphicsTextItem;
 class QGraphicsPixmapItem;
 
 namespace NativeOffice {
@@ -187,7 +188,10 @@ private:
 
     std::vector<SlideHandleItem*> m_handles;
     QGraphicsItem*                m_handleTarget { nullptr };
-    QGraphicsTextItem*            m_lastTextItem { nullptr };
+    // QPointer auto-nulls if the text item is destroyed by any path, so
+    // activeTextItem() can never hand back a dangling item for a virtual call
+    // (formatting/cursor ops) — a prior crash source.
+    QPointer<QGraphicsTextItem>   m_lastTextItem { nullptr };
     QGraphicsItem*                m_slideNumberItem { nullptr };  // the page number
     bool                          m_suppressNumberSignal { false };
 

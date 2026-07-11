@@ -141,6 +141,11 @@ private:
     void resizeEvent(QResizeEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
 
+    // True when an arrow key should page between slides: the module is the
+    // active editor, focus sits somewhere inside it (or nowhere), and the user
+    // is not typing into a text field or editing/selecting a canvas object.
+    [[nodiscard]] bool shouldPageSlides() const;
+
     void syncRibbonToSelection();
     [[nodiscard]] int indexOfScene(SlideScene* scene) const;
 

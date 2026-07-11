@@ -1158,6 +1158,11 @@ void SlideScene::rebuildHandles() {
 
 void SlideScene::positionHandles() {
     if (!m_handleTarget || m_handles.empty()) return;
+    // Belt-and-braces: if the target was removed from the scene without going
+    // through clearHandles(), don't call virtual methods on a freed item. This
+    // is a pointer-value comparison only (no dereference), so it is safe even
+    // if m_handleTarget is already dangling.
+    if (!items().contains(m_handleTarget)) { clearHandles(); return; }
     const QRectF r = m_handleTarget->boundingRect();
 
     for (auto* h : m_handles) {

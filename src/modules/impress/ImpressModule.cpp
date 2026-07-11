@@ -15,6 +15,9 @@
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 
+#include <QApplication>
+#include <QAbstractSpinBox>
+#include <QPlainTextEdit>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QVBoxLayout>
@@ -225,6 +228,13 @@ void ImpressModule::buildUi() {
     // Re-fit the slide whenever the viewport changes size for any reason
     // (window resize, splitter drag, notes toggle, tab switch).
     m_view->viewport()->installEventFilter(this);
+    // Arrow keys must page slides no matter which child widget holds focus
+    // (canvas, slide panel, ribbon, or nothing at all). A viewport-only filter
+    // required the user to click the canvas first; an application-level filter,
+    // scoped to this module in shouldPageSlides(), removes that requirement.
+    qApp->installEventFilter(this);
+    // Give the canvas keyboard focus so paging works the instant a deck opens.
+    m_view->setFocusPolicy(Qt::StrongFocus);
 
     // Speaker notes live in a hidden-by-default pane (View → Speaker Notes);
     // the everyday review flow is the Comments panel on the status tray.
@@ -1442,34 +1452,64 @@ void ImpressModule::resizeEvent(QResizeEvent* event) {
     refitView();
 }
 
+// Decide whether an arrow key should page between slides. This is called for
+// key events arriving at *any* widget (the filter lives on qApp), so it must be
+// conservative: only page when this module is the active editor, focus is
+// inside it (or nowhere), and the key isn't needed for text entry or canvas
+// manipulation.
+bool ImpressModule::shouldPageSlides() const {
+    if (!isVisible()) return false;                      // not the current tab
+
+    QWidget* fw = QApplication::focusWidget();
+    if (fw) {
+        // Focus must be somewhere within this module.
+        if (fw != this && !isAncestorOf(fw)) return false;
+        // Text-entry widgets (notes, comment box, name field, outline editor,
+        // spin boxes) own the arrow keys for caret / value movement.
+        if (qobject_cast<QLineEdit*>(fw)       || qobject_cast<QTextEdit*>(fw) ||
+            qobject_cast<QPlainTextEdit*>(fw)  || qobject_cast<QAbstractSpinBox*>(fw))
+            return false;
+        // The Outline tab drives its own row navigation.
+        if (m_outline && (fw == m_outline || m_outline->isAncestorOf(fw)))
+            return false;
+    } else {
+        // Nothing focused (common right after a deck opens): only page if our
+        // window is the active one, so we don't hijack keys for other windows.
+        QWidget* w = window();
+        if (!w || !w->isActiveWindow()) return false;
+    }
+
+    // Don't steal arrows while a canvas object is selected or being text-edited
+    // (those nudge the shape / move the caret instead).
+    if (m_currentIdx >= 0 && m_currentIdx < static_cast<int>(m_scenes.size()) &&
+        (m_scenes[m_currentIdx]->hasSelection() ||
+         m_scenes[m_currentIdx]->focusItem() != nullptr))
+        return false;
+
+    return true;
+}
+
 bool ImpressModule::eventFilter(QObject* obj, QEvent* event) {
-    if (m_view && obj == m_view->viewport()) {
-        if (event->type() == QEvent::Resize) {
-            refitView();
-        } else if (event->type() == QEvent::KeyPress) {
-            auto* ke = static_cast<QKeyEvent*>(event);
-            // Arrow keys page through slides — but only when nothing on the
-            // canvas is selected or being text-edited (those consume arrows to
-            // nudge shapes / move the caret).
-            const bool busy = m_currentIdx >= 0 &&
-                m_currentIdx < static_cast<int>(m_scenes.size()) &&
-                (m_scenes[m_currentIdx]->hasSelection() ||
-                 m_scenes[m_currentIdx]->focusItem() != nullptr);
-            if (!busy) {
-                switch (ke->key()) {
-                case Qt::Key_Left:
-                case Qt::Key_Up:
-                    if (m_currentIdx > 0) switchToSlide(m_currentIdx - 1);
-                    return true;
-                case Qt::Key_Right:
-                case Qt::Key_Down:
-                    if (m_currentIdx < static_cast<int>(m_scenes.size()) - 1)
-                        switchToSlide(m_currentIdx + 1);
-                    return true;
-                }
-            }
+    // Keep the slide fitted whenever the canvas viewport changes size.
+    if (m_view && obj == m_view->viewport() && event->type() == QEvent::Resize)
+        refitView();
+
+    // Global slide paging: arrow keys move between slides regardless of which
+    // child widget currently holds focus.
+    if (event->type() == QEvent::KeyPress) {
+        auto* ke = static_cast<QKeyEvent*>(event);
+        const int key = ke->key();
+        const bool prev = (key == Qt::Key_Left || key == Qt::Key_Up);
+        const bool next = (key == Qt::Key_Right || key == Qt::Key_Down);
+        if ((prev || next) && ke->modifiers() == Qt::NoModifier && shouldPageSlides()) {
+            if (prev && m_currentIdx > 0)
+                switchToSlide(m_currentIdx - 1);
+            else if (next && m_currentIdx < static_cast<int>(m_scenes.size()) - 1)
+                switchToSlide(m_currentIdx + 1);
+            return true;   // consume so the focused widget doesn't also act
         }
     }
+
     return QWidget::eventFilter(obj, event);
 }
 
