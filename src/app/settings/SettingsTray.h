@@ -17,16 +17,24 @@
 
 class QFrame;
 class QPropertyAnimation;
+class QStackedWidget;
+class QToolButton;
+class QLabel;
 
 namespace NativeOffice {
 
 class SettingsTray : public QWidget {
     Q_OBJECT
 public:
+    // Two panes, switchable from the left nav: Profile (avatar / plan / sign
+    // out — opened by the profile picture) and Settings (app preferences —
+    // opened by the gear).
+    enum View { Profile, Settings };
+
     explicit SettingsTray(QWidget* parent);
 
-    void openTray();     // resize to the parent, slide the panel in
-    void closeTray();    // slide the panel out, then hide
+    void openTray(View view = Settings);   // resize to parent, slide the panel in
+    void closeTray();                      // slide the panel out, then hide
 
 protected:
     void paintEvent(QPaintEvent*) override;         // dimmed scrim behind the panel
@@ -36,13 +44,22 @@ protected:
     bool eventFilter(QObject*, QEvent*) override;   // follow the parent's resizes
 
 private:
-    QWidget* buildContent();
+    QWidget* buildPanel();
+    QWidget* buildSidebar();
+    QWidget* buildProfilePage();
+    QWidget* buildSettingsPage();
+    void     selectView(View v);
     int      panelX(bool opened) const;             // docked vs off-screen x
 
     QFrame*             m_panel   { nullptr };
+    QStackedWidget*     m_stack   { nullptr };
+    QToolButton*        m_navProfile  { nullptr };
+    QToolButton*        m_navSettings { nullptr };
+    QLabel*             m_title   { nullptr };
     QPropertyAnimation* m_anim    { nullptr };
-    int                 m_panelW  { 400 };
-    bool                m_open     { false };
+    int                 m_panelW  { 520 };
+    bool                m_open    { false };
+    View                m_view    { Settings };
 };
 
 } // namespace NativeOffice

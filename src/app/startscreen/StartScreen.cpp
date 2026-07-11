@@ -547,7 +547,7 @@ QWidget* StartScreen::buildTopBar() {
     refreshAvatar();
     connect(&AuthManager::instance(), &AuthManager::profileChanged,
             avatar, refreshAvatar);
-    connect(avatar, &QToolButton::clicked, this, [this]{ showSettingsDialog(); });
+    connect(avatar, &QToolButton::clicked, this, [this]{ showProfileTray(); });
     rightL->addWidget(avatar);
     h->addWidget(rightBox, 1);
 
@@ -872,7 +872,12 @@ void StartScreen::showSettingsDialog() {
     // sized from a stable, full-size widget (the StartScreen page inside the
     // stack can momentarily report a smaller rect during startup).
     if (!m_settingsTray) m_settingsTray = new SettingsTray(window());
-    m_settingsTray->openTray();
+    m_settingsTray->openTray(SettingsTray::Settings);
+}
+
+void StartScreen::showProfileTray() {
+    if (!m_settingsTray) m_settingsTray = new SettingsTray(window());
+    m_settingsTray->openTray(SettingsTray::Profile);
 }
 
 // ── Notifications ── dropdown anchored under the bell icon ────────────────────
