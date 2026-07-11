@@ -35,6 +35,7 @@
 
 class QPlainTextEdit;
 class QTextBrowser;
+class QTextDocument;
 class QSplitter;
 class QTimer;
 class QToolButton;
@@ -65,14 +66,19 @@ private:
     void wrapSelection(const QString& left, const QString& right,
                        const QString& placeholder);       // **bold**, _italic_…
     void prefixLines(const QString& prefix);              // - , 1. , > …
-    void insertHeading(int level);                        // #, ##, ###
+    void cycleHeading();                                  // #, ##, ### … then off
     void insertLink();
-    void insertImage();
+    void insertImage();                                   // pick a file → ![]()
     void insertInlineCode();
     void insertCodeBlock();
     void insertTable();
     void insertEquation();
     void insertHorizontalRule();
+
+    // ── export ───────────────────────────────────────────────────────────────
+    void exportPdf();
+    void exportDocx();
+    [[nodiscard]] QTextDocument* renderedDocument() const;  // md → light-CSS doc
 
     // ── scroll sync (ratio-based, reentrancy-guarded) ──────────────────────
     void syncPreviewToEditor();
@@ -93,8 +99,9 @@ private:
     // recolor every glyph in one pass.
     std::vector<std::pair<QToolButton*, const char*>> m_iconButtons;
 
-    bool m_dark    { true };    // whole-editor theme (default dark, per design)
+    bool m_dark    { false };   // whole-editor theme (default light)
     bool m_syncing { false };   // guard so scroll-sync doesn't feed back
+    QString m_docName { QStringLiteral("untitled") };  // export/save base name
 };
 
 } // namespace NativeOffice

@@ -4,12 +4,20 @@
 #include "MarkdownEditor.h"
 
 #include "startscreen/LucideIcons.h"
+#include "DocxIo.h"   // WriterModule's OOXML writer, reused for markdown → .docx
 
 #include <QByteArray>
+#include <QDir>
 #include <QEnterEvent>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPageSize>
 #include <QPainter>
+#include <QPdfWriter>
 #include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QScrollBar>
@@ -19,8 +27,10 @@
 #include <QSyntaxHighlighter>
 #include <QTextBrowser>
 #include <QTextCursor>
+#include <QTextDocument>
 #include <QTimer>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <functional>
@@ -321,7 +331,7 @@ MarkdownEditorWidget::MarkdownEditorWidget(QWidget* parent)
     setObjectName("markdownEditor");
     setAttribute(Qt::WA_StyledBackground, true);
 
-    m_dark = QSettings().value("tools/markdownEditor/dark", true).toBool();
+    m_dark = QSettings().value("tools/markdownEditor/dark", false).toBool();
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -449,8 +459,8 @@ QWidget* MarkdownEditorWidget::buildToolbar() {
     };
 
     // Order mirrors the reference layout exactly.
-    addBtn(Lucide::kHeading, tr("Heading"),
-           [this] { insertHeading(1); });
+    addBtn(Lucide::kHeading, tr("Heading  (click again for a smaller level)"),
+           [this] { cycleHeading(); });
     addBtn(Lucide::kBold, tr("Bold  (**text**)"),
            [this] { wrapSelection("**", "**", tr("bold text")); });
     addBtn(Lucide::kItalic, tr("Italic  (_text_)"),
@@ -470,6 +480,28 @@ QWidget* MarkdownEditorWidget::buildToolbar() {
     addBtn(Lucide::kQuote, tr("Blockquote"), [this] { prefixLines("> "); });
 
     h->addStretch();
+
+    // Export ▾ (PDF / Word) — a menu button on the right of the tray.
+    auto* exportBtn = new QToolButton(bar);
+    exportBtn->setToolTip(tr("Export…"));
+    exportBtn->setIconSize(QSize(18, 18));
+    exportBtn->setFixedSize(34, 30);
+    exportBtn->setAutoRaise(true);
+    exportBtn->setCursor(Qt::PointingHandCursor);
+    exportBtn->setPopupMode(QToolButton::InstantPopup);
+    exportBtn->setStyleSheet("QToolButton::menu-indicator { image:none; }");
+    auto* menu = new QMenu(exportBtn);
+    menu->addAction(tr("Export as PDF…"),  this, &MarkdownEditorWidget::exportPdf);
+    menu->addAction(tr("Export as Word (.docx)…"), this, &MarkdownEditorWidget::exportDocx);
+    exportBtn->setMenu(menu);
+    h->addWidget(exportBtn);
+    m_iconButtons.emplace_back(exportBtn, NativeOffice::Lucide::kDownload);
+
+    auto* sep = new QFrame(bar);
+    sep->setObjectName("mdSep");
+    sep->setFrameShape(QFrame::VLine);
+    sep->setFixedWidth(1);
+    h->addSpacing(4); h->addWidget(sep); h->addSpacing(4);
 
     // Light/dark toggle lives in the toolbar tray, far right (sun ⇄ moon).
     m_themeBtn = addBtn(m_dark ? Lucide::kSun : Lucide::kMoon,
@@ -608,23 +640,29 @@ void MarkdownEditorWidget::prefixLines(const QString& prefix) {
     m_editor->setFocus();
 }
 
-void MarkdownEditorWidget::insertHeading(int level) {
+void MarkdownEditorWidget::cycleHeading() {
+    // Each click bumps the current line's heading one level smaller
+    // (# → ## → … → ######), then clears it and starts over.
     QTextCursor c = m_editor->textCursor();
     c.movePosition(QTextCursor::StartOfBlock);
-    // Drop any existing heading marker so toggling levels doesn't stack them.
     QTextCursor probe = c;
     probe.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
-    QString lineText = probe.selectedText();
-    static const QRegularExpression lead(R"(^#{1,6}\s+)");
+    const QString lineText = probe.selectedText();
+
+    static const QRegularExpression lead(R"(^(#{1,6})\s+)");
     const auto m = lead.match(lineText);
+    const int current = m.hasMatch() ? int(m.captured(1).length()) : 0;
+    const int next    = (current >= 6) ? 0 : current + 1;   // 6 → back to plain
+
     c.beginEditBlock();
-    if (m.hasMatch()) {
+    if (m.hasMatch()) {          // strip the existing "### " marker first
         QTextCursor del = c;
         del.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor,
                          m.capturedLength());
         del.removeSelectedText();
     }
-    c.insertText(QString(level, '#') + ' ');
+    if (next > 0)
+        c.insertText(QString(next, '#') + ' ');
     c.endEditBlock();
     m_editor->setFocus();
 }
@@ -638,9 +676,17 @@ void MarkdownEditorWidget::insertLink() {
 }
 
 void MarkdownEditorWidget::insertImage() {
+    // Pick a real image file and insert a markdown image that the preview can
+    // actually render (a file:// URL loads locally in the QTextBrowser).
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Insert Image"), QDir::homePath(),
+        tr("Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.svg)"));
+    if (path.isEmpty()) return;
+
+    const QString alt = QFileInfo(path).completeBaseName();
+    const QString url = QUrl::fromLocalFile(path).toString();
     QTextCursor c = m_editor->textCursor();
-    const QString sel = c.hasSelection() ? c.selectedText() : tr("alt text");
-    c.insertText(QStringLiteral("![%1](https://)").arg(sel));
+    c.insertText(QStringLiteral("![%1](%2)").arg(alt, url));
     m_editor->setTextCursor(c);
     m_editor->setFocus();
 }
@@ -675,6 +721,63 @@ void MarkdownEditorWidget::insertHorizontalRule() {
     c.movePosition(QTextCursor::EndOfBlock);
     c.insertText(QStringLiteral("\n\n---\n"));
     m_editor->setFocus();
+}
+
+// ── export ────────────────────────────────────────────────────────────────────
+// Build a print-friendly (always light) QTextDocument from the markdown. The
+// caller owns the returned document.
+QTextDocument* MarkdownEditorWidget::renderedDocument() const {
+    const QByteArray src = m_editor->toPlainText().toUtf8();
+    QByteArray body;
+    md_html(src.constData(), MD_SIZE(src.size()), &mdSink, &body,
+            MD_DIALECT_GITHUB, 0);
+    const QString html = colorizeCodeBlocks(QString::fromUtf8(body), /*dark*/false);
+    const QString full = QStringLiteral(
+        "<html><head><style>%1</style></head><body>%2</body></html>")
+        .arg(previewCss(false), html);
+
+    auto* doc = new QTextDocument;
+    doc->setHtml(full);
+    return doc;
+}
+
+void MarkdownEditorWidget::exportPdf() {
+    const QString suggested = QDir::homePath() + "/" + m_docName + ".pdf";
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export as PDF"), suggested, tr("PDF Document (*.pdf)"));
+    if (path.isEmpty()) return;
+
+    QPdfWriter pdf(path);
+    pdf.setCreator(QStringLiteral("NativeOffice Markdown Editor"));
+    pdf.setTitle(QFileInfo(path).completeBaseName());
+    pdf.setPageSize(QPageSize::A4);
+    pdf.setPageMargins(QMarginsF(18, 18, 18, 18), QPageLayout::Millimeter);
+    pdf.setResolution(300);
+
+    QTextDocument* doc = renderedDocument();
+    doc->print(&pdf);
+    delete doc;
+
+    QMessageBox::information(this, tr("Export Complete"),
+                            tr("Exported to PDF:\n%1").arg(path));
+}
+
+void MarkdownEditorWidget::exportDocx() {
+    const QString suggested = QDir::homePath() + "/" + m_docName + ".docx";
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export as Word"), suggested, tr("Word Document (*.docx)"));
+    if (path.isEmpty()) return;
+
+    QTextDocument* doc = renderedDocument();
+    const bool ok = DocxIo::exportDocx(doc, path);
+    delete doc;
+
+    if (ok)
+        QMessageBox::information(this, tr("Export Complete"),
+                                tr("Exported to Word:\n%1").arg(path));
+    else
+        QMessageBox::warning(this, tr("Export Failed"),
+                            tr("Could not write the .docx file:\n%1").arg(path));
 }
 
 // ── scroll sync ───────────────────────────────────────────────────────────────
