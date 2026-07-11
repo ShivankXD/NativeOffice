@@ -128,11 +128,19 @@ public:
     [[nodiscard]] ItemAnimation selectedAnimation() const;
     [[nodiscard]] bool hasSelection() const;
 
+    // ── Slide-number field ────────────────────────────────────────────────
+    // Show/hide a movable, non-editable slide number. `number` is this slide's
+    // 1-based position; `pos` is its top-left in scene coords (invalid ⇒ default
+    // bottom-right). Managed deck-wide by ImpressModule — this item is NOT
+    // serialised as a normal SlideItem.
+    void setSlideNumber(bool show, int number, const QPointF& pos);
+
 signals:
     void sceneModified();
     void insertModeLeft();
     void selectionInfoChanged();   // selection changed -> ribbon should re-sync
     void animationApplied(ItemAnimation anim);  // object animation set -> preview it
+    void slideNumberMoved(const QPointF& scenePos);  // user dragged the number
 
 protected:
     void mousePressEvent  (QGraphicsSceneMouseEvent* event) override;
@@ -175,11 +183,16 @@ private:
     QPointF        m_dragStart;
     QGraphicsItem* m_dragItem    { nullptr };   // temporary during drag
 
+    void notifySlideNumberMoved(const QPointF& p);   // called by SlideNumberTextItem
+
     std::vector<SlideHandleItem*> m_handles;
     QGraphicsItem*                m_handleTarget { nullptr };
     QGraphicsTextItem*            m_lastTextItem { nullptr };
+    QGraphicsItem*                m_slideNumberItem { nullptr };  // the page number
+    bool                          m_suppressNumberSignal { false };
 
     friend class SlideHandleItem;
+    friend class SlideNumberTextItem;
 };
 
 } // namespace NativeOffice

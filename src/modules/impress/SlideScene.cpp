@@ -7,6 +7,7 @@
 #include <QGraphicsRectItem>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsTextItem>
+#include <QGraphicsSimpleTextItem>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsPathItem>
 #include <QGraphicsDropShadowEffect>
@@ -113,6 +114,35 @@ private:
     QPixmap m_display;            // full-res, brightness/contrast-adjusted source
     int     m_brightness { 0 };
     int     m_contrast   { 0 };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlideNumberTextItem — the movable, non-editable page number. It is a deck-wide
+// field managed by ImpressModule (not a normal SlideItem); dragging it reports
+// the new position back so every slide's number follows to the same spot.
+// ─────────────────────────────────────────────────────────────────────────────
+class SlideNumberTextItem : public QGraphicsSimpleTextItem {
+public:
+    explicit SlideNumberTextItem(SlideScene* scene) : m_scene(scene) {
+        // Movable but NOT selectable: it can be dragged freely, yet never gets
+        // resize handles, never joins a rubber-band selection, and Delete can't
+        // remove it (it's toggled off from the ribbon instead).
+        setFlags(ItemIsMovable | ItemSendsScenePositionChanges);
+        setZValue(10000);                       // always on top
+        QFont f("Segoe UI", 13);
+        f.setBold(true);
+        setFont(f);
+        setBrush(QColor("#3A3F4B"));
+        setCursor(Qt::SizeAllCursor);
+    }
+protected:
+    QVariant itemChange(GraphicsItemChange change, const QVariant& value) override {
+        if (change == ItemPositionHasChanged && m_scene)
+            m_scene->notifySlideNumberMoved(pos());
+        return QGraphicsSimpleTextItem::itemChange(change, value);
+    }
+private:
+    SlideScene* m_scene;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -497,6 +527,7 @@ void SlideScene::applyLayout(SlideLayout layout) {
     // free the same pointers a second time (heap corruption). Clearing first
     // empties m_handles and removes the handle items from the scene.
     clearHandles();
+    m_slideNumberItem = nullptr;   // about to be deleted with the rest below
     // Clear all remaining non-background items
     const QList<QGraphicsItem*> all = items();
     for (auto* it : all) {
@@ -1220,6 +1251,38 @@ void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QP
     }
 }
 
+// ── Slide-number field ────────────────────────────────────────────────────────
+void SlideScene::setSlideNumber(bool show, int number, const QPointF& pos) {
+    if (!show) {
+        if (m_slideNumberItem) {
+            removeItem(m_slideNumberItem);
+            delete m_slideNumberItem;
+            m_slideNumberItem = nullptr;
+        }
+        return;
+    }
+    m_suppressNumberSignal = true;   // programmatic placement must not echo back
+    auto* item = static_cast<SlideNumberTextItem*>(m_slideNumberItem);
+    if (!item) {
+        item = new SlideNumberTextItem(this);
+        addItem(item);
+        m_slideNumberItem = item;
+    }
+    item->setText(QString::number(number));
+    QPointF p = pos;
+    if (p.x() < 0) {                 // default: bottom-right corner
+        const QRectF br = item->boundingRect();
+        p = QPointF(SLIDE_W - br.width() - 30, SLIDE_H - br.height() - 22);
+    }
+    item->setPos(p);
+    m_suppressNumberSignal = false;
+}
+
+void SlideScene::notifySlideNumberMoved(const QPointF& p) {
+    if (m_suppressNumberSignal) return;
+    emit slideNumberMoved(p);
+}
+
 // ── Item factory helpers ──────────────────────────────────────────────────────
 QGraphicsTextItem* SlideScene::addTextBox(const QPointF& pos,
                                            const QString& placeholder,
@@ -1545,6 +1608,7 @@ QGraphicsItem* SlideScene::addImageItem(const QRectF& rect, const QByteArray& pn
 void SlideScene::loadFromData(const SlideData& data) {
     clearHandles();
     m_lastTextItem = nullptr;
+    m_slideNumberItem = nullptr;   // deleted with the rest below; module re-adds it
 
     // Clear everything except the background
     const QList<QGraphicsItem*> all = items();
@@ -1666,6 +1730,7 @@ void SlideScene::saveToData(SlideData& data) const {
     for (auto* it : items(Qt::AscendingOrder)) {
         if (it == backgroundItem()) continue;
         if (dynamic_cast<SlideHandleItem*>(it)) continue;
+        if (it == m_slideNumberItem) continue;   // page number is a deck-wide field, not an item
         if (it->parentItem()) continue;          // table cells are saved with their table
 
         SlideItem si;

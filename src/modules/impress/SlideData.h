@@ -9,6 +9,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QString>
+#include <QPointF>
 #include <QRectF>
 #include <QColor>
 #include <QByteArray>
@@ -180,6 +181,13 @@ struct SlideData {
     QString                notes;
     std::vector<SlideItem> items;
     std::vector<SlideComment> comments;
+
+    // ── Slide-number field (deck-wide toggle; each slide shows its own number) ─
+    // Kept in sync across the deck by ImpressModule. slideNumberPos is the
+    // top-left of the number in scene coords; an invalid point means "default
+    // bottom-right".
+    bool    showSlideNumber { false };
+    QPointF slideNumberPos  { -1, -1 };
 };
 
 } // namespace NativeOffice

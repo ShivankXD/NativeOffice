@@ -172,6 +172,13 @@ private:
     std::vector<SlideData>   m_slideData;
     int                      m_currentIdx { -1 };
 
+    // ── Slide-number field (deck-wide) ──────────────────────────────────────
+    bool    m_showSlideNumbers { false };
+    QPointF m_slideNumberPos   { -1, -1 };   // invalid = default bottom-right
+    void applySlideNumbers();                // push state to every scene + data
+    void connectSceneSlideNumber(SlideScene* scene);
+    void refreshSlideNumberState();          // adopt toggle/pos from loaded deck
+
     // ── File state ──────────────────────────────────────────────────────
     QString m_currentPath;
     bool    m_dirty        { false };

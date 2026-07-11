@@ -342,8 +342,12 @@ void ImpressModule::buildUi() {
     connect(m_ribbon, &ImpressRibbon::symbolRequested, this, [this](const QString& sym) {
         insertPresetText(sym, 40.0, false, QColor("#2C3140"));
     });
-    connect(m_ribbon, &ImpressRibbon::slideNumberRequested, this, [this] {
-        insertPresetText(QString::number(m_currentIdx + 1), 20.0, true, QColor("#2C3140"));
+    connect(m_ribbon, &ImpressRibbon::slideNumberToggled, this, [this](bool on) {
+        m_showSlideNumbers = on;
+        if (on && m_slideNumberPos.x() < 0)
+            m_slideNumberPos = QPointF(-1, -1);   // (re)default to bottom-right
+        applySlideNumbers();
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
     });
     connect(m_ribbon, &ImpressRibbon::dateTimeRequested, this, [this] {
         insertPresetText(QDate::currentDate().toString("MMM d, yyyy"), 20.0, false, QColor("#2C3140"));
@@ -964,6 +968,7 @@ void ImpressModule::applyDeckTemplate(const QString& name) {
     clearDeck();
     for (const SlideData& d : slides) createSlide(d);
     m_ignoreChange = false;
+    refreshSlideNumberState();
     if (!m_scenes.empty()) switchToSlide(0);
     captureUndoBaseline();
     m_undoStack->clear();
@@ -1047,6 +1052,45 @@ void ImpressModule::createSlide(const SlideData& data) {
     // When insert mode completes → reset ribbon button
     connect(scene, &SlideScene::insertModeLeft,
             m_ribbon, &ImpressRibbon::resetInsertMode);
+
+    connectSceneSlideNumber(scene);
+
+    // If slide numbers are on, the freshly-created scene needs its number too.
+    if (m_showSlideNumbers)
+        scene->setSlideNumber(true, idx + 1, m_slideNumberPos);
+}
+
+// Dragging the slide number on any slide moves it deck-wide (and persists it),
+// so every slide keeps its number in the same corner.
+void ImpressModule::connectSceneSlideNumber(SlideScene* scene) {
+    connect(scene, &SlideScene::slideNumberMoved, this, [this](const QPointF& p) {
+        m_slideNumberPos = p;
+        applySlideNumbers();
+        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+    });
+}
+
+// Push the current slide-number state (on/off + position) to every scene and
+// mirror it into the deck data so it survives save / undo / reorder. Each slide
+// shows its own 1-based number.
+void ImpressModule::applySlideNumbers() {
+    for (int i = 0; i < static_cast<int>(m_scenes.size()); ++i) {
+        m_scenes[i]->setSlideNumber(m_showSlideNumbers, i + 1, m_slideNumberPos);
+        m_slideData[i].showSlideNumber = m_showSlideNumbers;
+        m_slideData[i].slideNumberPos  = m_slideNumberPos;
+        m_slidePanel->refreshSlide(i);
+    }
+    m_ribbon->setSlideNumberActive(m_showSlideNumbers);
+}
+
+// After loading a deck (file open / undo restore / template), adopt the
+// slide-number toggle + position stored in the data and push it to the scenes.
+void ImpressModule::refreshSlideNumberState() {
+    m_showSlideNumbers = !m_slideData.empty() && m_slideData.front().showSlideNumber;
+    m_slideNumberPos = (!m_slideData.empty() && m_slideData.front().slideNumberPos.x() >= 0)
+                           ? m_slideData.front().slideNumberPos
+                           : QPointF(-1, -1);
+    applySlideNumbers();
 }
 
 int ImpressModule::indexOfScene(SlideScene* scene) const {
@@ -1159,6 +1203,7 @@ void ImpressModule::deleteCurrentSlide() {
     m_currentIdx = -1;
     const int nextIdx = std::min(idx, static_cast<int>(m_scenes.size()) - 1);
     switchToSlide(nextIdx);
+    applySlideNumbers();   // renumber the remaining slides (1..N)
     // Removing a slide changes no scene content, so no QGraphicsScene::changed
     // fires — mark dirty explicitly or the deletion is lost with no save prompt.
     if (!m_dirty) { m_dirty = true; emit documentModified(); }
@@ -1187,6 +1232,7 @@ void ImpressModule::moveSlide(int fromIndex, int toIndex) {
 
     m_currentIdx = -1;
     switchToSlide(toIndex);
+    applySlideNumbers();   // renumber after the reorder
     // Reordering touches no scene content, so mark dirty explicitly.
     if (!m_dirty) { m_dirty = true; emit documentModified(); }
     commitUndoStep();
@@ -2486,6 +2532,13 @@ QJsonObject ImpressModule::deckToJson() const {
         if (slide.slideAnimation != SlideAnimation::None)
             slideObj["slideAnimation"] = slideAnimationToString(slide.slideAnimation);
         slideObj["notes"]      = slide.notes;
+        if (slide.showSlideNumber) {
+            slideObj["showSlideNumber"] = true;
+            if (slide.slideNumberPos.x() >= 0) {
+                slideObj["slideNumberX"] = slide.slideNumberPos.x();
+                slideObj["slideNumberY"] = slide.slideNumberPos.y();
+            }
+        }
 
         if (!slide.comments.empty()) {
             QJsonArray commentsArr;
@@ -2580,6 +2633,10 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
         data.transition  = transitionFromString(slideObj["transition"].toString("none"));
         data.slideAnimation = slideAnimationFromString(slideObj["slideAnimation"].toString("none"));
         data.notes       = slideObj["notes"].toString();
+        data.showSlideNumber = slideObj["showSlideNumber"].toBool(false);
+        if (slideObj.contains("slideNumberX"))
+            data.slideNumberPos = QPointF(slideObj["slideNumberX"].toDouble(),
+                                          slideObj["slideNumberY"].toDouble());
 
         for (const auto& cv : slideObj["comments"].toArray()) {
             const QJsonObject co = cv.toObject();
@@ -2643,6 +2700,7 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
     }
 
     m_ignoreChange = false;
+    refreshSlideNumberState();
 }
 
 bool ImpressModule::saveToPath(const QString& path) {
@@ -2680,6 +2738,7 @@ bool ImpressModule::loadFromPath(const QString& path) {
                 clearDeck();
                 for (const auto& d : slides) createSlide(d);
                 m_ignoreChange = false;
+                refreshSlideNumberState();
                 if (!m_scenes.empty()) switchToSlide(0);
                 m_currentPath = path;
                 m_dirty       = false;

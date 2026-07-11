@@ -877,11 +877,13 @@ QWidget* ImpressRibbon::buildInsertTab() {
     // ── Text ────────────────────────────────────────────────────────────
     auto* btnWordArt = makeBigBtn(wordArtIcon(),     "WordArt",   "Insert decorative WordArt text");
     auto* btnSymbol  = makeBigBtn(symbolIcon(),      "Symbol",    "Insert a symbol");
-    auto* btnNumber  = makeBigBtn(slideNumberIcon(), "Slide\nNumber", "Insert the slide number");
+    auto* btnNumber  = makeBigBtn(slideNumberIcon(), "Slide\nNumber",
+                                  "Show a page number on every slide", true);
+    m_slideNumberBtn = btnNumber;
     auto* btnDate    = makeBigBtn(dateTimeIcon(),    "Date &\nTime", "Insert today's date");
     connect(btnWordArt, &QToolButton::clicked, this, &ImpressRibbon::wordArtRequested);
     connect(btnSymbol,  &QToolButton::clicked, this, [this]{ emit symbolRequested(QString::fromUtf8("★")); });
-    connect(btnNumber,  &QToolButton::clicked, this, &ImpressRibbon::slideNumberRequested);
+    connect(btnNumber,  &QToolButton::toggled, this, &ImpressRibbon::slideNumberToggled);
     connect(btnDate,    &QToolButton::clicked, this, &ImpressRibbon::dateTimeRequested);
     layout->addWidget(makeGroup("Text", { btnWordArt, btnSymbol, btnNumber, btnDate }));
     layout->addWidget(makeSeparator());
@@ -1291,6 +1293,12 @@ void ImpressRibbon::setUndoRedoEnabled(bool undoEnabled, bool redoEnabled) {
     // anything still calls it.
     if (m_btnUndo) m_btnUndo->setEnabled(undoEnabled);
     if (m_btnRedo) m_btnRedo->setEnabled(redoEnabled);
+}
+
+void ImpressRibbon::setSlideNumberActive(bool on) {
+    if (!m_slideNumberBtn || m_slideNumberBtn->isChecked() == on) return;
+    QSignalBlocker block(m_slideNumberBtn);   // reflect state without re-emitting
+    m_slideNumberBtn->setChecked(on);
 }
 
 void ImpressRibbon::syncCharFormat(bool bold, bool italic, bool underline, bool strike,

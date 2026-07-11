@@ -32,6 +32,8 @@ public:
     // Call when the scene resets insert mode (so the button un-checks)
     void resetInsertMode();
     void setUndoRedoEnabled(bool undoEnabled, bool redoEnabled);
+    // Reflect the deck's slide-number state on the Insert-tab toggle button.
+    void setSlideNumberActive(bool on);
 
     // Sync formatting buttons to the current text selection's format
     void syncCharFormat(bool bold, bool italic, bool underline, bool strike,
@@ -72,7 +74,7 @@ signals:
     void insertImageRequested();
     void wordArtRequested();
     void symbolRequested(const QString& symbol);
-    void slideNumberRequested();
+    void slideNumberToggled(bool on);   // Insert → Slide Number (checkable)
     void dateTimeRequested();
 
     void designColorSelected(const QColor& color);
@@ -140,6 +142,7 @@ private:
     QToolButton* m_btnAlignRight { nullptr };
     QToolButton* m_btnAlignJustify { nullptr };
 
+    QToolButton*  m_slideNumberBtn { nullptr };  // Insert → Slide Number toggle
     QButtonGroup* m_shapeGroup { nullptr };
     QButtonGroup* m_transitionGroup { nullptr };
     QToolButton*  m_designAllBtn { nullptr };   // "Apply to all slides" toggle
