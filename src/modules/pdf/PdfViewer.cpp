@@ -79,8 +79,10 @@ void Viewer::updateScrollBars() {
     const QSize vp = viewport()->size();
     horizontalScrollBar()->setRange(0, std::max(0, int(m_contentW * m_zoom) - vp.width()));
     horizontalScrollBar()->setPageStep(vp.width());
+    horizontalScrollBar()->setSingleStep(48);
     verticalScrollBar()->setRange(0, std::max(0, int(m_contentH * m_zoom) - vp.height()));
     verticalScrollBar()->setPageStep(vp.height());
+    verticalScrollBar()->setSingleStep(48);   // brisker keyboard / scrollbar steps
 }
 
 QPointF Viewer::contentOffset() const {
@@ -163,7 +165,7 @@ void Viewer::paintEvent(QPaintEvent*) {
     // Deferred fit-width: by the first paint the viewport has its real size.
     if (m_pendingFitWidth && viewport()->width() > 50) {
         m_pendingFitWidth = false;
-        fitWidth();
+        fitPage();          // open showing the whole first page, not zoomed-in
         goToPage(0);        // a freshly opened document starts at the top
     }
 
@@ -300,10 +302,26 @@ void Viewer::wheelEvent(QWheelEvent* ev) {
         ev->accept();
         return;
     }
+    // Scroll a full wheel notch (~120px) per detent instead of the tiny default
+    // single-step, so paging through a document feels responsive.
+    const int dy = ev->angleDelta().y();
+    const int dx = ev->angleDelta().x();
+    if (dy != 0) verticalScrollBar()->setValue(verticalScrollBar()->value() - dy);
+    if (dx != 0) horizontalScrollBar()->setValue(horizontalScrollBar()->value() - dx);
+    if (dy != 0 || dx != 0) { ev->accept(); return; }
     QAbstractScrollArea::wheelEvent(ev);
 }
 
 void Viewer::mousePressEvent(QMouseEvent* ev) {
+    // Middle button = hand-scroll (drag to pan the document), regardless of the
+    // current tool — like the browser/Reader "scroll button" grab.
+    if (ev->button() == Qt::MiddleButton && m_session->hasDocument()) {
+        m_midPanning = true;
+        m_midLast = ev->pos();
+        viewport()->setCursor(Qt::SizeAllCursor);
+        ev->accept();
+        return;
+    }
     if (ev->button() != Qt::LeftButton) return;
     if (!m_session->hasDocument()) {
         if (emptyStateHitRect().contains(ev->pos()))
@@ -327,6 +345,14 @@ void Viewer::mousePressEvent(QMouseEvent* ev) {
 }
 
 void Viewer::mouseMoveEvent(QMouseEvent* ev) {
+    if (m_midPanning) {
+        const QPoint d = ev->pos() - m_midLast;
+        m_midLast = ev->pos();
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - d.y());
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - d.x());
+        ev->accept();
+        return;
+    }
     if (!m_session->hasDocument()) {
         const bool hover = emptyStateHitRect().contains(ev->pos());
         if (hover != m_emptyHover) {
@@ -378,6 +404,12 @@ void Viewer::mouseMoveEvent(QMouseEvent* ev) {
 }
 
 void Viewer::mouseReleaseEvent(QMouseEvent* ev) {
+    if (ev->button() == Qt::MiddleButton && m_midPanning) {
+        m_midPanning = false;
+        viewport()->setCursor(m_mode == Mode::Pan ? Qt::OpenHandCursor : Qt::ArrowCursor);
+        ev->accept();
+        return;
+    }
     if (ev->button() != Qt::LeftButton || !m_dragging) return;
     m_dragging = false;
 
@@ -464,7 +496,7 @@ void Viewer::fitWidthWhenReady() {
     // not enough — only trust the viewport once the widget is actually
     // visible; otherwise wait for the first real paint.
     if (isVisible() && viewport()->width() > 200) {
-        fitWidth();
+        fitPage();          // open at whole-page view; users zoom in as needed
         goToPage(0);
     } else {
         m_pendingFitWidth = true;

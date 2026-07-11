@@ -127,6 +127,8 @@ private:
     QPoint m_dragStartView;
     QPoint m_dragLastView;
     int m_dragPage = -1;
+    bool   m_midPanning = false;   // middle-button hand-scroll active
+    QPoint m_midLast;              // last cursor pos during middle-button pan
     QRectF m_rubberBandPt;                      // current drag rect in page pt
     QPolygonF m_inkStrokePt;
 
