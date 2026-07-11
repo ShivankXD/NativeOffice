@@ -559,7 +559,7 @@ ImpressRibbon::ImpressRibbon(QWidget* parent)
     // ── Stacked content ─────────────────────────────────────────────────
     m_stack = new QStackedWidget(this);
     m_stack->setObjectName("ribbonStack");
-    m_stack->setFixedHeight(92);
+    m_stack->setFixedHeight(100);
     // Only Home builds eagerly; the other tabs build on first click so the
     // presentation window opens fast (ribbon construction dominates open time).
     m_stack->addWidget(buildHomeTab());
@@ -1216,7 +1216,9 @@ QToolButton* ImpressRibbon::makeBigBtn(const QIcon& icon, const QString& text,
     btn->setCursor(Qt::PointingHandCursor);
     btn->setObjectName("ribbonBigBtn");
     btn->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-    btn->setFixedHeight(62);
+    // Tall enough for a 24px icon + two lines of label without clipping the
+    // descenders of the second line (e.g. "Fade In", "Slide Number").
+    btn->setFixedHeight(70);
     btn->setMinimumWidth(54);
     return btn;
 }

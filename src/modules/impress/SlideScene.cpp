@@ -1199,13 +1199,24 @@ void SlideScene::resizeTargetTo(QGraphicsItem* target, HandleRole role, const QP
     } else if (auto* ei = qgraphicsitem_cast<QGraphicsEllipseItem*>(target)) {
         ei->setRect(r);
     } else if (auto* pi = qgraphicsitem_cast<QGraphicsPixmapItem*>(target)) {
-        pi->setOffset(r.topLeft());
+        // Rebuild the image with a zero offset and move the item's position so
+        // its on-slide top-left lands exactly where the resized rect's top-left
+        // maps to in the scene. This anchors the un-dragged edges: the corner
+        // opposite the handle stays put instead of sliding. (Doing it via the
+        // pixmap offset drifted when the scaled pixmap carried a device-pixel
+        // ratio, so boundingRect() no longer matched the target rect.)
+        const QPointF sceneTopLeft = target->mapToScene(r.topLeft());
         QPixmap src;
         if (auto* simg = dynamic_cast<SlideImageItem*>(pi))
             src = simg->adjustedSource();
         else
             src = pi->pixmap();
-        pi->setPixmap(src.scaled(r.size().toSize(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        QPixmap scaled = src.scaled(r.size().toSize(), Qt::IgnoreAspectRatio,
+                                    Qt::SmoothTransformation);
+        scaled.setDevicePixelRatio(1.0);
+        pi->setOffset(0, 0);
+        pi->setPixmap(scaled);
+        pi->setPos(sceneTopLeft);
     }
 }
 
