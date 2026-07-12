@@ -382,6 +382,7 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
                 runFmt = QTextCharFormat();
                 runFmt.setFontFamilies({ "Segoe UI" });
                 runFmt.setForeground(QColor("#1C1E26"));
+                qint64 drawW = 0, drawH = 0;   // drawing extent (EMU), if present
                 while (!xml.atEnd()) {
                     const auto rt = xml.readNext();
                     if (rt == QXmlStreamReader::EndElement && xml.name() == QLatin1String("r")) break;
@@ -409,8 +410,21 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
                     } else if (rn == QLatin1String("t")) {
                         const QString text = xml.readElementText();
                         cur.insertText(text, runFmt);
+                    } else if (rn == QLatin1String("tab")) {
+                        cur.insertText(QStringLiteral("	"), runFmt);
                     } else if (rn == QLatin1String("br")) {
-                        cur.insertText(" ", runFmt);
+                        // A page break splits onto a fresh page; a plain break
+                        // stays a line break within the paragraph.
+                        if (xml.attributes().value("w:type").toString() == QLatin1String("page")) {
+                            QTextBlockFormat pbf;
+                            pbf.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
+                            cur.insertBlock(pbf);
+                        } else {
+                            cur.insertText(QString(QChar(QChar::LineSeparator)), runFmt);
+                        }
+                    } else if (rn == QLatin1String("extent")) {
+                        drawW = xml.attributes().value("cx").toLongLong();
+                        drawH = xml.attributes().value("cy").toLongLong();
                     } else if (rn == QLatin1String("blip")) {
                         const QString rId = xml.attributes().value("r:embed").toString();
                         QImage img; img.loadFromData(imgByRel.value(rId));
@@ -419,6 +433,15 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
                             const QString url = "data:image/png;base64," + png.toBase64();
                             doc->addResource(QTextDocument::ImageResource, QUrl(url), img);
                             QTextImageFormat imf; imf.setName(url);
+                            // Honour the drawing extent (EMU->px) when present,
+                            // else native size; then clamp to the page content
+                            // width so oversized cover images / figures do not
+                            // overflow and clip off the right edge.
+                            double dw = drawW > 0 ? drawW / 9525.0 : img.width();
+                            double dh = drawH > 0 ? drawH / 9525.0 : img.height();
+                            const double maxW = 648.0;   // ~A4 width minus margins @96dpi
+                            if (dw > maxW) { dh *= maxW / dw; dw = maxW; }
+                            if (dw > 0 && dh > 0) { imf.setWidth(dw); imf.setHeight(dh); }
                             cur.insertImage(imf);
                         }
                     }
