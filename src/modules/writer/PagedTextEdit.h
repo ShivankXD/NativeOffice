@@ -56,6 +56,12 @@ public:
     [[nodiscard]] bool differentFirstPage() const { return m_diffFirst; }
     void setDocName(const QString& n);
 
+    // ── Zoom ──────────────────────────────────────────────────────────────
+    // Presentation-only scale for explicitly-sized text runs (headings,
+    // imported/ribbon-sized text). 1.0 == 100%. The default font + page metrics
+    // are scaled separately by WriterModule; this makes the *rest* keep up.
+    void setZoom(double factor);
+
     // ── Spell check ─────────────────────────────────────────────────────────
     void setSpellCheckEnabled(bool on);
     [[nodiscard]] bool spellCheckEnabled() const;

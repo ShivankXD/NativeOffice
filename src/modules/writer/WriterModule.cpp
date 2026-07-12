@@ -328,6 +328,34 @@ void WriterModule::buildUi() {
             emit documentModified();
         }
     });
+
+    // Dev-only capture hook (same family as NATIVEOFFICE_IMPRESS_GRAB): drop a
+    // heading + body sample so explicitly-sized text is present, apply the zoom
+    // from NATIVEOFFICE_WRITER_ZOOM (default 100), then grab the widget to a PNG.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_GRAB")) {
+        const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_WRITER_GRAB");
+        const int gz = qBound(50, qEnvironmentVariable("NATIVEOFFICE_WRITER_ZOOM", "100").toInt(), 300);
+        QTimer::singleShot(1200, this, [this, grabPath, gz] {
+            if (m_editor->document()->isEmpty()) {
+                QTextCursor c(m_editor->document());
+                QTextCharFormat h; h.setFontPointSize(26); h.setFontWeight(QFont::Bold);
+                c.insertText("Digital Twin — Heading at 26pt", h);
+                QTextCharFormat b; b.setFontPointSize(12);
+                c.insertBlock();
+                c.insertText("Body text at an explicit 12pt. The quick brown fox jumps "
+                             "over the lazy dog, and this line should wrap and scale "
+                             "proportionally with the page at any zoom level.", b);
+                QTextCharFormat big; big.setFontPointSize(18);
+                c.insertBlock();
+                c.insertText("A third paragraph at 18pt to check mixed sizes.", big);
+            }
+            applyZoom(gz);
+            m_statusBar->setZoomPercent(gz);
+            QTimer::singleShot(600, this, [this, grabPath] {
+                grab().save(grabPath, "PNG");
+            });
+        });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -637,7 +665,14 @@ void WriterModule::applyZoom(int percent) {
 
     QFont f = m_baseFont;
     f.setPointSizeF(m_baseFont.pointSizeF() * z);
+    // Widget font scales the empty-document placeholder (painted with the widget
+    // font, not the document default); it also feeds the document default font.
+    m_editor->setFont(f);
     m_editor->document()->setDefaultFont(f);
+
+    // Scale explicitly-sized runs (headings, imported/ribbon-sized text) so they
+    // stay proportional to the scaled page instead of overflowing at low zoom.
+    if (m_paper) m_paper->setZoom(z);
 
     if (!m_webLayout && m_paper) {
         const double effW = (m_landscape ? m_basePageH : m_basePageW) * z;

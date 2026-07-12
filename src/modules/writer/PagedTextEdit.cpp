@@ -61,6 +61,10 @@ PagedTextEdit::PagedTextEdit(QWidget* parent)
     m_spell = new SpellHighlighter(document());
 }
 
+void PagedTextEdit::setZoom(double factor) {
+    if (m_spell) m_spell->setZoom(factor);
+}
+
 void PagedTextEdit::setSpellCheckEnabled(bool on) {
     if (m_spell) m_spell->setEnabled(on);
 }
