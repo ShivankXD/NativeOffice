@@ -31,6 +31,13 @@
 #include <QImage>
 #include <QtMath>
 #include <cmath>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <QToolTip>
+#include <QTimer>
+#include <QIcon>
+#include <QPixmap>
+#include <functional>
 
 namespace NativeOffice {
 
@@ -39,6 +46,120 @@ static constexpr int kTrackInsert = QTextFormat::UserProperty + 30;
 static constexpr int kTrackDelete = QTextFormat::UserProperty + 31;
 static const QColor kInsColor("#1A7F37");   // green — inserted
 static const QColor kDelColor("#C0271C");   // red   — deleted
+
+// ── Page-control icons (drawn so no asset/cross-module dependency is needed) ──
+namespace {
+QPixmap plusPixmap(const QColor& c, int px) {
+    QPixmap pm(px, px); pm.fill(Qt::transparent);
+    QPainter p(&pm); p.setRenderHint(QPainter::Antialiasing);
+    QPen pen(c, px * 0.11); pen.setCapStyle(Qt::RoundCap); p.setPen(pen);
+    const double m = px * 0.28, c2 = px / 2.0;
+    p.drawLine(QPointF(c2, m), QPointF(c2, px - m));
+    p.drawLine(QPointF(m, c2), QPointF(px - m, c2));
+    return pm;
+}
+QPixmap trashPixmap(const QColor& c, int px) {
+    QPixmap pm(px, px); pm.fill(Qt::transparent);
+    QPainter p(&pm); p.setRenderHint(QPainter::Antialiasing);
+    QPen pen(c, px * 0.085); pen.setCapStyle(Qt::RoundCap); pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    const double w = px, h = px;
+    // lid + handle
+    p.drawLine(QPointF(w*0.22, h*0.28), QPointF(w*0.78, h*0.28));
+    p.drawLine(QPointF(w*0.40, h*0.28), QPointF(w*0.42, h*0.20));
+    p.drawLine(QPointF(w*0.42, h*0.20), QPointF(w*0.58, h*0.20));
+    p.drawLine(QPointF(w*0.58, h*0.20), QPointF(w*0.60, h*0.28));
+    // can body
+    p.drawLine(QPointF(w*0.30, h*0.30), QPointF(w*0.34, h*0.80));
+    p.drawLine(QPointF(w*0.70, h*0.30), QPointF(w*0.66, h*0.80));
+    p.drawLine(QPointF(w*0.34, h*0.80), QPointF(w*0.66, h*0.80));
+    // vertical ribs
+    p.drawLine(QPointF(w*0.50, h*0.38), QPointF(w*0.50, h*0.72));
+    return pm;
+}
+} // anonymous namespace
+
+// A small floating column of three "cute" light buttons (＋ / 🗑 / ＋) that the
+// PagedTextEdit parks at the top-right of the hovered page. No bounding box —
+// the buttons rest on their own. One instance is reused for every page, so it
+// never lags no matter how many pages the document has.
+class PageActionBar : public QWidget {
+public:
+    explicit PageActionBar(QWidget* parent) : QWidget(parent) {
+        setObjectName("pageActionBar");
+        setAttribute(Qt::WA_NoSystemBackground);
+        setCursor(Qt::ArrowCursor);
+        auto* lay = new QVBoxLayout(this);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->setSpacing(5);
+        m_addAbove = makeButton(plusPixmap(QColor("#5B6472"), 16),  tr("Add a blank page above"));
+        m_delete   = makeButton(trashPixmap(QColor("#C0392B"), 16), tr("Click to delete this page"));
+        m_addBelow = makeButton(plusPixmap(QColor("#5B6472"), 16),  tr("Add a blank page below"));
+        lay->addWidget(m_addAbove);
+        lay->addWidget(m_delete);
+        lay->addWidget(m_addBelow);
+
+        m_hideTimer = new QTimer(this);
+        m_hideTimer->setSingleShot(true);
+        m_hideTimer->setInterval(220);
+        connect(m_hideTimer, &QTimer::timeout, this, [this]{ hide(); });
+
+        connect(m_addAbove, &QToolButton::clicked, this, [this]{ if (onAddAbove) onAddAbove(); });
+        connect(m_addBelow, &QToolButton::clicked, this, [this]{ if (onAddBelow) onAddBelow(); });
+        connect(m_delete,   &QToolButton::clicked, this, [this]{
+            if (!m_canDelete) {
+                QToolTip::showText(m_delete->mapToGlobal(QPoint(m_delete->width(), 0)),
+                                   tr("A document must keep at least one page."), m_delete);
+                return;
+            }
+            if (onDelete) onDelete();
+        });
+        hide();
+    }
+
+    void showForPage(const QPoint& topRight, bool canDelete) {
+        m_canDelete = canDelete;
+        // Dim (but keep clickable) the trash when the page can't be deleted, so a
+        // click can still surface the little "can't delete" notice.
+        m_delete->setStyleSheet(buttonStyle(canDelete ? "#C0392B" : "#C7A6A2",
+                                            canDelete ? "#FBE9E7" : "#FFFFFF"));
+        adjustSize();
+        move(topRight.x() - width(), topRight.y());
+        show();
+        raise();
+        m_hideTimer->stop();
+    }
+    void requestHide() { if (isVisible()) m_hideTimer->start(); }
+
+    std::function<void()> onAddAbove, onDelete, onAddBelow;
+
+protected:
+    void enterEvent(QEnterEvent*) override { m_hideTimer->stop(); }
+    void leaveEvent(QEvent*)      override { m_hideTimer->start(); }
+
+private:
+    static QString buttonStyle(const QString& iconTint, const QString& hoverBg) {
+        Q_UNUSED(iconTint);
+        return QString(
+            "QToolButton { background:rgba(255,255,255,0.92); border:1px solid #E1E4EA;"
+            "  border-radius:13px; padding:0; }"
+            "QToolButton:hover { background:%1; border:1px solid #C9CED8; }").arg(hoverBg);
+    }
+    QToolButton* makeButton(const QPixmap& icon, const QString& tip) {
+        auto* b = new QToolButton(this);
+        b->setIcon(QIcon(icon));
+        b->setIconSize(QSize(16, 16));
+        b->setFixedSize(26, 26);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setToolTip(tip);
+        b->setAutoRaise(true);
+        b->setStyleSheet(buttonStyle("#5B6472", "#EEF1F6"));
+        return b;
+    }
+    QToolButton *m_addAbove{}, *m_delete{}, *m_addBelow{};
+    QTimer* m_hideTimer{};
+    bool m_canDelete { true };
+};
 
 PagedTextEdit::PagedTextEdit(QWidget* parent)
     : QTextEdit(parent)
@@ -59,10 +180,128 @@ PagedTextEdit::PagedTextEdit(QWidget* parent)
     // Spell checking: a syntax highlighter draws red squiggles under misspellings.
     // Starts disabled; WriterModule turns it on to match the status-bar pill.
     m_spell = new SpellHighlighter(document());
+
+    // Mouse tracking so the page hover controls follow the cursor without a
+    // button held. The controls are a single reused overlay (no per-page widget).
+    setMouseTracking(true);
+    viewport()->setMouseTracking(true);
+    m_pageBar = new PageActionBar(viewport());
+    m_pageBar->onAddAbove = [this]{ if (m_barPage >= 0) { addBlankPageAbove(m_barPage); m_pageBar->requestHide(); } };
+    m_pageBar->onAddBelow = [this]{ if (m_barPage >= 0) { addBlankPageBelow(m_barPage); m_pageBar->requestHide(); } };
+    m_pageBar->onDelete   = [this]{ if (m_barPage >= 0) { deletePage(m_barPage);        m_pageBar->requestHide(); } };
 }
 
 void PagedTextEdit::setZoom(double factor) {
     if (m_spell) m_spell->setZoom(factor);
+}
+
+// ── Page operations (hover controls) ────────────────────────────────────────
+int PagedTextEdit::pageAtViewportY(int y) const {
+    if (!m_paged || m_pageH <= 0) return -1;
+    const int idx = int(y / m_pageH);
+    return (idx >= 0 && idx < pageCountValue()) ? idx : -1;
+}
+
+void PagedTextEdit::updatePageBar(const QPoint& pos) {
+    if (!m_pageBar) return;
+    const int page = pageAtViewportY(pos.y());
+    if (page < 0) { m_pageBar->requestHide(); return; }
+
+    // Trigger zone: the top-right region of the hovered page (matches where the
+    // controls sit). Generous enough to be easy to reach, but not the whole page.
+    const double vw = viewport()->width();
+    const double pageTop = page * m_pageH;
+    const double zoneW = qMin(190.0, m_pageW * 0.42);
+    const double zoneH = qMin(190.0, m_pageH * 0.34);
+    const bool inZone = pos.x() >= vw - zoneW &&
+                        pos.y() >= pageTop && pos.y() <= pageTop + zoneH;
+    if (!inZone) { m_pageBar->requestHide(); return; }
+
+    m_barPage = page;
+    m_pageBar->showForPage(QPoint(int(vw) - 6, int(pageTop) + 14),
+                           /*canDelete=*/pageCountValue() > 1);
+}
+
+QTextBlock PagedTextEdit::firstBlockOnPage(int pageIndex) const {
+    const double pageTop = pageIndex * m_pageH - 0.5;
+    auto* lay = document()->documentLayout();
+    for (QTextBlock b = document()->begin(); b.isValid(); b = b.next())
+        if (lay->blockBoundingRect(b).top() >= pageTop)
+            return b;
+    return QTextBlock();
+}
+
+void PagedTextEdit::insertBlankPageBefore(const QTextBlock& anchor) {
+    QTextCursor cur(document());
+    cur.beginEditBlock();
+
+    QTextBlockFormat brk;
+    brk.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
+
+    if (anchor.isValid()) {
+        const int anchorPos = anchor.position();
+        // Force the anchor's content onto a fresh page, preserving its own
+        // paragraph + character formatting.
+        cur.setPosition(anchorPos);
+        QTextBlockFormat contentFmt = cur.blockFormat();
+        contentFmt.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
+        const QTextCharFormat charFmt = cur.charFormat();
+        // Split at the anchor's start: the content moves into a new block (with
+        // its format kept) and an empty block is left in front of it.
+        cur.insertBlock(contentFmt, charFmt);
+        // Make that empty leading block a page of its own.
+        QTextCursor blankCur(document());
+        blankCur.setPosition(anchorPos);
+        blankCur.setBlockFormat(brk);
+    } else {
+        // No anchor → append a blank page at the very end of the document.
+        cur.movePosition(QTextCursor::End);
+        cur.insertBlock(brk);
+    }
+
+    cur.endEditBlock();
+    syncHeight();
+    viewport()->update();
+}
+
+void PagedTextEdit::addBlankPageAbove(int pageIndex) {
+    if (!m_paged) return;
+    insertBlankPageBefore(firstBlockOnPage(pageIndex));
+}
+
+void PagedTextEdit::addBlankPageBelow(int pageIndex) {
+    if (!m_paged) return;
+    // A blank page after page N is a blank page before whatever starts page N+1
+    // (or appended at the end when N is the last page).
+    insertBlankPageBefore(firstBlockOnPage(pageIndex + 1));
+}
+
+bool PagedTextEdit::deletePage(int pageIndex) {
+    if (!m_paged || pageCountValue() <= 1) return false;   // never delete the last page
+
+    const QTextBlock startB = firstBlockOnPage(pageIndex);
+    if (!startB.isValid()) return false;
+    const QTextBlock endB = firstBlockOnPage(pageIndex + 1);
+
+    QTextCursor cur(document());
+    cur.beginEditBlock();
+    cur.setPosition(startB.position());
+    if (endB.isValid())
+        cur.setPosition(endB.position(), QTextCursor::KeepAnchor);
+    else
+        cur.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+    cur.removeSelectedText();
+    // The content that flows up into the deleted page's slot must not keep a
+    // forced page break, or a blank gap would remain where the page used to be.
+    QTextBlockFormat bf = cur.blockFormat();
+    if (bf.pageBreakPolicy() != QTextFormat::PageBreak_Auto) {
+        bf.setPageBreakPolicy(QTextFormat::PageBreak_Auto);
+        cur.setBlockFormat(bf);
+    }
+    cur.endEditBlock();
+    syncHeight();
+    viewport()->update();
+    return true;
 }
 
 void PagedTextEdit::setSpellCheckEnabled(bool on) {
@@ -313,6 +552,7 @@ void PagedTextEdit::mouseMoveEvent(QMouseEvent* e) {
     } else if (cursor().shape() != Qt::IBeamCursor && cursor().shape() != Qt::ArrowCursor) {
         unsetCursor();
     }
+    updatePageBar(e->pos());
     QTextEdit::mouseMoveEvent(e);
 }
 

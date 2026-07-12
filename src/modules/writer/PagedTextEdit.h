@@ -62,6 +62,18 @@ public:
     // are scaled separately by WriterModule; this makes the *rest* keep up.
     void setZoom(double factor);
 
+    // ── Page operations (hover controls) ────────────────────────────────────
+    // Each is a single undo step (Ctrl+Z restores). deletePage removes the page
+    // AND the content that sits on it (like removing a slide); it refuses to
+    // delete the only page and returns false so the caller can show a notice.
+    void addBlankPageAbove(int pageIndex);
+    void addBlankPageBelow(int pageIndex);
+    bool deletePage(int pageIndex);
+    // 0-based index of the page containing viewport y (or -1). Used by the
+    // hover overlay to know which page the cursor is on.
+    [[nodiscard]] int pageAtViewportY(int y) const;
+    [[nodiscard]] double pageHeightPx() const noexcept { return m_pageH; }
+
     // ── Spell check ─────────────────────────────────────────────────────────
     void setSpellCheckEnabled(bool on);
     [[nodiscard]] bool spellCheckEnabled() const;
@@ -121,6 +133,11 @@ public:
 
 private:
     void syncHeight();
+    // First text block that starts on the given 0-based page (invalid if none).
+    [[nodiscard]] QTextBlock firstBlockOnPage(int pageIndex) const;
+    // Insert an empty, page-breaking paragraph before `anchor` (or at the end of
+    // the document if `anchor` is invalid), pushing `anchor` onto the next page.
+    void insertBlankPageBefore(const QTextBlock& anchor);
     bool insertMimeImage(const QMimeData* source);   // true if an image was embedded
     void embedImage(QImage img);
     QTextImageFormat selectedImageFormat() const;
@@ -142,6 +159,11 @@ private:
     bool    m_diffFirst { false };
     QString m_docName;
     QString expandFields(const QString& s, int pageNum, int total) const;
+
+    // ── Page hover controls (add/delete page) ──────────────────────────────
+    class PageActionBar* m_pageBar { nullptr };
+    int  m_barPage { -1 };            // page the bar currently acts on
+    void updatePageBar(const QPoint& viewportPos);   // called from mouseMove
 
     // ── Spell check ───────────────────────────────────────────────────────────
     SpellHighlighter* m_spell { nullptr };
