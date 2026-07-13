@@ -5,6 +5,7 @@
 #include "SpellChecker.h"
 
 #include <QTextCharFormat>
+#include <QTextImageFormat>
 #include <QTextDocument>
 #include <QTextBlock>
 #include <QTimer>
@@ -59,12 +60,26 @@ void SpellHighlighter::highlightBlock(const QString& text) {
             const QTextFragment frag = it.fragment();
             if (!frag.isValid()) continue;
             const QTextCharFormat cf = frag.charFormat();
-            if (!cf.hasProperty(QTextFormat::FontPointSize)) continue;
-            const double logical = cf.doubleProperty(QTextFormat::FontPointSize);
-            if (logical <= 0.0) continue;
-            QTextCharFormat f;
-            f.setProperty(QTextFormat::FontPointSize, logical * m_zoom);
-            setFormat(frag.position() - blk.position(), frag.length(), f);
+            const int start = frag.position() - blk.position();
+            if (cf.isImageFormat()) {
+                // Scale inline images too, or a fixed-px image (e.g. an imported
+                // cover) overflows the shrunken page at low zoom and shoves the
+                // (centred) text off the right edge.
+                QTextImageFormat imf = cf.toImageFormat();
+                const double w = imf.width(), h = imf.height();
+                if (w > 0.0 && h > 0.0) {
+                    imf.setWidth(w * m_zoom);
+                    imf.setHeight(h * m_zoom);
+                    setFormat(start, frag.length(), imf);
+                }
+            } else if (cf.hasProperty(QTextFormat::FontPointSize)) {
+                const double logical = cf.doubleProperty(QTextFormat::FontPointSize);
+                if (logical > 0.0) {
+                    QTextCharFormat f;
+                    f.setProperty(QTextFormat::FontPointSize, logical * m_zoom);
+                    setFormat(start, frag.length(), f);
+                }
+            }
         }
     }
 
