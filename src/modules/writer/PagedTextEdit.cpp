@@ -117,14 +117,14 @@ public:
         hide();
     }
 
-    void showForPage(const QPoint& topRight, bool canDelete) {
+    void showForPage(const QPoint& topLeft, bool canDelete) {
         m_canDelete = canDelete;
         // Dim (but keep clickable) the trash when the page can't be deleted, so a
         // click can still surface the little "can't delete" notice.
         m_delete->setStyleSheet(buttonStyle(canDelete ? "#C0392B" : "#C7A6A2",
                                             canDelete ? "#FBE9E7" : "#FFFFFF"));
         adjustSize();
-        move(topRight.x() - width(), topRight.y());
+        move(topLeft);
         show();
         raise();
         m_hideTimer->stop();
@@ -185,7 +185,9 @@ PagedTextEdit::PagedTextEdit(QWidget* parent)
     // button held. The controls are a single reused overlay (no per-page widget).
     setMouseTracking(true);
     viewport()->setMouseTracking(true);
-    m_pageBar = new PageActionBar(viewport());
+    // Parent the controls to the surrounding canvas (not the page viewport) so
+    // they can float in the gray desk area just *outside* the page's right edge.
+    m_pageBar = new PageActionBar(parentWidget() ? parentWidget() : viewport());
     m_pageBar->onAddAbove = [this]{ if (m_barPage >= 0) { addBlankPageAbove(m_barPage); m_pageBar->requestHide(); } };
     m_pageBar->onAddBelow = [this]{ if (m_barPage >= 0) { addBlankPageBelow(m_barPage); m_pageBar->requestHide(); } };
     m_pageBar->onDelete   = [this]{ if (m_barPage >= 0) { deletePage(m_barPage);        m_pageBar->requestHide(); } };
@@ -218,7 +220,13 @@ void PagedTextEdit::updatePageBar(const QPoint& pos) {
     if (!inZone) { m_pageBar->requestHide(); return; }
 
     m_barPage = page;
-    m_pageBar->showForPage(QPoint(int(vw) - 6, int(pageTop) + 14),
+    // Place the controls in the gray desk area just outside the page's right
+    // edge, aligned near the top of the hovered page. The bar lives in the
+    // canvas coordinate space, so map the page's top-right corner into it.
+    QWidget* host = m_pageBar->parentWidget();
+    const QPoint tr = host ? mapTo(host, QPoint(width(), int(pageTop)))
+                           : QPoint(width(), int(pageTop));
+    m_pageBar->showForPage(QPoint(tr.x() + 12, tr.y() + 14),
                            /*canDelete=*/pageCountValue() > 1);
 }
 
@@ -564,6 +572,14 @@ void PagedTextEdit::mouseReleaseEvent(QMouseEvent* e) {
         return;
     }
     QTextEdit::mouseReleaseEvent(e);
+}
+
+void PagedTextEdit::leaveEvent(QEvent* e) {
+    // Leaving the page starts the dismiss timer; if the cursor is on its way to
+    // the controls (which sit just outside the page), the bar's own enterEvent
+    // cancels it, so it stays up while hovered.
+    if (m_pageBar) m_pageBar->requestHide();
+    QTextEdit::leaveEvent(e);
 }
 
 // ── Image paste & drag-drop ──────────────────────────────────────────────────

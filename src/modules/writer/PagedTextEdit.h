@@ -117,6 +117,7 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
+    void leaveEvent(QEvent* e) override;   // start dismissing the page controls
 
     // Clipboard-paste and drag-drop of images (Word/WPS parity): raw image data
     // and local image files are embedded as base64 PNG scaled to the text width.
