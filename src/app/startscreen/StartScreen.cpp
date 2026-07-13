@@ -11,6 +11,7 @@
 #include "LucideIcons.h"
 
 #include <QMessageBox>
+#include <QCoreApplication>
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -445,6 +446,16 @@ QWidget* StartScreen::buildSidebar() {
         bv->addWidget(note);
 
         v->addWidget(betaBox);
+    }
+
+    // Version label — so a user can see at a glance which build they're on
+    // (handy for confirming an auto-update actually changed the version).
+    {
+        auto* ver = new QLabel("Version " + QCoreApplication::applicationVersion(), bar);
+        ver->setObjectName("versionLabel");
+        ver->setStyleSheet("color:#5A6373;font:11px 'Segoe UI';background:transparent;"
+                            "padding:8px 4px 2px 4px;");
+        v->addWidget(ver, 0, Qt::AlignLeft);
     }
 
     bar->setStyleSheet(R"(
