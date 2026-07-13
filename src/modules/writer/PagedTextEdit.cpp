@@ -243,27 +243,36 @@ void PagedTextEdit::insertBlankPageBefore(const QTextBlock& anchor) {
     QTextCursor cur(document());
     cur.beginEditBlock();
 
-    QTextBlockFormat brk;
-    brk.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
+    auto setBreak = [&](int pos, bool on) {
+        QTextCursor c(document());
+        c.setPosition(pos);
+        QTextBlockFormat f = c.blockFormat();
+        f.setPageBreakPolicy(on ? QTextFormat::PageBreak_AlwaysBefore
+                                : QTextFormat::PageBreak_Auto);
+        c.setBlockFormat(f);
+    };
 
     if (anchor.isValid()) {
-        const int anchorPos = anchor.position();
-        // Force the anchor's content onto a fresh page, preserving its own
-        // paragraph + character formatting.
-        cur.setPosition(anchorPos);
-        QTextBlockFormat contentFmt = cur.blockFormat();
-        contentFmt.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
-        const QTextCharFormat charFmt = cur.charFormat();
-        // Split at the anchor's start: the content moves into a new block (with
-        // its format kept) and an empty block is left in front of it.
-        cur.insertBlock(contentFmt, charFmt);
-        // Make that empty leading block a page of its own.
-        QTextCursor blankCur(document());
-        blankCur.setPosition(anchorPos);
-        blankCur.setBlockFormat(brk);
+        // Insert one empty paragraph in front of the anchor content. After the
+        // split the anchor content is the cursor's block and the new empty
+        // paragraph is the block immediately before it.
+        cur.setPosition(anchor.position());
+        cur.insertBlock();
+        const QTextBlock contentBlk = cur.block();
+        const QTextBlock blankBlk   = contentBlk.previous();
+        // The content always moves to a fresh page (one page down).
+        setBreak(contentBlk.position(), true);
+        // The blank paragraph gets its own page too — UNLESS it is now the very
+        // first block of the document, where a "break before" would spawn a
+        // spurious *extra* empty page in front of it (the add-above double-page
+        // bug). As the first block it is already page 1, so no break is needed.
+        if (blankBlk.isValid())
+            setBreak(blankBlk.position(), blankBlk != document()->begin());
     } else {
         // No anchor → append a blank page at the very end of the document.
         cur.movePosition(QTextCursor::End);
+        QTextBlockFormat brk;
+        brk.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
         cur.insertBlock(brk);
     }
 
