@@ -19,6 +19,8 @@ add_library(WriterModule STATIC
     WriterListOps.h
     WriterRuler.cpp
     WriterRuler.h
+    WriterFocusMode.cpp
+    WriterFocusMode.h
     AutoCorrect.cpp
     AutoCorrect.h
     WriterEquation.cpp

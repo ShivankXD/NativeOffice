@@ -87,6 +87,13 @@ signals:
     void navPaneToggled(bool show);
     void commentsPaneToggled(bool show);
     void commentsChanged();            // a comment was added/removed → refresh pane
+    void focusModeRequested(bool on);  // View → Focus Mode
+
+public:
+    // Reflects Focus Mode state back onto the View tab's button when the mode is
+    // toggled by its shortcut rather than by a click (no-op if the lazily-built
+    // View tab hasn't been opened yet).
+    void setFocusModeChecked(bool on);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;
@@ -272,6 +279,7 @@ private:
     QToolButton* m_btnAlignRight   { nullptr };
     QToolButton* m_btnAlignJustify { nullptr };
     QToolButton* m_btnMarks        { nullptr };
+    QToolButton* m_btnFocus        { nullptr };   // View → Focus Mode
 
     // Clipboard
     QToolButton* m_btnPainter { nullptr };

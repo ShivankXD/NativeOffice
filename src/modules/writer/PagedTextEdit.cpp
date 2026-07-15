@@ -337,7 +337,7 @@ void PagedTextEdit::setPageMetrics(double pageW, double pageH, double margin) {
     m_pageW = pageW; m_pageH = pageH; m_margin = margin;
     document()->setDocumentMargin(margin);
     if (m_paged) {
-        document()->setPageSize(QSizeF(pageW, pageH));
+        applyPageSize();
         setFixedWidth(qRound(pageW));
     }
     syncHeight();
@@ -348,7 +348,7 @@ void PagedTextEdit::setPaged(bool on) {
     if (m_paged == on) return;
     m_paged = on;
     if (on) {
-        document()->setPageSize(QSizeF(m_pageW, m_pageH));
+        applyPageSize();
         setFixedWidth(qRound(m_pageW));
     } else {
         // Continuous flow — let the document grow to a single tall page.
@@ -400,17 +400,46 @@ QString PagedTextEdit::expandFields(const QString& s, int pageNum, int total) co
     return r;
 }
 
+// Qt's setPageSize() relayouts the whole document unconditionally — it never
+// checks whether the value actually changed. Route every assignment through
+// here so re-asserting the current geometry costs nothing.
+void PagedTextEdit::applyPageSize() {
+    if (!m_paged) return;            // web layout: QTextEdit owns the text width
+    const QSizeF want(m_pageW, m_pageH);
+    if (document()->pageSize() == want) return;
+    document()->setPageSize(want);
+}
+
 void PagedTextEdit::syncHeight() {
+    // Mid-resize the document is transiently unpaginated (see resizeEvent), so
+    // pageCount() lies. Ignore it; resizeEvent syncs once it has restored state.
+    if (m_inBaseResize) return;
+
     double h = m_paged ? pageCountValue() * m_pageH
                        : document()->size().height();
     if (h < 1.0) h = m_pageH;
-    setFixedHeight(static_cast<int>(std::ceil(h)) + 1);
+    const int want = static_cast<int>(std::ceil(h)) + 1;
+    // Only resize when the height really changes. This is what breaks the
+    // resize → relayout → documentSizeChanged → resize feedback loop.
+    if (want == m_fixedH) return;
+    m_fixedH = want;
+    setFixedHeight(want);
 }
 
 void PagedTextEdit::resizeEvent(QResizeEvent* e) {
+    // QTextEdit::resizeEvent calls document()->setTextWidth(viewport width)
+    // internally, and setTextWidth IS setPageSize(width, -1) — it silently drops
+    // pagination and collapses the document to one tall page. Left alone, the
+    // documentSizeChanged it emits drives syncHeight() off a bogus pageCount of
+    // 1, which resizes us, which relayouts again: the document re-breaks across
+    // pages on a loop and the text visibly shuffles after opening. So: ignore
+    // the layout signals it emits mid-flight, restore pagination before anything
+    // can observe the collapsed state, then sync the height once, from the truth.
+    m_inBaseResize = true;
     QTextEdit::resizeEvent(e);
-    // QTextEdit re-derives the document width on resize; re-assert pagination.
-    if (m_paged) document()->setPageSize(QSizeF(m_pageW, m_pageH));
+    applyPageSize();
+    m_inBaseResize = false;
+    syncHeight();
 }
 
 // ── Image selection & resize ─────────────────────────────────────────────────

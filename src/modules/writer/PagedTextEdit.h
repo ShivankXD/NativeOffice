@@ -134,6 +134,13 @@ public:
 
 private:
     void syncHeight();
+    // Assigns the paginated page size only when it actually differs (Qt relayouts
+    // the whole document on every setPageSize call, changed or not).
+    void applyPageSize();
+    // True while QTextEdit::resizeEvent runs — the document is transiently
+    // unpaginated in there, so its layout signals must not be acted on.
+    bool m_inBaseResize { false };
+    int  m_fixedH       { -1 };   // last height we forced; -1 = none yet
     // First text block that starts on the given 0-based page (invalid if none).
     [[nodiscard]] QTextBlock firstBlockOnPage(int pageIndex) const;
     // Insert an empty, page-breaking paragraph before `anchor` (or at the end of

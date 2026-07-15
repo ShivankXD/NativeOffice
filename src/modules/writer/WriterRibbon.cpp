@@ -921,6 +921,20 @@ QIcon fullScreenIcon() { return paintIcon([](QPainter& p) {
     p.drawPolyline(QPolygonF({ QPointF(14, 32), QPointF(8, 32), QPointF(8, 26) }));
 }); }
 
+// A lit page inside a darkened aperture — the Focus Mode curtain in miniature.
+QIcon focusModeIcon() { return paintIcon([](QPainter& p) {
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(kIconColor));
+    QPainterPath outer; outer.addRoundedRect(QRectF(6, 6, 28, 28), 4, 4);
+    QPainterPath hole;  hole.addRect(QRectF(15, 12, 10, 16));
+    p.drawPath(outer.subtracted(hole));
+    p.setPen(QPen(kIconColor, 1.4));
+    p.setBrush(Qt::NoBrush);
+    p.drawLine(QPointF(17.5, 17), QPointF(22.5, 17));
+    p.drawLine(QPointF(17.5, 20), QPointF(22.5, 20));
+    p.drawLine(QPointF(17.5, 23), QPointF(20.5, 23));
+}); }
+
 QIcon readModeIcon() { return paintIcon([](QPainter& p) {
     p.setPen(QPen(kIconColor, 1.8));
     QPainterPath l; l.moveTo(20, 10); l.cubicTo(15, 7, 9, 8, 7, 10); l.lineTo(7, 30);
@@ -2810,6 +2824,16 @@ QWidget* WriterRibbon::buildViewTab() {
     connect(btnFull, &QToolButton::toggled, this, [this](bool) { toggleFullScreen(); });
     connect(btnRead, &QToolButton::toggled, this, [this](bool on) { setReadOnly(on); });
 
+    // Focus Mode. The tooltip teaches the shortcut *before* the mode is entered,
+    // which matters because once it is on, the ribbon is behind the curtain.
+    m_btnFocus = makeBigBtn(focusModeIcon(), "Focus\nMode",
+                            "Focus Mode (Ctrl+Shift+F)\n"
+                            "Fades everything except the page to black so only your "
+                            "document is left.\nPress Ctrl+Shift+F to turn it on or off.",
+                            true);
+    connect(m_btnFocus, &QToolButton::toggled, this,
+            [this](bool on) { emit focusModeRequested(on); });
+
     auto* btnPrintView = makeBigBtn(layoutViewIcon(false), "Print\nLayout", "Paged print layout", true);
     auto* btnWebView   = makeBigBtn(layoutViewIcon(true),  "Web\nLayout", "Full-width web layout", true);
     btnPrintView->setChecked(true);
@@ -2818,7 +2842,7 @@ QWidget* WriterRibbon::buildViewTab() {
     viewGroup->addButton(btnPrintView); viewGroup->addButton(btnWebView);
     connect(btnPrintView, &QToolButton::clicked, this, [this] { emit webLayoutRequested(false); });
     connect(btnWebView,   &QToolButton::clicked, this, [this] { emit webLayoutRequested(true); });
-    layout->addWidget(makeGroup("Views", { btnFull, btnRead, btnPrintView, btnWebView }));
+    layout->addWidget(makeGroup("Views", { btnFull, btnRead, m_btnFocus, btnPrintView, btnWebView }));
     layout->addWidget(makeSeparator());
 
     // ── Show ────────────────────────────────────────────────────────────────
@@ -3790,6 +3814,12 @@ void WriterRibbon::setReadOnly(bool on) {
     if (!m_editor) return;
     m_editor->setReadOnly(on);
     if (!on) m_editor->setFocus();
+}
+
+void WriterRibbon::setFocusModeChecked(bool on) {
+    if (!m_btnFocus) return;             // View tab not built yet — nothing to sync
+    QSignalBlocker block(m_btnFocus);    // reflect state without re-emitting
+    m_btnFocus->setChecked(on);
 }
 
 void WriterRibbon::toggleFullScreen() {

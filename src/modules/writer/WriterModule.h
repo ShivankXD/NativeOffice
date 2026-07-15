@@ -32,6 +32,7 @@ class WriterRibbon;
 class WriterStatusBar;
 class PagedTextEdit;
 class WriterRuler;
+class FocusOverlay;
 
 class WriterModule : public QWidget {
     Q_OBJECT
@@ -65,6 +66,12 @@ public:
     // Free-plan view-only mode: editor becomes read-only and the ribbon's
     // editing controls are disabled. Viewing/scrolling stays available.
     void setReadOnly(bool on);
+
+    // Focus Mode: everything except the page fades to black. Toggled from the
+    // View tab or with kFocusShortcut (which also turns it back off).
+    static constexpr const char* kFocusShortcut = "Ctrl+Shift+F";
+    void setFocusMode(bool on);
+    [[nodiscard]] bool focusMode() const noexcept { return m_focusMode; }
 
 signals:
     void documentModified();
@@ -119,6 +126,10 @@ private:
 
     void refreshNavPane();            // rebuild the heading outline list
 
+    // The page area to keep lit in Focus Mode: the visible strip of the paper
+    // inside the scroll viewport, in WriterModule coordinates.
+    [[nodiscard]] QRect focusHoleRect() const;
+
     WriterRibbon*    m_ribbon    { nullptr };
     WriterRuler*     m_hRuler    { nullptr };
     WriterRuler*     m_vRuler    { nullptr };
@@ -148,6 +159,9 @@ private:
     double         m_pageMargin  { 60.0 };
     bool           m_landscape   { false };
     QColor         m_pageColor   { "#FFFFFF" };
+
+    FocusOverlay*  m_focusOverlay { nullptr };
+    bool           m_focusMode    { false };
 
     QString        m_currentPath;             // empty = untitled
     bool           m_dirty       { false };

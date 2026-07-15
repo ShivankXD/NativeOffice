@@ -7,6 +7,7 @@
 #include "WriterStatusBar.h"
 #include "PagedTextEdit.h"
 #include "WriterRuler.h"
+#include "WriterFocusMode.h"
 #include "DocxIo.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
@@ -26,6 +27,7 @@
 #include <QTextBlock>
 #include <QTextFragment>
 #include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QFont>
@@ -300,11 +302,38 @@ void WriterModule::buildUi() {
             this, &WriterModule::onContentsChanged);
     connect(m_editor->document(), &QTextDocument::contentsChanged,
             this, &WriterModule::scheduleStatusUpdate);
+    // Qt paginates lazily, so the page count keeps growing for a while after a
+    // large document loads and the last contentsChanged has already been seen.
+    // Refresh off the layout itself or "Page 1 / 28" is left reading "Page 1 / 1".
+    connect(m_editor->document()->documentLayout(),
+            &QAbstractTextDocumentLayout::documentSizeChanged,
+            this, [this](const QSizeF&) { scheduleStatusUpdate(); });
     // Keep "Page X / Y" and the selection word count live as the cursor moves.
     connect(m_editor, &QTextEdit::cursorPositionChanged,
             this, &WriterModule::scheduleStatusUpdate);
     connect(m_editor, &QTextEdit::selectionChanged,
             this, &WriterModule::scheduleStatusUpdate);
+
+    // ── Focus Mode ────────────────────────────────────────────────────────
+    // The overlay is a direct child of the module (not of any layout), so it can
+    // cover the ribbon, rulers, panes and status bar without the layout — and
+    // therefore the document — moving an inch when it engages.
+    m_focusOverlay = new FocusOverlay(this);
+    m_focusOverlay->setHoleProvider([this] { return focusHoleRect(); });
+    m_focusOverlay->setHintText(tr("%1 to exit Focus Mode").arg(kFocusShortcut));
+    connect(m_ribbon, &WriterRibbon::focusModeRequested, this, &WriterModule::setFocusMode);
+    // Keep the lit page aligned while scrolling / zooming underneath the curtain.
+    connect(m_scroll->verticalScrollBar(), &QScrollBar::valueChanged,
+            this, [this] { if (m_focusOverlay) m_focusOverlay->refresh(); });
+    connect(m_scroll->horizontalScrollBar(), &QScrollBar::valueChanged,
+            this, [this] { if (m_focusOverlay) m_focusOverlay->refresh(); });
+
+    // The same shortcut toggles Focus Mode both ways. WidgetWithChildren scope
+    // keeps it live while the editor has focus (which it does in Focus Mode)
+    // without leaking into the other modules' tabs.
+    auto* focusSc = new QShortcut(QKeySequence(kFocusShortcut), this);
+    focusSc->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(focusSc, &QShortcut::activated, this, [this] { setFocusMode(!m_focusMode); });
 
     applyCanvasStyles();
     updateStatus();
@@ -716,6 +745,29 @@ void WriterModule::setPageColor(const QColor& color) {
 void WriterModule::resizeEvent(QResizeEvent* ev) {
     QWidget::resizeEvent(ev);
     updateRulerGeometry();
+    // The focus overlay tracks this widget's size itself (it watches us).
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Focus Mode
+// ─────────────────────────────────────────────────────────────────────────────
+QRect WriterModule::focusHoleRect() const {
+    if (!m_editor || !m_scroll) return {};
+    QWidget* vp = m_scroll->viewport();
+    // The paper is the full multi-page height, so clip it to the part actually
+    // on screen; everything outside that strip is desk, chrome or nothing.
+    const QRect vpRect(vp->mapTo(const_cast<WriterModule*>(this), QPoint(0, 0)), vp->size());
+    const QRect pgRect(m_editor->mapTo(const_cast<WriterModule*>(this), QPoint(0, 0)),
+                       m_editor->size());
+    return pgRect.intersected(vpRect);
+}
+
+void WriterModule::setFocusMode(bool on) {
+    if (m_focusMode == on || !m_focusOverlay) return;
+    m_focusMode = on;
+    if (on) m_editor->setFocus();     // typing must land in the document
+    m_focusOverlay->engage(on);
+    if (m_ribbon) m_ribbon->setFocusModeChecked(on);   // keep the View tab in sync
 }
 
 void WriterModule::updateRulerGeometry() {
