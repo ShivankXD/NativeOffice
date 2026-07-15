@@ -714,7 +714,24 @@ void WriterModule::applyZoom(int percent) {
     m_ignoreChange = guard;
     m_applyingZoom = false;
     updateRulerGeometry();
+    syncFocusOverlay();
     scheduleStatusUpdate();   // debounced — avoids forcing layout per wheel tick
+}
+
+// Run any pending canvas layout now, so the paper's geometry is final rather
+// than mid-flight. Resizing the paper (a zoom) leaves the layout that re-centres
+// it queued; anything reading the page's position before that lands gets the old
+// one, which for Focus Mode means a hole cut in the wrong place.
+void WriterModule::settlePageLayout() {
+    if (m_canvas && m_canvas->layout()) m_canvas->layout()->activate();
+}
+
+// Re-cut the Focus Mode hole for the page's new geometry. Without settling first
+// the desk flashes through the curtain until the overlay's watchdog catches up.
+void WriterModule::syncFocusOverlay() {
+    if (!m_focusOverlay || !m_focusMode) return;
+    settlePageLayout();
+    m_focusOverlay->refresh();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -765,7 +782,10 @@ QRect WriterModule::focusHoleRect() const {
 void WriterModule::setFocusMode(bool on) {
     if (m_focusMode == on || !m_focusOverlay) return;
     m_focusMode = on;
-    if (on) m_editor->setFocus();     // typing must land in the document
+    if (on) {
+        m_editor->setFocus();         // typing must land in the document
+        settlePageLayout();           // cut the first hole from the page's real position
+    }
     m_focusOverlay->engage(on);
     if (m_ribbon) m_ribbon->setFocusModeChecked(on);   // keep the View tab in sync
 }

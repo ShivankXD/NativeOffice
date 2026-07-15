@@ -137,6 +137,9 @@ private:
     // Assigns the paginated page size only when it actually differs (Qt relayouts
     // the whole document on every setPageSize call, changed or not).
     void applyPageSize();
+    // Puts pagination back when Qt has silently dropped it (setTextWidth ==
+    // setPageSize(w, -1)); true if a restore was needed. See the .cpp.
+    bool restorePaginationIfDropped();
     // True while QTextEdit::resizeEvent runs — the document is transiently
     // unpaginated in there, so its layout signals must not be acted on.
     bool m_inBaseResize { false };

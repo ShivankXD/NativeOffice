@@ -129,6 +129,8 @@ private:
     // The page area to keep lit in Focus Mode: the visible strip of the paper
     // inside the scroll viewport, in WriterModule coordinates.
     [[nodiscard]] QRect focusHoleRect() const;
+    void settlePageLayout();          // run any pending canvas layout now
+    void syncFocusOverlay();          // re-cut the hole after the page geometry moves
 
     WriterRibbon*    m_ribbon    { nullptr };
     WriterRuler*     m_hRuler    { nullptr };

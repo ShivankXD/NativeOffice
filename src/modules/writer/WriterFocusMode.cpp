@@ -5,6 +5,7 @@
 
 #include <QVariantAnimation>
 #include <QEasingCurve>
+#include <QTimer>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QRegion>
@@ -37,6 +38,19 @@ FocusOverlay::FocusOverlay(QWidget* parent)
     // missed resize shows up as chrome bleeding down the uncovered edge.
     parent->installEventFilter(this);
 
+    // The page's geometry settles across several layout passes, and Qt gives no
+    // single reliable "done" signal: a zoom resizes the paper, then re-centres it
+    // one or more passes later. Cutting the hole from any one event caught the
+    // new width against the old x and let the desk show through the curtain.
+    // So don't chase events — while engaged, re-check the page against the hole
+    // and re-cut only when it actually differs. A rect compare a few times a
+    // second is free, and it is self-correcting whatever the layout does.
+    m_settle = new QTimer(this);
+    m_settle->setInterval(60);
+    connect(m_settle, &QTimer::timeout, this, [this] {
+        if (holeAt(m_progress) != m_lastHole) { applyMask(); update(); }
+    });
+
     m_anim = new QVariantAnimation(this);
     m_anim->setDuration(kDurationMs);
     m_anim->setEasingCurve(QEasingCurve::InOutCubic);
@@ -57,6 +71,9 @@ void FocusOverlay::engage(bool on) {
         syncGeometry();
         show();
         raise();
+        m_settle->start();          // keep the hole locked onto the page
+    } else {
+        m_settle->stop();
     }
     // Scale the duration by the distance left to travel, so toggling mid-fade
     // reverses smoothly instead of restarting from the beginning.
@@ -107,10 +124,10 @@ QRect FocusOverlay::holeAt(double p) const {
 }
 
 void FocusOverlay::applyMask() {
-    const QRect hole = holeAt(m_progress);
+    m_lastHole = holeAt(m_progress);
     // Mask = everything except the page. Qt uses this for hit-testing too, so the
     // page stays fully interactive while the black swallows every other click.
-    setMask(QRegion(rect()).subtracted(QRegion(hole)));
+    setMask(QRegion(rect()).subtracted(QRegion(m_lastHole)));
 }
 
 void FocusOverlay::paintEvent(QPaintEvent* e) {

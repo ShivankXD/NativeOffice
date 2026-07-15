@@ -174,8 +174,14 @@ PagedTextEdit::PagedTextEdit(QWidget* parent)
     document()->setPageSize(QSizeF(m_pageW, m_pageH));
     document()->setDocumentMargin(m_margin);
 
+    // Every path that clobbers the page size resizes the document, so this is the
+    // one place that catches all of them — restore pagination, then measure.
     connect(document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged,
-            this, [this](const QSizeF&) { syncHeight(); });
+            this, [this](const QSizeF&) {
+        if (m_inBaseResize) return;      // resizeEvent restores and syncs itself
+        restorePaginationIfDropped();    // may re-enter; syncHeight's memo absorbs it
+        syncHeight();
+    });
 
     // Spell checking: a syntax highlighter draws red squiggles under misspellings.
     // Starts disabled; WriterModule turns it on to match the status-bar pill.
@@ -408,6 +414,19 @@ void PagedTextEdit::applyPageSize() {
     const QSizeF want(m_pageW, m_pageH);
     if (document()->pageSize() == want) return;
     document()->setPageSize(want);
+}
+
+// Qt drops pagination behind our back. Several internal paths call
+// document()->setTextWidth(), which IS setPageSize(width, -1) — a height of -1
+// means "unpaginated", collapsing the document to one tall page. resizeEvent is
+// only one of those paths: changing the fixed width (a zoom) relayouts the
+// viewport and clobbers the page size without ever sending us a resize event.
+// Rather than try to guard every caller, notice the symptom — a paged document
+// whose page height has gone negative — and put the pagination back.
+bool PagedTextEdit::restorePaginationIfDropped() {
+    if (!m_paged || document()->pageSize().height() >= 0.0) return false;
+    applyPageSize();
+    return true;
 }
 
 void PagedTextEdit::syncHeight() {

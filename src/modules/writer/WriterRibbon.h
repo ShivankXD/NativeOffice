@@ -280,6 +280,7 @@ private:
     QToolButton* m_btnAlignJustify { nullptr };
     QToolButton* m_btnMarks        { nullptr };
     QToolButton* m_btnFocus        { nullptr };   // View → Focus Mode
+    QToolButton* m_btnFocusHome    { nullptr };   // Home → Focus Mode (same toggle)
 
     // Clipboard
     QToolButton* m_btnPainter { nullptr };

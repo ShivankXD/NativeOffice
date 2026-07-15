@@ -21,6 +21,7 @@
 #include <functional>
 
 class QVariantAnimation;
+class QTimer;
 
 namespace NativeOffice {
 
@@ -32,6 +33,7 @@ public:
 
     // Returns the page rect to keep visible, in this widget's coordinates.
     void setHoleProvider(std::function<QRect()> fn) { m_hole = std::move(fn); }
+
 
     // Small dim hint painted top-right, e.g. "Ctrl+Shift+F to exit Focus Mode".
     void setHintText(const QString& t) { m_hint = t; }
@@ -58,7 +60,9 @@ private:
     std::function<QRect()> m_hole;
     QString            m_hint;
     QVariantAnimation* m_anim { nullptr };
-    double             m_progress { 0.0 };   // 0 = clear, 1 = fully closed
+    QTimer*            m_settle { nullptr };   // watchdog: re-cuts the hole if the page moved
+    QRect              m_lastHole;             // hole the current mask was cut from
+    double             m_progress { 0.0 };     // 0 = clear, 1 = fully closed
     bool               m_on { false };
 };
 

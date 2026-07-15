@@ -921,6 +921,14 @@ QIcon fullScreenIcon() { return paintIcon([](QPainter& p) {
     p.drawPolyline(QPolygonF({ QPointF(14, 32), QPointF(8, 32), QPointF(8, 26) }));
 }); }
 
+// Shared by the Home and View copies of the button. It names the shortcut, so
+// hovering teaches it *before* Focus Mode is on — once it is, the ribbon is
+// behind the curtain and there's nothing left to hover.
+static const char* const kFocusModeTip =
+    "Focus Mode (Ctrl+Shift+F)\n"
+    "Fades everything except the page to black so only your document is left.\n"
+    "Press Ctrl+Shift+F to turn it on or off.";
+
 // A lit page inside a darkened aperture — the Focus Mode curtain in miniature.
 QIcon focusModeIcon() { return paintIcon([](QPainter& p) {
     p.setPen(Qt::NoPen);
@@ -1741,7 +1749,13 @@ QWidget* WriterRibbon::buildHomeTab() {
         btnSelect->setMenu(m);
     }
 
-    layout->addWidget(makeGroup("Editing", { btnFind, btnSelect }));
+    // Focus Mode also lives on Home (not just View) so it's reachable without
+    // hunting for it. Both buttons drive the same toggle and stay in sync.
+    m_btnFocusHome = makeBigBtn(focusModeIcon(), "Focus\nMode", kFocusModeTip, true);
+    connect(m_btnFocusHome, &QToolButton::toggled, this,
+            [this](bool on) { emit focusModeRequested(on); });
+
+    layout->addWidget(makeGroup("Editing", { btnFind, btnSelect, m_btnFocusHome }));
     layout->addStretch();
 
     scroll->setWidget(tab);
@@ -2824,13 +2838,7 @@ QWidget* WriterRibbon::buildViewTab() {
     connect(btnFull, &QToolButton::toggled, this, [this](bool) { toggleFullScreen(); });
     connect(btnRead, &QToolButton::toggled, this, [this](bool on) { setReadOnly(on); });
 
-    // Focus Mode. The tooltip teaches the shortcut *before* the mode is entered,
-    // which matters because once it is on, the ribbon is behind the curtain.
-    m_btnFocus = makeBigBtn(focusModeIcon(), "Focus\nMode",
-                            "Focus Mode (Ctrl+Shift+F)\n"
-                            "Fades everything except the page to black so only your "
-                            "document is left.\nPress Ctrl+Shift+F to turn it on or off.",
-                            true);
+    m_btnFocus = makeBigBtn(focusModeIcon(), "Focus\nMode", kFocusModeTip, true);
     connect(m_btnFocus, &QToolButton::toggled, this,
             [this](bool on) { emit focusModeRequested(on); });
 
@@ -3817,9 +3825,12 @@ void WriterRibbon::setReadOnly(bool on) {
 }
 
 void WriterRibbon::setFocusModeChecked(bool on) {
-    if (!m_btnFocus) return;             // View tab not built yet — nothing to sync
-    QSignalBlocker block(m_btnFocus);    // reflect state without re-emitting
-    m_btnFocus->setChecked(on);
+    // Either copy may not exist yet — ribbon tabs are built lazily.
+    for (QToolButton* b : { m_btnFocusHome, m_btnFocus }) {
+        if (!b) continue;
+        QSignalBlocker block(b);         // reflect state without re-emitting
+        b->setChecked(on);
+    }
 }
 
 void WriterRibbon::toggleFullScreen() {
