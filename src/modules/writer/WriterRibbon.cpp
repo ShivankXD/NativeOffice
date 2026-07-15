@@ -77,6 +77,8 @@
 #include <QSpinBox>
 #include <QPainter>
 #include <QPixmap>
+#include <QToolTip>
+#include <QCursor>
 #include <QIcon>
 #include <QFontMetrics>
 #include <QtMath>
@@ -1786,9 +1788,7 @@ QWidget* WriterRibbon::buildInsertTab() {
     connect(btnTemplate,  &QToolButton::clicked, this, &WriterRibbon::showTemplateGallery);
     connect(btnCover,     &QToolButton::clicked, this, &WriterRibbon::insertCoverPage);
     connect(btnPageBreak, &QToolButton::clicked, this, &WriterRibbon::insertPageBreak);
-    connect(btnBlankPage, &QToolButton::clicked, this, [this] {
-        insertPageBreak(); insertPageBreak();   // a blank page = two breaks around an empty one
-    });
+    connect(btnBlankPage, &QToolButton::clicked, this, &WriterRibbon::insertBlankPage);
     layout->addWidget(makeGroup("Pages", { btnTemplate, btnCover, btnPageBreak, btnBlankPage }));
     layout->addWidget(makeSeparator());
 
@@ -2081,24 +2081,49 @@ void WriterRibbon::insertTableSized(int rows, int cols) {
     m_editor->setTextCursor(cur);     // place the editor cursor inside the new table
     m_editor->setFocus();
 
-    // Reveal the contextual Table tab and switch to it so the tools are found.
+    // Reveal the contextual Table tab so the table tools are reachable, but stay
+    // on the tab the user is actually on — yanking the ribbon away mid-task reads
+    // as a glitch rather than a help.
     refreshTableTab();
-    if (m_tableTabBtn && m_tableTabBtn->isVisible() && m_stack) {
-        m_tableTabBtn->setChecked(true);
-        m_stack->setCurrentIndex(7);
-    }
 }
 
+// A page break marks where the following content starts a new page; it is not a
+// way to add a page (that's Insert → Blank Page). So it only ever pushes content
+// that already exists: with nothing after the cursor there is nothing to push,
+// and inserting a break there would just strand an empty page at the end.
 void WriterRibbon::insertPageBreak() {
     if (!m_editor) return;
     QTextCursor cur = m_editor->textCursor();
+
+    QTextCursor probe = cur;
+    probe.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
+    if (probe.selectedText().trimmed().isEmpty()) {
+        if (m_editor->window())
+            QToolTip::showText(QCursor::pos(),
+                tr("Nothing after the cursor to move onto a new page.\n"
+                   "Use Insert → Blank Page to add a page."), m_editor);
+        return;
+    }
+
     cur.beginEditBlock();
-    cur.insertBlock();
+    // At a block start the block itself can carry the break; mid-block, split it
+    // first so the remainder (not a new empty paragraph) is what moves down.
+    if (!cur.atBlockStart()) cur.insertBlock();
     QTextBlockFormat bf = cur.blockFormat();
     bf.setPageBreakPolicy(QTextFormat::PageBreak_AlwaysBefore);
     cur.setBlockFormat(bf);
     cur.endEditBlock();
-    // Visual cue in the continuous editor (PDF/print honour the policy above).
+    m_editor->setTextCursor(cur);
+    m_editor->setFocus();
+}
+
+// Adding a page IS this button's job (unlike Page Break). Reuses the paper's own
+// page insertion, so it is one undo step and already handles the first-block case
+// that used to spawn a spurious second page.
+void WriterRibbon::insertBlankPage() {
+    auto* paper = qobject_cast<PagedTextEdit*>(m_editor);
+    if (!paper) return;
+    paper->addBlankPageBelow(paper->currentPageNumber() - 1);
     m_editor->setFocus();
 }
 
@@ -2150,14 +2175,71 @@ void WriterRibbon::insertBookmark() {
     m_editor->setFocus();
 }
 
+// Page numbers live in the header/footer zones, so this asks the two questions
+// that actually matter (where, and what should it say) and writes the field for
+// you. It used to silently re-apply the built-in default — which is already
+// "Page {n} of {N}" in the footer centre — so clicking it looked like a no-op.
 void WriterRibbon::insertPageNumberField() {
-    // Quick action: put an auto-updating page number in the footer centre.
     auto* paper = qobject_cast<PagedTextEdit*>(m_editor);
     if (!paper) return;
+
+    QDialog dlg(window());
+    dlg.setWindowTitle("Page Numbers");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* form = new QFormLayout(&dlg);
+
+    auto* posV = new QComboBox(&dlg);
+    posV->addItem("Bottom of page (footer)", 1);
+    posV->addItem("Top of page (header)",    0);
+    auto* posH = new QComboBox(&dlg);
+    posH->addItem("Centre", 1);
+    posH->addItem("Left",   0);
+    posH->addItem("Right",  2);
+    auto* fmt = new QComboBox(&dlg);
+    fmt->addItem("Page 1 of N", "Page {n} of {N}");
+    fmt->addItem("1",           "{n}");
+    fmt->addItem("Page 1",      "Page {n}");
+    fmt->addItem("- 1 -",       "- {n} -");
+    fmt->addItem("Remove page numbers", "");
+
+    form->addRow("Position:", posV);
+    form->addRow("Alignment:", posH);
+    form->addRow("Format:", fmt);
+
+    auto* preview = new QLabel(&dlg);
+    preview->setStyleSheet("color:#3A3F4B;background:#FFFFFF;border:1px solid #D8DCE6;"
+                           "border-radius:6px;padding:6px;");
+    auto updatePreview = [&, paper] {
+        QString s = fmt->currentData().toString();
+        if (s.isEmpty()) { preview->setText("Page numbers will be removed."); return; }
+        s.replace("{n}", "1").replace("{N}", QString::number(paper->pageCountValue()));
+        preview->setText("On page 1 this reads:  " + s);
+    };
+    updatePreview();
+    connect(fmt, &QComboBox::currentIndexChanged, &dlg, [&updatePreview] { updatePreview(); });
+    form->addRow(preview);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) { m_editor->setFocus(); return; }
+
+    QStringList h = paper->headerZones();
     QStringList f = paper->footerZones();
-    f[1] = "Page {n} of {N}";
-    paper->setHeaderFooter(paper->headerZones(), f, paper->differentFirstPage());
-    if (m_editor) m_editor->setFocus();
+    const QString code = fmt->currentData().toString();
+    const int zone = posH->currentData().toInt();
+    const bool footer = posV->currentData().toInt() == 1;
+
+    // Clear any existing page-number field wherever it currently sits, so the
+    // number moves rather than appearing twice.
+    for (QStringList* z : { &h, &f })
+        for (QString& s : *z)
+            if (s.contains("{n}") || s.contains("{N}")) s.clear();
+    (footer ? f : h)[zone] = code;
+
+    paper->setHeaderFooter(h, f, paper->differentFirstPage());
+    m_editor->setFocus();
 }
 
 void WriterRibbon::insertTextBox() {
@@ -2179,36 +2261,139 @@ void WriterRibbon::insertTextBox() {
     m_editor->setFocus();
 }
 
-void WriterRibbon::insertWordArt() {
-    if (!m_editor) return;
-    bool ok = false;
-    const QString text = QInputDialog::getText(window(), "Insert WordArt",
-                            "Text:", QLineEdit::Normal, "WordArt", &ok);
-    if (!ok || text.isEmpty()) return;
+// ── WordArt ─────────────────────────────────────────────────────────────────
+namespace {
 
-    // Render the text with a gradient fill + dark outline, then embed as an image.
-    QFont f("Georgia", 44, QFont::Bold);
-    f.setItalic(true);
+struct WordArtStyle {
+    const char* name;
+    const char* family;
+    bool        italic;
+    const char* top;        // gradient fill, top → bottom
+    const char* bottom;
+    const char* outline;
+    double      outlineWidth;
+    bool        shadow;
+};
+
+// Ten presets. Deliberately spread across colour families and treatments
+// (gradient, outline-only, shadowed) so the gallery reads as ten real choices
+// rather than one style in ten colours.
+const WordArtStyle kWordArtStyles[] = {
+    { "Crimson",  "Georgia",  true,  "#FF5247", "#B91C1C", "#2C3140", 2.0, false },
+    { "Ocean",    "Segoe UI", false, "#38BDF8", "#1D4ED8", "#0B2545", 2.0, false },
+    { "Gold",     "Georgia",  false, "#FDE68A", "#D97706", "#7C2D12", 2.0, true  },
+    { "Orchid",   "Segoe UI", true,  "#F0ABFC", "#7E22CE", "#3B0764", 2.0, false },
+    { "Meadow",   "Segoe UI", false, "#86EFAC", "#15803D", "#052E16", 2.0, false },
+    { "Outline",  "Impact",   false, "#FFFFFF", "#F1F5F9", "#1F2937", 2.6, false },
+    { "Midnight", "Georgia",  false, "#475569", "#0F172A", "#94A3B8", 1.4, true  },
+    { "Sunset",   "Segoe UI", true,  "#FBBF24", "#DB2777", "#7F1D1D", 2.0, false },
+    { "Steel",    "Segoe UI", false, "#F8FAFC", "#64748B", "#334155", 2.0, true  },
+    { "Lagoon",   "Georgia",  true,  "#5EEAD4", "#0F766E", "#FFFFFF", 2.4, false },
+};
+constexpr int kWordArtCount = int(sizeof(kWordArtStyles) / sizeof(kWordArtStyles[0]));
+
+QImage renderWordArt(const QString& text, int style, int pointSize) {
+    const WordArtStyle& s = kWordArtStyles[qBound(0, style, kWordArtCount - 1)];
+    QFont f(QString::fromLatin1(s.family), pointSize, QFont::Bold);
+    f.setItalic(s.italic);
     const QFontMetrics fm(f);
-    const int w = fm.horizontalAdvance(text) + 40;
-    const int h = fm.height() + 28;
-    QImage img(w, h, QImage::Format_ARGB32_Premultiplied);
+    const int pad = qMax(10, pointSize / 2);
+    const int w = fm.horizontalAdvance(text) + pad * 2 + 8;
+    const int h = fm.height() + pad * 2;
+
+    QImage img(qMax(w, 1), qMax(h, 1), QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
     QPainter p(&img);
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::TextAntialiasing);
-    p.setFont(f);
+
     QPainterPath path;
-    path.addText(20, 20 + fm.ascent(), f, text);
-    QLinearGradient g(0, 0, 0, h);
-    g.setColorAt(0.0, QColor("#FF5247"));
-    g.setColorAt(1.0, QColor("#B91C1C"));
-    p.setPen(QPen(QColor("#2C3140"), 2.0));
+    path.addText(pad, pad + fm.ascent(), f, text);
+
+    if (s.shadow) {
+        p.save();
+        p.translate(pointSize * 0.06 + 1.5, pointSize * 0.06 + 1.5);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0, 0, 0, 70));
+        p.drawPath(path);
+        p.restore();
+    }
+    QLinearGradient g(0, pad, 0, h - pad);
+    g.setColorAt(0.0, QColor(s.top));
+    g.setColorAt(1.0, QColor(s.bottom));
+    p.setPen(QPen(QColor(s.outline), s.outlineWidth));
     p.setBrush(QBrush(g));
     p.drawPath(path);
     p.end();
+    return img;
+}
 
-    insertImageData(img);
+} // namespace
+
+void WriterRibbon::insertWordArt() {
+    if (!m_editor) return;
+
+    QDialog dlg(window());
+    dlg.setWindowTitle("Insert WordArt");
+    dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+    auto* root = new QVBoxLayout(&dlg);
+    root->setSpacing(10);
+
+    auto* textRow = new QHBoxLayout();
+    textRow->addWidget(new QLabel("Text:", &dlg));
+    auto* edit = new QLineEdit("WordArt", &dlg);
+    edit->selectAll();
+    textRow->addWidget(edit, 1);
+    root->addLayout(textRow);
+
+    root->addWidget(new QLabel("Pick a style — the previews show your own text:", &dlg));
+
+    auto* grid = new QGridLayout();
+    grid->setSpacing(6);
+    auto* group = new QButtonGroup(&dlg);
+    group->setExclusive(true);
+    QList<QToolButton*> tiles;
+    for (int i = 0; i < kWordArtCount; ++i) {
+        auto* b = new QToolButton(&dlg);
+        b->setCheckable(true);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setIconSize(QSize(148, 44));
+        b->setFixedSize(160, 56);
+        b->setToolTip(kWordArtStyles[i].name);
+        b->setStyleSheet(
+            "QToolButton{background:#FFFFFF;border:1px solid #D8DCE6;border-radius:6px;}"
+            "QToolButton:hover{border:1px solid #9C8CF0;}"
+            "QToolButton:checked{border:2px solid #6D5AE6;background:#F3F1FF;}");
+        group->addButton(b, i);
+        grid->addWidget(b, i / 5, i % 5);
+        tiles << b;
+    }
+    tiles[0]->setChecked(true);
+    root->addLayout(grid);
+
+    // Live previews: cheap enough (ten small renders) to redo on every keystroke.
+    auto refreshTiles = [&tiles, edit] {
+        const QString t = edit->text().isEmpty() ? QStringLiteral("WordArt") : edit->text();
+        for (int i = 0; i < tiles.size(); ++i) {
+            const QImage im = renderWordArt(t, i, 20);
+            tiles[i]->setIcon(QIcon(QPixmap::fromImage(
+                im.scaled(148, 44, Qt::KeepAspectRatio, Qt::SmoothTransformation))));
+        }
+    };
+    refreshTiles();
+    connect(edit, &QLineEdit::textChanged, &dlg, [&refreshTiles] { refreshTiles(); });
+    // Enter in the text field accepts, so a quick pick needn't reach for the mouse.
+    connect(edit, &QLineEdit::returnPressed, &dlg, &QDialog::accept);
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    root->addWidget(bb);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QString text = edit->text();
+    if (text.isEmpty()) return;
+    insertImageData(renderWordArt(text, qMax(0, group->checkedId()), 44));
 }
 
 void WriterRibbon::insertDropCap() {
@@ -2292,58 +2477,139 @@ void WriterRibbon::insertCoverPage() {
     m_editor->setFocus();
 }
 
-void WriterRibbon::insertHeaderFooter(bool /*header*/) {
-    openHeaderFooterDialog();
+void WriterRibbon::insertHeaderFooter(bool header) {
+    openHeaderFooterDialog(header ? 0 : 1);
 }
 
-void WriterRibbon::openHeaderFooterDialog() {
+// A form laid out the way the page actually is: a Header row and a Footer row,
+// each with the three zones side by side in the order they appear on paper, and a
+// live preview underneath. `focusFooter` decides which row is focused, so the
+// Header and Footer buttons no longer do the identical thing.
+void WriterRibbon::openHeaderFooterDialog(int focusSection) {
     auto* paper = qobject_cast<PagedTextEdit*>(m_editor);
     if (!paper) return;
 
     QDialog dlg(window());
     dlg.setWindowTitle("Header and Footer");
     dlg.setStyleSheet(ThemeManager::inputDialogStyleSheet());
-    auto* form = new QFormLayout(&dlg);
+    dlg.setMinimumWidth(560);
+    auto* root = new QVBoxLayout(&dlg);
+    root->setSpacing(10);
 
     const QStringList hz = paper->headerZones();
     const QStringList fz = paper->footerZones();
-    QLineEdit* hEd[3]; QLineEdit* fEd[3];
-    const char* labels[3] = { "Left:", "Center:", "Right:" };
+    QLineEdit* ed[2][3];
 
-    auto* hHdr = new QLabel("<b>Header</b>", &dlg); form->addRow(hHdr);
-    for (int i = 0; i < 3; ++i) { hEd[i] = new QLineEdit(hz.value(i), &dlg); form->addRow(labels[i], hEd[i]); }
-    auto* fHdr = new QLabel("<b>Footer</b>", &dlg); form->addRow(fHdr);
-    for (int i = 0; i < 3; ++i) { fEd[i] = new QLineEdit(fz.value(i), &dlg); form->addRow(labels[i], fEd[i]); }
+    // Zones laid out left/centre/right, matching where they land on the page.
+    auto buildSection = [&](const char* title, const char* hint,
+                            const QStringList& vals, int row) {
+        auto* box = new QVBoxLayout();
+        auto* t = new QLabel(QString("<b>%1</b>  <span style='color:#8A90A0'>%2</span>")
+                                 .arg(title, hint), &dlg);
+        box->addWidget(t);
+        auto* cols = new QHBoxLayout();
+        const char* zone[3] = { "Left", "Centre", "Right" };
+        for (int i = 0; i < 3; ++i) {
+            auto* col = new QVBoxLayout();
+            auto* lbl = new QLabel(zone[i], &dlg);
+            lbl->setStyleSheet("color:#6B7280;font-size:11px;");
+            ed[row][i] = new QLineEdit(vals.value(i), &dlg);
+            ed[row][i]->setPlaceholderText("(empty)");
+            col->addWidget(lbl);
+            col->addWidget(ed[row][i]);
+            cols->addLayout(col);
+        }
+        box->addLayout(cols);
+        return box;
+    };
+    root->addLayout(buildSection("Header", "printed in the top margin of every page", hz, 0));
+    root->addLayout(buildSection("Footer", "printed in the bottom margin of every page", fz, 1));
 
-    // Field-insert buttons (NoFocus so the target line edit keeps focus).
+    // Remember the last field the user was in, so the field buttons always have a
+    // target. Tracking focus explicitly matters: the old code read focusWidget()
+    // at click time and silently did nothing if no field had been clicked yet.
+    // exec() blocks below, so capturing this local by reference is safe.
+    QLineEdit* target = ed[focusSection == 1 ? 1 : 0][1];
+    connect(qApp, &QApplication::focusChanged, &dlg, [&target](QWidget*, QWidget* now) {
+        if (auto* le = qobject_cast<QLineEdit*>(now)) target = le;
+    });
+
     auto* fieldRow = new QHBoxLayout();
-    fieldRow->addWidget(new QLabel("Insert field:", &dlg));
-    struct Fld { const char* label; const char* code; };
-    for (const Fld& fl : { Fld{"Page #","{n}"}, Fld{"Total Pages","{N}"},
-                           Fld{"Date","{date}"}, Fld{"File Name","{file}"} }) {
-        auto* b = new QPushButton(fl.label, &dlg);
-        b->setFocusPolicy(Qt::NoFocus);
-        const QString code = fl.code;
-        connect(b, &QPushButton::clicked, &dlg, [code]{
-            if (auto* le = qobject_cast<QLineEdit*>(QApplication::focusWidget())) le->insert(code);
+    auto* fl = new QLabel("Add:", &dlg);
+    fieldRow->addWidget(fl);
+    struct Fld { const char* label; const char* code; const char* tip; };
+    for (const Fld& f : { Fld{"Page number", "{n}", "The current page's number"},
+                          Fld{"Total pages", "{N}", "How many pages the document has"},
+                          Fld{"Date",        "{date}", "Today's date"},
+                          Fld{"File name",   "{file}", "The document's file name"} }) {
+        auto* b = new QPushButton(f.label, &dlg);
+        b->setFocusPolicy(Qt::NoFocus);     // keep focus in the field being edited
+        b->setCursor(Qt::PointingHandCursor);
+        b->setToolTip(f.tip);
+        const QString code = f.code;
+        connect(b, &QPushButton::clicked, &dlg, [&target, code] {
+            if (target) { target->insert(code); target->setFocus(); }
         });
         fieldRow->addWidget(b);
     }
     fieldRow->addStretch();
-    form->addRow(fieldRow);
+    root->addLayout(fieldRow);
 
-    auto* diff = new QCheckBox("Different first page (no header/footer on page 1)", &dlg);
+    auto* diff = new QCheckBox("Leave page 1 blank (title pages usually have no header)", &dlg);
     diff->setChecked(paper->differentFirstPage());
-    form->addRow(diff);
+    root->addWidget(diff);
 
-    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    form->addRow(bb);
+    // Live preview — shows the fields expanded, so {n} stops being a mystery.
+    auto* preview = new QLabel(&dlg);
+    preview->setStyleSheet("background:#FFFFFF;border:1px solid #D8DCE6;border-radius:6px;"
+                           "padding:8px;color:#3A3F4B;font-size:11px;");
+    preview->setTextFormat(Qt::RichText);
+    auto updatePreview = [&, paper] {
+        const int total = paper->pageCountValue();
+        auto rowHtml = [&](int r) {
+            QStringList cells;
+            for (int i = 0; i < 3; ++i) {
+                QString s = ed[r][i]->text();
+                s.replace("{n}", "1").replace("{N}", QString::number(total));
+                s.replace("{date}", QDate::currentDate().toString("MMMM d, yyyy"));
+                s.replace("{file}", "Untitled");
+                cells << (s.isEmpty() ? QStringLiteral("&nbsp;") : s.toHtmlEscaped());
+            }
+            // NB: QString::arg has no %% escape — a literal % is just '%'.
+            return QString("<tr><td width='33%' align='left'>%1</td>"
+                           "<td width='34%' align='center'>%2</td>"
+                           "<td width='33%' align='right'>%3</td></tr>")
+                .arg(cells[0], cells[1], cells[2]);
+        };
+        preview->setText(QString(
+            "<b style='color:#6B7280'>Preview — page 1 of %1</b>"
+            "<table width='100%' cellpadding='2'>%2"
+            "<tr><td colspan='3' style='color:#B4B9C6'>— page content —</td></tr>%3</table>")
+            .arg(total).arg(rowHtml(0), rowHtml(1)));
+    };
+    updatePreview();
+    for (int r = 0; r < 2; ++r)
+        for (int i = 0; i < 3; ++i)
+            connect(ed[r][i], &QLineEdit::textChanged, &dlg, [&updatePreview] { updatePreview(); });
+    root->addWidget(preview);
+
+    auto* bb = new QDialogButtonBox(&dlg);
+    bb->addButton(QDialogButtonBox::Ok);
+    bb->addButton(QDialogButtonBox::Cancel);
+    auto* clear = bb->addButton("Clear All", QDialogButtonBox::ResetRole);
+    connect(clear, &QPushButton::clicked, &dlg, [&] {
+        for (int r = 0; r < 2; ++r) for (int i = 0; i < 3; ++i) ed[r][i]->clear();
+    });
     connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    root->addWidget(bb);
+
+    ed[focusSection == 1 ? 1 : 0][1]->setFocus();
+    ed[focusSection == 1 ? 1 : 0][1]->selectAll();
 
     if (dlg.exec() == QDialog::Accepted) {
-        paper->setHeaderFooter({ hEd[0]->text(), hEd[1]->text(), hEd[2]->text() },
-                               { fEd[0]->text(), fEd[1]->text(), fEd[2]->text() },
+        paper->setHeaderFooter({ ed[0][0]->text(), ed[0][1]->text(), ed[0][2]->text() },
+                               { ed[1][0]->text(), ed[1][1]->text(), ed[1][2]->text() },
                                diff->isChecked());
     }
     m_editor->setFocus();

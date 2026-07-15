@@ -178,7 +178,9 @@ private:
     void insertShapeImage(int kind);
     void insertCoverPage();
     void insertHeaderFooter(bool header);
-    void openHeaderFooterDialog();
+    // focusSection: 0 = focus the Header row, 1 = focus the Footer row.
+    void openHeaderFooterDialog(int focusSection = 0);
+    void insertBlankPage();
     void insertEquation(const QString& text);
     void insertChart(int kind);
 
