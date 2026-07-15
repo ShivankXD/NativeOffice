@@ -11,6 +11,7 @@
 #include <QXmlStreamReader>
 #include <QRectF>
 #include <QColor>
+#include <QImage>
 #include <QtGlobal>
 #include <algorithm>
 
@@ -341,8 +342,17 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
             path.push_back(ln);
             ++depth;
 
-            if (ln == "off") { ox = av(attrs, "x").toDouble(); oy = av(attrs, "y").toDouble(); }
-            else if (ln == "ext") { ex = av(attrs, "cx").toDouble(); ey = av(attrs, "cy").toDouble(); haveXfrm = true; }
+            // Only inside <a:xfrm>: <a:ext> is ALSO the name of the extension
+            // container inside <a:extLst> (e.g. a hyperlink's colour extension),
+            // which carries a uri and no cx/cy. Reading that as a size zeroed the
+            // shape to 1x1 — its text then wrapped one character per line and
+            // trailed off the bottom of the slide.
+            if (ln == "off" && path.contains("xfrm")) {
+                ox = av(attrs, "x").toDouble(); oy = av(attrs, "y").toDouble();
+            }
+            else if (ln == "ext" && path.contains("xfrm")) {
+                ex = av(attrs, "cx").toDouble(); ey = av(attrs, "cy").toDouble(); haveXfrm = true;
+            }
             else if (ln == "xfrm") { const QString r = av(attrs, "rot"); if (!r.isEmpty()) rot = r.toDouble() / 60000.0; }
             else if (ln == "prstGeom") { prst = av(attrs, "prst"); }
             else if (ln == "bodyPr") { const QString a = av(attrs, "anchor"); if (!a.isEmpty()) anchor = a; }
@@ -368,7 +378,12 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
                 const QString tf = av(attrs, "typeface");
                 if (!tf.isEmpty() && !tf.startsWith('+')) curFmt.face = tf;
             }
-            else if (ln == "br" && inRun) { curText += '\n'; }
+            // <a:br/> is a paragraph-level sibling of <a:r>, not a child of it.
+            // Mark it with U+2028 so it survives to the HTML as a real break —
+            // raw newlines inside <a:t> are just whitespace and must not.
+            else if (ln == "br" && !paras.isEmpty()) {
+                paras.back().runs.push_back({ QString(QChar(0x2028)), curFmt });
+            }
             else if (ln == "srgbClr") {
                 const QString val = av(attrs, "val");
                 if (!val.isEmpty()) {
@@ -381,7 +396,14 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
                 }
             }
             else if (ln == "t") {
-                curText += xml.readElementText(QXmlStreamReader::IncludeChildElements);
+                QString s = xml.readElementText(QXmlStreamReader::IncludeChildElements);
+                // DrawingML expresses line breaks as <a:br/>. A literal newline
+                // inside <a:t> is ordinary whitespace — turning it into a <br/>
+                // (as this once did) injects a blank line after every such run,
+                // which overflows the text out of its box and onto whatever sits
+                // below. Real decks contain these: 21 runs in one 18-slide deck.
+                s.replace('\n', ' ').replace('\r', ' ');
+                curText += s;
                 path.pop_back(); --depth;            // readElementText consumed </t>
             }
         } else if (tok == QXmlStreamReader::EndElement) {
@@ -443,7 +465,7 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
                 if (r.fmt.italic)    s += "font-style:italic;";
                 if (r.fmt.underline) s += "text-decoration:underline;";
                 QString t = r.text.toHtmlEscaped();
-                t.replace("\n", "<br/>");
+                t.replace(QChar(0x2028), "<br/>");     // explicit <a:br/> only
                 html += QString("<span style=\"%1\">%2</span>").arg(s, t);
             }
             html += "</p>";
@@ -472,6 +494,8 @@ void parsePic(QXmlStreamReader& xml, const Scale& sc,
               std::vector<SlideItem>& out) {
     double ox = 0, oy = 0, ex = 0, ey = 0, rot = 0;
     bool haveXfrm = false;
+    bool sawStretch = false, sawFillRect = false;
+    int  xfrmDepth = -1;                 // >=0 while inside <a:xfrm> (see parseSp)
     QByteArray imgData;
 
     int depth = 1;
@@ -481,12 +505,18 @@ void parsePic(QXmlStreamReader& xml, const Scale& sc,
             const QString ln = xml.name().toString();
             const auto attrs = xml.attributes();
             ++depth;
-            if (ln == "off") { ox = av(attrs, "x").toDouble(); oy = av(attrs, "y").toDouble(); }
-            else if (ln == "ext") { ex = av(attrs, "cx").toDouble(); ey = av(attrs, "cy").toDouble(); haveXfrm = true; }
-            else if (ln == "xfrm") { const QString r = av(attrs, "rot"); if (!r.isEmpty()) rot = r.toDouble() / 60000.0; }
+            if (ln == "xfrm") {
+                xfrmDepth = depth;
+                const QString r = av(attrs, "rot"); if (!r.isEmpty()) rot = r.toDouble() / 60000.0;
+            }
+            else if (ln == "off" && xfrmDepth > 0) { ox = av(attrs, "x").toDouble(); oy = av(attrs, "y").toDouble(); }
+            else if (ln == "ext" && xfrmDepth > 0) { ex = av(attrs, "cx").toDouble(); ey = av(attrs, "cy").toDouble(); haveXfrm = true; }
+            else if (ln == "stretch")  { sawStretch = true; }
+            else if (ln == "fillRect") { sawFillRect = true; }
             else if (ln == "blip") { const QString rid = av(attrs, "embed");
                 if (mediaByRid.contains(rid)) imgData = mediaByRid.value(rid); }
         } else if (tok == QXmlStreamReader::EndElement) {
+            if (xfrmDepth == depth) xfrmDepth = -1;
             --depth;
         }
     }
@@ -494,14 +524,130 @@ void parsePic(QXmlStreamReader& xml, const Scale& sc,
     SlideItem item;
     item.type      = SlideItemType::Image;
     item.imageData = imgData;
-    item.rect      = QRectF(ox * sc.sx, oy * sc.sy,
-                            std::max(1.0, ex * sc.sx), std::max(1.0, ey * sc.sy));
+    QRectF r(ox * sc.sx, oy * sc.sy,
+             std::max(1.0, ex * sc.sx), std::max(1.0, ey * sc.sy));
+
+    // <a:stretch><a:fillRect/></a:stretch> means "fill the frame" — the frame is
+    // authored to match the image and stretching is a no-op. A bare <a:stretch/>
+    // with no fillRect means the frame is just a bounding box: fit the picture
+    // inside it, keeping its aspect. Decks rely on the distinction — every frame
+    // in one real deck whose aspect disagreed with its image was a bare stretch,
+    // and every fillRect frame matched its image to within 3%. Filling those
+    // regardless is what squashes pictures out of shape.
+    if (sawStretch && !sawFillRect) {
+        QImage probe;
+        probe.loadFromData(imgData);
+        if (!probe.isNull() && probe.height() > 0 && r.height() > 0) {
+            const double imgAspect = double(probe.width()) / probe.height();
+            const double boxAspect = r.width() / r.height();
+            if (imgAspect > boxAspect) {          // image wider → limited by width
+                const double h = r.width() / imgAspect;
+                r = QRectF(r.left(), r.top() + (r.height() - h) / 2.0, r.width(), h);
+            } else {                              // image taller → limited by height
+                const double w = r.height() * imgAspect;
+                r = QRectF(r.left() + (r.width() - w) / 2.0, r.top(), w, r.height());
+            }
+        }
+    }
+    item.rect      = r;
     item.rotation  = rot;
     // A picture that fills the whole slide is the slide's backdrop — lock it so
     // it behaves as a fixed background rather than a draggable object.
     if (item.rect.left() <= 24 && item.rect.top() <= 24 &&
         item.rect.width() >= 912 && item.rect.height() >= 513)
         item.locked = true;
+    out.push_back(item);
+}
+
+// Parse a chart part (ppt/charts/chartN.xml) into a Chart SlideItem's data.
+// Only the first series is taken: SlideItem carries one label/value list, so a
+// multi-series chart shows its first series rather than nothing at all.
+bool parseChartPart(const QByteArray& xmlBytes, SlideItem& item) {
+    QXmlStreamReader xml(xmlBytes);
+    bool haveKind = false, inFirstSer = false, seenSer = false;
+    bool inCat = false, inVal = false;
+    std::vector<QString> labels;
+    std::vector<double>  values;
+    QString title;
+    bool inTitleTx = false;
+
+    while (!xml.atEnd()) {
+        const auto tok = xml.readNext();
+        if (tok == QXmlStreamReader::StartElement) {
+            const QString ln = xml.name().toString();
+            if (!haveKind) {
+                if      (ln == "barChart")   { item.chartKind = ChartKind::Bar;  haveKind = true; }
+                else if (ln == "lineChart")  { item.chartKind = ChartKind::Line; haveKind = true; }
+                else if (ln == "pieChart" ||
+                         ln == "doughnutChart") { item.chartKind = ChartKind::Pie; haveKind = true; }
+                else if (ln == "areaChart")  { item.chartKind = ChartKind::Area; haveKind = true; }
+            }
+            if (ln == "ser") {
+                if (seenSer) break;              // first series only
+                seenSer = inFirstSer = true;
+            }
+            else if (ln == "title") inTitleTx = true;
+            else if (inFirstSer && ln == "cat") inCat = true;
+            else if (inFirstSer && ln == "val") inVal = true;
+            else if (ln == "v") {
+                const QString v = xml.readElementText();
+                if (inCat)      labels.push_back(v);
+                else if (inVal) values.push_back(v.toDouble());
+                else if (inTitleTx && title.isEmpty()) title = v;
+            }
+        } else if (tok == QXmlStreamReader::EndElement) {
+            const QString ln = xml.name().toString();
+            if (ln == "cat")   inCat = false;
+            else if (ln == "val")   inVal = false;
+            else if (ln == "title") inTitleTx = false;
+            else if (ln == "ser")   inFirstSer = false;
+        }
+    }
+    if (values.empty()) return false;
+    // A multi-level category cache repeats labels per level; keep one per value.
+    if (labels.size() > values.size()) labels.resize(values.size());
+    while (labels.size() < values.size()) labels.push_back(QString());
+    item.type        = SlideItemType::Chart;
+    item.chartTitle  = title;
+    item.chartLabels = labels;
+    item.chartValues = values;
+    return true;
+}
+
+// Parse a <p:graphicFrame> — the wrapper PowerPoint puts charts (and tables) in.
+// Skipping it, as this once did, silently drops the slide's main content.
+void parseGraphicFrame(QXmlStreamReader& xml, const Scale& sc,
+                       const QHash<QString, QByteArray>& partByRid,
+                       std::vector<SlideItem>& out) {
+    double ox = 0, oy = 0, ex = 0, ey = 0;
+    bool haveXfrm = false;
+    int  xfrmDepth = -1;                 // <a:ext> is only a size inside <p:xfrm>
+    QByteArray chartXml;
+
+    int depth = 1;
+    while (depth > 0 && !xml.atEnd()) {
+        const auto tok = xml.readNext();
+        if (tok == QXmlStreamReader::StartElement) {
+            const QString ln = xml.name().toString();
+            const auto attrs = xml.attributes();
+            ++depth;
+            if (ln == "xfrm") { xfrmDepth = depth; }
+            else if (ln == "off" && xfrmDepth > 0) { ox = av(attrs, "x").toDouble(); oy = av(attrs, "y").toDouble(); }
+            else if (ln == "ext" && xfrmDepth > 0) { ex = av(attrs, "cx").toDouble(); ey = av(attrs, "cy").toDouble(); haveXfrm = true; }
+            else if (ln == "chart") {
+                const QString rid = av(attrs, "id");
+                if (partByRid.contains(rid)) chartXml = partByRid.value(rid);
+            }
+        } else if (tok == QXmlStreamReader::EndElement) {
+            if (xfrmDepth == depth) xfrmDepth = -1;
+            --depth;
+        }
+    }
+    if (chartXml.isEmpty() || !haveXfrm) return;
+    SlideItem item;
+    if (!parseChartPart(chartXml, item)) return;
+    item.rect = QRectF(ox * sc.sx, oy * sc.sy,
+                       std::max(1.0, ex * sc.sx), std::max(1.0, ey * sc.sy));
     out.push_back(item);
 }
 
@@ -528,6 +674,7 @@ SlideData parseSlide(const QByteArray& xmlBytes, const Scale& sc,
         }
         else if (ln == "sp")  { parseSp(xml, sc, slide.items); }
         else if (ln == "pic") { parsePic(xml, sc, mediaByRid, slide.items); }
+        else if (ln == "graphicFrame") { parseGraphicFrame(xml, sc, mediaByRid, slide.items); }
     }
     return slide;
 }
@@ -549,14 +696,20 @@ QHash<QString, QByteArray> mediaForSlide(const ZipReader& zip, const QString& sl
             const QString id = av(a, "Id");
             QString target = av(a, "Target");
             if (id.isEmpty() || target.isEmpty()) continue;
-            // Normalise "../media/image1.png" relative to the slide directory.
-            QString resolved = target;
-            QString base = dir;                               // ppt/slides
-            while (resolved.startsWith("../")) {
-                resolved = resolved.mid(3);
-                base = base.left(base.lastIndexOf('/'));
+            // A target may be absolute ("/ppt/charts/chart1.xml" — which charts
+            // use) or relative to the slide directory ("../media/image1.png").
+            QString full;
+            if (target.startsWith('/')) {
+                full = target.mid(1);
+            } else {
+                QString resolved = target;
+                QString base = dir;                           // ppt/slides
+                while (resolved.startsWith("../")) {
+                    resolved = resolved.mid(3);
+                    base = base.left(base.lastIndexOf('/'));
+                }
+                full = base.isEmpty() ? resolved : base + "/" + resolved;
             }
-            const QString full = base.isEmpty() ? resolved : base + "/" + resolved;
             if (zip.has(full)) result.insert(id, zip.file(full));
         }
     }
