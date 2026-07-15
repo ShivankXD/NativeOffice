@@ -149,6 +149,11 @@ struct SlideItem {
     int           contrast   { 0 };     // image adjustment (-100..100)
     ItemAnimation animation { ItemAnimation::None };  // entrance effect in slide show
     ShapeKind     shapeKind { ShapeKind::Rectangle }; // for Shape items
+    // RoundedRect corner radius as a fraction of the shape's smaller side —
+    // PowerPoint's roundRect "adj" guide (adj/100000). Its default is 0.16667,
+    // but decks routinely ask for 0.02–0.07; ignoring it renders them far rounder
+    // than authored, which reads as "square boxes came out round".
+    qreal         cornerAdj { 0.16667 };
     bool          shadow    { false };  // soft drop shadow on this item
     qreal         opacity   { 1.0 };    // 0..1 object opacity
     QString       hyperlink;            // URL opened on click in slide show

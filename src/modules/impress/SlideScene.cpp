@@ -153,12 +153,16 @@ private:
 class SlideShapeItem : public QGraphicsPathItem {
 public:
     explicit SlideShapeItem(ShapeKind kind) : m_kind(kind) {}
-    void setRect(const QRectF& r) { m_rect = r; setPath(SlideScene::shapePath(m_kind, r)); }
+    void setRect(const QRectF& r) { m_rect = r; setPath(SlideScene::shapePath(m_kind, r, m_adj)); }
+    // Corner radius for RoundedRect, as a fraction of the smaller side.
+    void  setCornerAdj(qreal a) { m_adj = a; setRect(m_rect); }
+    qreal cornerAdj() const { return m_adj; }
     QRectF    rect() const { return m_rect; }
     ShapeKind kind() const { return m_kind; }
 private:
     ShapeKind m_kind;
     QRectF    m_rect;
+    qreal     m_adj { 0.16667 };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1334,7 +1338,7 @@ QGraphicsEllipseItem* SlideScene::addEllipse(const QRectF& rect) {
 }
 
 // ── Gallery shape geometry ──────────────────────────────────────────────────
-QPainterPath SlideScene::shapePath(ShapeKind kind, const QRectF& r) {
+QPainterPath SlideScene::shapePath(ShapeKind kind, const QRectF& r, qreal adj) {
     QPainterPath p;
     const qreal x = r.x(), y = r.y(), w = r.width(), h = r.height();
     const qreal cx = r.center().x(), cy = r.center().y();
@@ -1344,7 +1348,8 @@ QPainterPath SlideScene::shapePath(ShapeKind kind, const QRectF& r) {
         p.addRect(r);
         break;
     case ShapeKind::RoundedRect: {
-        const qreal rad = std::min(w, h) * 0.18;
+        // adj is the authored radius as a fraction of the smaller side.
+        const qreal rad = std::min(w, h) * qBound(0.0, adj, 0.5);
         p.addRoundedRect(r, rad, rad);
         break;
     }
@@ -1701,6 +1706,7 @@ void SlideScene::loadFromData(const SlideData& data) {
         case SlideItemType::Shape:
             if (auto* sh = addShape(si.rect, si.shapeKind)) {
                 if (auto* ssh = dynamic_cast<SlideShapeItem*>(sh)) {
+                    ssh->setCornerAdj(si.cornerAdj);   // before pen/brush: rebuilds the path
                     ssh->setPen(QPen(si.penColor, si.penWidth));
                     ssh->setBrush(si.shapeKind == ShapeKind::Line ? QBrush(Qt::NoBrush)
                                                                   : QBrush(si.fillColor));
@@ -1771,6 +1777,7 @@ void SlideScene::saveToData(SlideData& data) const {
         } else if (auto* sh = dynamic_cast<SlideShapeItem*>(it)) {
             si.type      = SlideItemType::Shape;
             si.shapeKind = sh->kind();
+            si.cornerAdj = sh->cornerAdj();
             si.rect      = sh->rect().translated(sh->pos());
             si.fillColor = sh->brush().color();
             si.penColor  = sh->pen().color();

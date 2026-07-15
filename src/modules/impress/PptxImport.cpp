@@ -325,6 +325,8 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
     QString prst;
     QColor shapeFill;
     QString anchor = "t";
+    double cornerAdj = 0.16667;          // roundRect default when no <a:gd adj>
+
 
     QVector<TextPara> paras;
     RunFmt  curFmt;                 // formatting of the run being read
@@ -355,6 +357,17 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
             }
             else if (ln == "xfrm") { const QString r = av(attrs, "rot"); if (!r.isEmpty()) rot = r.toDouble() / 60000.0; }
             else if (ln == "prstGeom") { prst = av(attrs, "prst"); }
+            // <a:avLst><a:gd name="adj" fmla="val 2128"/></a:avLst> — the shape's
+            // own corner radius, as adj/100000 of its smaller side.
+            else if (ln == "gd" && path.contains("avLst")) {
+                if (av(attrs, "name") == "adj") {
+                    const QString f = av(attrs, "fmla");        // "val 2128"
+                    const QString v = f.section(' ', -1);
+                    bool ok = false;
+                    const double n = v.toDouble(&ok);
+                    if (ok && n >= 0) cornerAdj = n / 100000.0;
+                }
+            }
             else if (ln == "bodyPr") { const QString a = av(attrs, "anchor"); if (!a.isEmpty()) anchor = a; }
             else if (ln == "p") { paras.push_back(TextPara{}); }
             else if (ln == "pPr" && !paras.isEmpty()) {
@@ -397,12 +410,11 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
             }
             else if (ln == "t") {
                 QString s = xml.readElementText(QXmlStreamReader::IncludeChildElements);
-                // DrawingML expresses line breaks as <a:br/>. A literal newline
-                // inside <a:t> is ordinary whitespace — turning it into a <br/>
-                // (as this once did) injects a blank line after every such run,
-                // which overflows the text out of its box and onto whatever sits
-                // below. Real decks contain these: 21 runs in one 18-slide deck.
-                s.replace('\n', ' ').replace('\r', ' ');
+                // A literal newline inside <a:t> IS a line break: PowerPoint and
+                // WPS both render one, and decks use it for the blank line
+                // between bullets. (Briefly treated as whitespace here, which
+                // collapsed that spacing away — the reference renderers settle it.)
+                s.replace(QChar(0x2028), '\n');    // normalise, then mark as a break
                 curText += s;
                 path.pop_back(); --depth;            // readElementText consumed </t>
             }
@@ -465,7 +477,12 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
                 if (r.fmt.italic)    s += "font-style:italic;";
                 if (r.fmt.underline) s += "text-decoration:underline;";
                 QString t = r.text.toHtmlEscaped();
-                t.replace(QChar(0x2028), "<br/>");     // explicit <a:br/> only
+                t.replace(QChar(0x2028), "\n");        // <a:br/> marker
+                // A trailing break would otherwise be swallowed by the closing
+                // </p>; keep it so the authored blank line survives.
+                const bool trailingBreak = t.endsWith('\n');
+                t.replace("\n", "<br/>");
+                if (trailingBreak) t += "&nbsp;";
                 html += QString("<span style=\"%1\">%2</span>").arg(s, t);
             }
             html += "</p>";
@@ -476,6 +493,7 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
         // A geometry-only shape.
         item.type      = SlideItemType::Shape;
         item.shapeKind = shapeFromPrst(prst);
+        item.cornerAdj = cornerAdj;
         item.fillColor = shapeFill.isValid() ? shapeFill : QColor("#B7CFF4");
         item.penColor  = item.fillColor;
         item.penWidth  = 0.0;

@@ -2634,6 +2634,7 @@ QJsonObject ImpressModule::deckToJson() const {
                 itemObj["html"]        = item.html;
                 itemObj["fontSize"]    = item.fontSize;
                 itemObj["vAlign"]      = item.vAlign;
+                itemObj["cornerAdj"]   = item.cornerAdj;
                 itemObj["placeholder"] = item.isPlaceholder;
             }
             if (item.type == SlideItemType::Image) {
@@ -2729,6 +2730,7 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
                 si.html          = itemObj["html"].toString();
                 si.fontSize      = itemObj["fontSize"].toDouble(14.0);
                 si.vAlign        = itemObj["vAlign"].toInt(0);
+                si.cornerAdj     = itemObj["cornerAdj"].toDouble(0.16667);
                 si.isPlaceholder = itemObj["placeholder"].toBool(false);
             }
             if (si.type == SlideItemType::Image) {

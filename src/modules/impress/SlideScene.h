@@ -79,7 +79,10 @@ public:
     void beginInsertShape(ShapeKind kind);
 
     // Build the QPainterPath for a gallery shape within `rect` (scene units).
-    static QPainterPath shapePath(ShapeKind kind, const QRectF& rect);
+    // adj: RoundedRect corner radius as a fraction of the smaller side
+    // (PowerPoint's roundRect adj guide; 0.16667 is its default).
+    static QPainterPath shapePath(ShapeKind kind, const QRectF& rect,
+                                  qreal adj = 0.16667);
 
     // Insert an image (PNG bytes) centered on the slide
     void insertImage(const QByteArray& pngData);
