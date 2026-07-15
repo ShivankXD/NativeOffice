@@ -1638,6 +1638,15 @@ void SlideScene::loadFromData(const SlideData& data) {
             if (ti) {
                 if (!si.html.isEmpty()) ti->setHtml(si.html);
                 ti->setTextWidth(si.rect.width() > 0 ? si.rect.width() : 800);
+                // Honour the box's vertical anchor: the text lays out to its own
+                // height, so centre/bottom means offsetting within si.rect.
+                if (si.vAlign != 0 && si.rect.height() > 0) {
+                    const qreal th = ti->boundingRect().height();
+                    const qreal slack = si.rect.height() - th;
+                    if (slack > 0)
+                        ti->setPos(si.rect.left(),
+                                   si.rect.top() + (si.vAlign == 1 ? slack / 2.0 : slack));
+                }
                 ti->setTransformOriginPoint(ti->boundingRect().center());
                 ti->setRotation(si.rotation);
                 ti->setDefaultTextColor(si.isPlaceholder ? QColor("#9CA3AF") : QColor(si.penColor));

@@ -151,6 +151,13 @@ ImpressModule::ImpressModule(QWidget* parent)
     // comments panel open lands next to it as <path>.comments.png.
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_IMPRESS_GRAB")) {
         const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_IMPRESS_GRAB");
+        // NATIVEOFFICE_HIDE_WINDOW parks the window off-screen so a capture run
+        // doesn't interrupt whatever the user is doing, while still using the real
+        // platform — the offscreen QPA plugin has no font database, which makes
+        // text metrics (and therefore any text-layout check) meaningless.
+        // grab() renders through Qt, so an off-screen window captures fine.
+        if (qEnvironmentVariableIsSet("NATIVEOFFICE_HIDE_WINDOW"))
+            QTimer::singleShot(120, this, [this] { if (window()) window()->move(-6000, -6000); });
         QTimer::singleShot(6000, this, [this, grabPath] {
             grab().save(grabPath, "PNG");
             m_commentsVisible = true;
@@ -2626,6 +2633,7 @@ QJsonObject ImpressModule::deckToJson() const {
                 itemObj["text"]        = item.text;
                 itemObj["html"]        = item.html;
                 itemObj["fontSize"]    = item.fontSize;
+                itemObj["vAlign"]      = item.vAlign;
                 itemObj["placeholder"] = item.isPlaceholder;
             }
             if (item.type == SlideItemType::Image) {
@@ -2720,6 +2728,7 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
                 si.text          = itemObj["text"].toString();
                 si.html          = itemObj["html"].toString();
                 si.fontSize      = itemObj["fontSize"].toDouble(14.0);
+                si.vAlign        = itemObj["vAlign"].toInt(0);
                 si.isPlaceholder = itemObj["placeholder"].toBool(false);
             }
             if (si.type == SlideItemType::Image) {

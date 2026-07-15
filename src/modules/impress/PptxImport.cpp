@@ -294,21 +294,41 @@ ShapeKind shapeFromPrst(const QString& prst) {
 // Scale factors mapping EMU → our 960×540 scene.
 struct Scale { double sx, sy; };
 
+// One text run's character formatting.
+struct RunFmt {
+    double  sizePt { 18.0 };
+    bool    bold   { false };
+    bool    italic { false };
+    bool    underline { false };
+    QColor  color;
+    QString face;
+};
+struct TextRun { QString text; RunFmt fmt; };
+struct TextPara {
+    QString          align { "left" };
+    double           lineSpacingPct { 0 };      // 0 = leave to the renderer
+    QVector<TextRun> runs;
+};
+
 // Parse one <p:sp> subtree. The reader is positioned on the <p:sp> start element.
 // Appends a SlideItem to `out` if the shape carries text or a known geometry.
+//
+// Text is read run-by-run and paragraph-by-paragraph. Collapsing a shape onto
+// the *first* run's formatting (as this once did) is wrong for any shape that
+// mixes sizes or weights — a name over a lighter subtitle, say — which is most
+// real decks.
 void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out) {
     SlideItem item;
     bool haveXfrm = false;
     double ox = 0, oy = 0, ex = 0, ey = 0, rot = 0;
     QString prst;
     QColor shapeFill;
-    QColor textColor;
-    QString text;
-    bool   sawPara = false;
-    double fontPt  = 18.0;
-    bool   bold    = false;
-    QString align  = "left";
-    bool   firstRun = true, firstPara = true;
+    QString anchor = "t";
+
+    QVector<TextPara> paras;
+    RunFmt  curFmt;                 // formatting of the run being read
+    QString curText;
+    bool    inRun = false;
 
     int depth = 1;                                  // we are inside <p:sp>
     QStringList path;                               // local-name stack below <p:sp>
@@ -325,65 +345,110 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
             else if (ln == "ext") { ex = av(attrs, "cx").toDouble(); ey = av(attrs, "cy").toDouble(); haveXfrm = true; }
             else if (ln == "xfrm") { const QString r = av(attrs, "rot"); if (!r.isEmpty()) rot = r.toDouble() / 60000.0; }
             else if (ln == "prstGeom") { prst = av(attrs, "prst"); }
-            else if (ln == "pPr" && firstPara) { const QString a = av(attrs, "algn");
-                if (a == "ctr") align = "center"; else if (a == "r") align = "right"; else align = "left"; }
-            else if (ln == "rPr" && firstRun) {
-                const QString sz = av(attrs, "sz"); if (!sz.isEmpty()) fontPt = sz.toDouble() / 100.0;
-                bold = (av(attrs, "b") == "1");
+            else if (ln == "bodyPr") { const QString a = av(attrs, "anchor"); if (!a.isEmpty()) anchor = a; }
+            else if (ln == "p") { paras.push_back(TextPara{}); }
+            else if (ln == "pPr" && !paras.isEmpty()) {
+                const QString a = av(attrs, "algn");
+                if (a == "ctr") paras.back().align = "center";
+                else if (a == "r") paras.back().align = "right";
+                else if (a == "just") paras.back().align = "justify";
             }
+            else if (ln == "spcPct" && path.contains("lnSpc") && !paras.isEmpty()) {
+                const double v = av(attrs, "val").toDouble();
+                if (v > 0) paras.back().lineSpacingPct = v / 1000.0;   // 90000 → 90%
+            }
+            else if (ln == "r") { inRun = true; curFmt = RunFmt{}; curText.clear(); }
+            else if (ln == "rPr" && inRun) {
+                const QString sz = av(attrs, "sz"); if (!sz.isEmpty()) curFmt.sizePt = sz.toDouble() / 100.0;
+                curFmt.bold      = (av(attrs, "b") == "1");
+                curFmt.italic    = (av(attrs, "i") == "1");
+                curFmt.underline = (av(attrs, "u") == "sng");
+            }
+            else if (ln == "latin" && inRun && path.contains("rPr")) {
+                const QString tf = av(attrs, "typeface");
+                if (!tf.isEmpty() && !tf.startsWith('+')) curFmt.face = tf;
+            }
+            else if (ln == "br" && inRun) { curText += '\n'; }
             else if (ln == "srgbClr") {
                 const QString val = av(attrs, "val");
                 if (!val.isEmpty()) {
                     const QColor c("#" + val);
-                    if (path.contains("rPr")) { if (!textColor.isValid()) textColor = c; }
+                    // Scope carefully: srgbClr shows up under rPr (text colour),
+                    // spPr (shape fill) and ln (outline). endParaRPr carries one
+                    // too and must not leak into a run.
+                    if (inRun && path.contains("rPr")) { if (!curFmt.color.isValid()) curFmt.color = c; }
                     else if (path.contains("spPr") && !path.contains("ln")) { if (!shapeFill.isValid()) shapeFill = c; }
                 }
             }
             else if (ln == "t") {
-                text += xml.readElementText(QXmlStreamReader::IncludeChildElements);
+                curText += xml.readElementText(QXmlStreamReader::IncludeChildElements);
                 path.pop_back(); --depth;            // readElementText consumed </t>
             }
         } else if (tok == QXmlStreamReader::EndElement) {
             const QString ln = xml.name().toString();
-            if (ln == "p" && path.contains("txBody")) { sawPara = true; }
-            if (ln == "pPr") firstPara = false;
-            if (ln == "rPr") firstRun = false;
-            if (ln == "p" && path.contains("txBody")) {
-                // mark a paragraph break for the next paragraph's text
-                if (!text.isEmpty()) text += "\n";
+            if (ln == "r") {
+                if (!curText.isEmpty() && !paras.isEmpty())
+                    paras.back().runs.push_back({ curText, curFmt });
+                inRun = false;
+                curText.clear();
             }
             if (!path.isEmpty()) path.pop_back();
             --depth;
         }
     }
-    Q_UNUSED(sawPara);
 
     const QRectF rect(ox * sc.sx, oy * sc.sy,
                       std::max(1.0, ex * sc.sx), std::max(1.0, ey * sc.sy));
     item.rect     = rect;
     item.rotation = rot;
+    item.vAlign   = (anchor == "ctr") ? 1 : (anchor == "b" ? 2 : 0);
 
-    QString trimmed = text;
-    while (trimmed.endsWith('\n')) trimmed.chop(1);
+    // Plain-text fallback (outline view) + emptiness test.
+    QString plain;
+    for (int i = 0; i < paras.size(); ++i) {
+        for (const TextRun& r : paras[i].runs) plain += r.text;
+        if (i + 1 < paras.size()) plain += '\n';
+    }
+    while (plain.endsWith('\n')) plain.chop(1);
 
-    if (!trimmed.trimmed().isEmpty()) {
+    if (!plain.trimmed().isEmpty()) {
         // A text-bearing shape becomes a text box.
-        item.type     = SlideItemType::TextBox;
-        item.text     = trimmed;
-        // fontPt is a real point size (the sz attribute is hundredths of a
-        // point). Convert to scene units: a point is 12700 EMU tall, and sc.sy
-        // maps slide EMU → the 540-unit scene. For a standard 16:9 deck this
-        // resolves to ~1.0× (so 18pt → 18 units); other slide sizes scale
-        // proportionally. Multiplying by sc.sy alone (≈0.00008) is the old bug
-        // that collapsed every run to the 6-unit floor.
-        item.fontSize = std::max(6.0, fontPt * sc.sy * 12700.0);
-        item.penColor = textColor.isValid() ? textColor : QColor("#1C1E26");
-        const QString colHex = item.penColor.name(QColor::HexRgb);
-        QString body = trimmed.toHtmlEscaped();
-        body.replace("\n", "<br>");
-        if (bold) body = "<b>" + body + "</b>";
-        item.html = QString("<p align=\"%1\" style=\"margin:0; font-size:%2pt; color:%3;\">%4</p>")
-                        .arg(align).arg(item.fontSize).arg(colHex, body);
+        item.type = SlideItemType::TextBox;
+        item.text = plain;
+
+        // sz is hundredths of a point. The scene is point-based (960 units across
+        // a 13.33in slide = 72 units/inch), so a point maps to a scene unit via
+        // sc.sy * 12700 (12700 EMU per point) — ~1.0 for a standard 16:9 deck,
+        // and proportional for any other slide size.
+        const double ptToUnit = sc.sy * 12700.0;
+
+        QString html;
+        bool first = true;
+        for (const TextPara& p : paras) {
+            QString pstyle = "margin:0;";
+            if (p.lineSpacingPct > 0)
+                pstyle += QString("line-height:%1%;").arg(p.lineSpacingPct, 0, 'f', 0);
+            html += QString("<p align=\"%1\" style=\"%2\">").arg(p.align, pstyle);
+            if (p.runs.isEmpty()) html += "<br/>";
+            for (const TextRun& r : p.runs) {
+                const double units = std::max(1.0, r.fmt.sizePt * ptToUnit);
+                if (first) { item.fontSize = units; item.penColor =
+                    r.fmt.color.isValid() ? r.fmt.color : QColor("#1C1E26"); first = false; }
+                // px, not pt: Qt converts CSS pt to pixels at ~96dpi, which would
+                // inflate every run by 96/72 and overflow its box.
+                QString s = QString("font-size:%1px;").arg(units, 0, 'f', 1);
+                if (!r.fmt.face.isEmpty()) s += QString("font-family:'%1';").arg(r.fmt.face);
+                if (r.fmt.color.isValid())  s += QString("color:%1;").arg(r.fmt.color.name(QColor::HexRgb));
+                if (r.fmt.bold)      s += "font-weight:bold;";
+                if (r.fmt.italic)    s += "font-style:italic;";
+                if (r.fmt.underline) s += "text-decoration:underline;";
+                QString t = r.text.toHtmlEscaped();
+                t.replace("\n", "<br/>");
+                html += QString("<span style=\"%1\">%2</span>").arg(s, t);
+            }
+            html += "</p>";
+        }
+        item.html = html;
         out.push_back(item);
     } else if (!prst.isEmpty() && haveXfrm) {
         // A geometry-only shape.

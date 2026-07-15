@@ -139,6 +139,10 @@ struct SlideItem {
     QColor        penColor { "#1C1E26" };
     qreal         penWidth { 1.5 };
     qreal         fontSize { 14.0 };   // pt, for TextBox items
+    // Vertical anchoring of text inside `rect` (PowerPoint's bodyPr anchor):
+    // 0 = top, 1 = middle, 2 = bottom. Imported decks lean on this heavily —
+    // without it, centred text sits at the top of its box.
+    int           vAlign   { 0 };
     bool          isPlaceholder { false };
     QByteArray    imageData;            // PNG bytes, for Image items
     int           brightness { 0 };     // image adjustment (-100..100)
