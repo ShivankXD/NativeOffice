@@ -303,11 +303,27 @@ public:
     void setData(const std::vector<QString>& l, const std::vector<double>& v) {
         m_labels = l; m_values = v; update();
     }
+    // Extra series from an imported chart (empty = single-series, native).
+    void setSeries(const std::vector<std::vector<double>>& s,
+                   const std::vector<QString>& names,
+                   const std::vector<QColor>& colors,
+                   bool showValues, bool showLegend) {
+        m_series = s; m_seriesNames = names; m_seriesColors = colors;
+        m_showValues = showValues; m_showLegend = showLegend;
+        update();
+    }
+    const std::vector<std::vector<double>>& series() const { return m_series; }
+    const std::vector<QString>& seriesNames() const { return m_seriesNames; }
+    const std::vector<QColor>&  seriesColors() const { return m_seriesColors; }
+    bool showValues() const { return m_showValues; }
+    bool showLegend() const { return m_showLegend; }
     void setRectKeep(const QRectF& r) { setRect(r); update(); }
 
 protected:
     void paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*) override {
-        SlideScene::paintChart(*p, rect(), m_kind, m_labels, m_values, m_title);
+        SlideScene::paintChart(*p, rect(), m_kind, m_labels, m_values, m_title,
+                               m_series, m_seriesNames, m_seriesColors,
+                               m_showValues, m_showLegend);
         if (isSelected()) {
             QPen sel(QColor("#E8372A")); sel.setWidthF(1.5);
             p->setPen(sel); p->setBrush(Qt::NoBrush); p->drawRect(rect());
@@ -371,6 +387,11 @@ private:
     QString   m_title { "Chart" };
     std::vector<QString> m_labels;
     std::vector<double>  m_values;
+    std::vector<std::vector<double>> m_series;
+    std::vector<QString> m_seriesNames;
+    std::vector<QColor>  m_seriesColors;
+    bool                 m_showValues { false };
+    bool                 m_showLegend { false };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1481,7 +1502,11 @@ QGraphicsItem* SlideScene::addTable(const QRectF& rect, int rows, int cols,
 // ── Chart rendering (shared by the on-slide item and PPTX rasterisation) ─────
 void SlideScene::paintChart(QPainter& p, const QRectF& r, ChartKind kind,
                             const std::vector<QString>& labels,
-                            const std::vector<double>& values, const QString& title) {
+                            const std::vector<double>& values, const QString& title,
+                            const std::vector<std::vector<double>>& series,
+                            const std::vector<QString>& seriesNames,
+                            const std::vector<QColor>& seriesColors,
+                            bool showValues, bool showLegend) {
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
     p.setRenderHint(QPainter::TextAntialiasing, true);
@@ -1533,8 +1558,12 @@ void SlideScene::paintChart(QPainter& p, const QRectF& r, ChartKind kind,
     }
 
     const qreal axisB = 18.0;
-    QRectF plot = area.adjusted(4, 0, 0, -axisB);
-    double maxV = 0; for (int i = 0; i < n; ++i) maxV = std::max(maxV, values[i]);
+    const qreal legendH = (showLegend && !seriesNames.empty()) ? 16.0 : 0.0;
+    QRectF plot = area.adjusted(4, 0, 0, -(axisB + legendH));
+    // The axis must span every series, not just the first.
+    double maxV = 0;
+    if (series.empty()) { for (int i = 0; i < n; ++i) maxV = std::max(maxV, values[i]); }
+    else for (const auto& sv : series) for (double v : sv) maxV = std::max(maxV, v);
     if (maxV <= 0) maxV = 1;
 
     p.setPen(QPen(QColor("#C6CAD3"), 1));
@@ -1542,16 +1571,62 @@ void SlideScene::paintChart(QPainter& p, const QRectF& r, ChartKind kind,
     p.setFont(QFont("Segoe UI", 8));
 
     if (kind == ChartKind::Bar) {
+        // Grouped bars: one cluster per category, one bar per series. A single
+        // series keeps the old per-category palette so native charts look the
+        // same; imported charts bring their own series colours.
+        const int ns = std::max<int>(1, int(series.size()));
+        const bool multi = ns > 1 || !seriesColors.empty();
         const qreal slot = plot.width() / n;
-        const qreal bw = std::max(4.0, slot * 0.6);
+        const qreal groupW = slot * 0.72;
+        const qreal bw = std::max(2.0, groupW / ns);
+        // Data labels need headroom above the tallest bar.
+        const qreal top = showValues ? plot.top() + 12 : plot.top();
+        const qreal ph = plot.bottom() - top;
         for (int i = 0; i < n; ++i) {
-            const qreal h = plot.height() * (std::max(0.0, values[i]) / maxV);
-            const QRectF bar(plot.left() + i * slot + (slot - bw) / 2, plot.bottom() - h, bw, h);
-            p.setBrush(pal[i % 8]); p.setPen(Qt::NoPen);
-            p.drawRect(bar);
+            for (int s = 0; s < ns; ++s) {
+                const std::vector<double>& sv = series.empty() ? values : series[s];
+                if (i >= int(sv.size())) continue;
+                const qreal h = ph * (std::max(0.0, sv[i]) / maxV);
+                const QRectF bar(plot.left() + i * slot + (slot - groupW) / 2 + s * bw,
+                                 plot.bottom() - h, bw, h);
+                QColor c = (s < int(seriesColors.size()) && seriesColors[s].isValid())
+                               ? seriesColors[s]
+                               : (multi ? pal[s % 8] : pal[i % 8]);
+                p.setBrush(c); p.setPen(Qt::NoPen);
+                p.drawRect(bar);
+                if (showValues) {
+                    p.setPen(QColor("#1E2A32"));
+                    p.setFont(QFont("Segoe UI", 7));
+                    p.drawText(QRectF(bar.left() - 6, bar.top() - 12, bar.width() + 12, 11),
+                               Qt::AlignHCenter | Qt::AlignBottom,
+                               QString::number(sv[i], 'f', 1));
+                    p.setFont(QFont("Segoe UI", 8));
+                }
+            }
             p.setPen(QColor("#5A6071"));
             p.drawText(QRectF(plot.left() + i * slot, plot.bottom() + 2, slot, axisB - 2),
                        Qt::AlignHCenter | Qt::AlignTop, labels[i]);
+        }
+        // Legend strip under the category labels.
+        if (showLegend && !seriesNames.empty()) {
+            p.setFont(QFont("Segoe UI", 8));
+            const QFontMetrics fm(p.font());
+            qreal total = 0;
+            for (int s = 0; s < int(seriesNames.size()); ++s)
+                total += 12 + 4 + fm.horizontalAdvance(seriesNames[s]) + 14;
+            qreal lx = area.center().x() - total / 2;
+            const qreal ly = plot.bottom() + axisB + 1;
+            for (int s = 0; s < int(seriesNames.size()); ++s) {
+                QColor c = (s < int(seriesColors.size()) && seriesColors[s].isValid())
+                               ? seriesColors[s] : pal[s % 8];
+                p.setBrush(c); p.setPen(Qt::NoPen);
+                p.drawRect(QRectF(lx, ly + 2, 10, 10));
+                p.setPen(QColor("#1C1E26"));
+                const qreal tw = fm.horizontalAdvance(seriesNames[s]);
+                p.drawText(QRectF(lx + 14, ly, tw + 4, 14),
+                           Qt::AlignVCenter | Qt::AlignLeft, seriesNames[s]);
+                lx += 12 + 4 + tw + 14;
+            }
         }
     } else {   // Line or Area
         QPolygonF pts;
@@ -1698,6 +1773,10 @@ void SlideScene::loadFromData(const SlideData& data) {
         case SlideItemType::Chart:
             if (auto* ch = addChart(si.rect, si.chartKind, si.chartTitle,
                                     si.chartLabels, si.chartValues)) {
+                if (auto* cch = dynamic_cast<SlideChartItem*>(ch))
+                    cch->setSeries(si.chartSeries, si.chartSeriesNames,
+                                   si.chartSeriesColors, si.chartShowValues,
+                                   si.chartShowLegend);
                 ch->setTransformOriginPoint(ch->boundingRect().center());
                 ch->setRotation(si.rotation);
                 created = ch;
@@ -1774,6 +1853,11 @@ void SlideScene::saveToData(SlideData& data) const {
             si.chartTitle  = ch->title();
             si.chartLabels = ch->labels();
             si.chartValues = ch->values();
+            si.chartSeries       = ch->series();
+            si.chartSeriesNames  = ch->seriesNames();
+            si.chartSeriesColors = ch->seriesColors();
+            si.chartShowValues   = ch->showValues();
+            si.chartShowLegend   = ch->showLegend();
         } else if (auto* sh = dynamic_cast<SlideShapeItem*>(it)) {
             si.type      = SlideItemType::Shape;
             si.shapeKind = sh->kind();

@@ -98,9 +98,17 @@ public:
 
     // Render a chart with QPainter — shared by the on-slide item and by PPTX
     // export (which rasterises it to an embedded image).
+    // series/seriesNames/seriesColors are optional: empty means "single series",
+    // in which case `values` is used and the per-category palette applies (what
+    // natively-inserted charts want). Imported charts pass every series with the
+    // deck's own colours, and ask for data labels and a legend.
     static void paintChart(QPainter& p, const QRectF& rect, ChartKind kind,
                            const std::vector<QString>& labels,
-                           const std::vector<double>& values, const QString& title);
+                           const std::vector<double>& values, const QString& title,
+                           const std::vector<std::vector<double>>& series = {},
+                           const std::vector<QString>& seriesNames = {},
+                           const std::vector<QColor>&  seriesColors = {},
+                           bool showValues = false, bool showLegend = false);
 
     // Insert a ready-made text box (WordArt / Symbol / Slide Number / Date …),
     // centred horizontally near the top, then select it for editing.

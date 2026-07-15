@@ -545,28 +545,12 @@ void parsePic(QXmlStreamReader& xml, const Scale& sc,
     QRectF r(ox * sc.sx, oy * sc.sy,
              std::max(1.0, ex * sc.sx), std::max(1.0, ey * sc.sy));
 
-    // <a:stretch><a:fillRect/></a:stretch> means "fill the frame" — the frame is
-    // authored to match the image and stretching is a no-op. A bare <a:stretch/>
-    // with no fillRect means the frame is just a bounding box: fit the picture
-    // inside it, keeping its aspect. Decks rely on the distinction — every frame
-    // in one real deck whose aspect disagreed with its image was a bare stretch,
-    // and every fillRect frame matched its image to within 3%. Filling those
-    // regardless is what squashes pictures out of shape.
-    if (sawStretch && !sawFillRect) {
-        QImage probe;
-        probe.loadFromData(imgData);
-        if (!probe.isNull() && probe.height() > 0 && r.height() > 0) {
-            const double imgAspect = double(probe.width()) / probe.height();
-            const double boxAspect = r.width() / r.height();
-            if (imgAspect > boxAspect) {          // image wider → limited by width
-                const double h = r.width() / imgAspect;
-                r = QRectF(r.left(), r.top() + (r.height() - h) / 2.0, r.width(), h);
-            } else {                              // image taller → limited by height
-                const double w = r.height() * imgAspect;
-                r = QRectF(r.left() + (r.width() - w) / 2.0, r.top(), w, r.height());
-            }
-        }
-    }
+    // A picture always fills its frame, whether <a:stretch/> carries a fillRect
+    // or not: PowerPoint's default fillRect is the shape's bounds. (An earlier
+    // build fitted bare-stretch pictures to preserve their aspect, which only
+    // shrank them inside their frames. WPS renders this deck's annotated_xray at
+    // aspect 2.167 against a frame of 2.170 — it stretches, and so do we.)
+    Q_UNUSED(sawStretch); Q_UNUSED(sawFillRect);
     item.rect      = r;
     item.rotation  = rot;
     // A picture that fills the whole slide is the slide's backdrop — lock it so
@@ -577,21 +561,34 @@ void parsePic(QXmlStreamReader& xml, const Scale& sc,
     out.push_back(item);
 }
 
-// Parse a chart part (ppt/charts/chartN.xml) into a Chart SlideItem's data.
-// Only the first series is taken: SlideItem carries one label/value list, so a
-// multi-series chart shows its first series rather than nothing at all.
+// Parse a chart part (ppt/charts/chartN.xml) into a Chart SlideItem's data:
+// every series with its authored name, fill colour and values, plus the shared
+// category labels, whether data labels are shown, and whether there's a legend.
 bool parseChartPart(const QByteArray& xmlBytes, SlideItem& item) {
     QXmlStreamReader xml(xmlBytes);
-    bool haveKind = false, inFirstSer = false, seenSer = false;
-    bool inCat = false, inVal = false;
-    std::vector<QString> labels;
-    std::vector<double>  values;
+    bool haveKind = false;
+    bool inSer = false, inCat = false, inVal = false, inTx = false;
+    bool inTitle = false, inDLbls = false;
+    int  serDepth = -1, depth = 0;
+
+    std::vector<QString> labels;             // categories (from the first series)
     QString title;
-    bool inTitleTx = false;
+    QString serName;
+    QColor  serColor;
+    std::vector<double> serValues;
+
+    auto flushSeries = [&] {
+        if (serValues.empty()) return;
+        item.chartSeriesNames.push_back(serName);
+        item.chartSeries.push_back(serValues);
+        item.chartSeriesColors.push_back(serColor.isValid() ? serColor : QColor());
+        serName.clear(); serColor = QColor(); serValues.clear();
+    };
 
     while (!xml.atEnd()) {
         const auto tok = xml.readNext();
         if (tok == QXmlStreamReader::StartElement) {
+            ++depth;
             const QString ln = xml.name().toString();
             if (!haveKind) {
                 if      (ln == "barChart")   { item.chartKind = ChartKind::Bar;  haveKind = true; }
@@ -600,35 +597,55 @@ bool parseChartPart(const QByteArray& xmlBytes, SlideItem& item) {
                          ln == "doughnutChart") { item.chartKind = ChartKind::Pie; haveKind = true; }
                 else if (ln == "areaChart")  { item.chartKind = ChartKind::Area; haveKind = true; }
             }
-            if (ln == "ser") {
-                if (seenSer) break;              // first series only
-                seenSer = inFirstSer = true;
+            if (ln == "ser")            { inSer = true; serDepth = depth; }
+            else if (ln == "legend")    { item.chartShowLegend = true; }
+            else if (ln == "title")     { inTitle = true; }
+            else if (ln == "dLbls")     { inDLbls = true; }
+            else if (ln == "showVal") {
+                // Only the series-level dLbls decides data labels for us.
+                if (inSer && inDLbls && av(xml.attributes(), "val") == "1")
+                    item.chartShowValues = true;
             }
-            else if (ln == "title") inTitleTx = true;
-            else if (inFirstSer && ln == "cat") inCat = true;
-            else if (inFirstSer && ln == "val") inVal = true;
+            else if (inSer && ln == "tx")  { inTx = true; }
+            else if (inSer && ln == "cat") { inCat = true; }
+            else if (inSer && ln == "val") { inVal = true; }
+            else if (inSer && ln == "srgbClr" && !inDLbls && !serColor.isValid()) {
+                // The series fill lives in <c:spPr>; dLbls text colour must not win.
+                const QString v = av(xml.attributes(), "val");
+                if (!v.isEmpty()) serColor = QColor("#" + v);
+            }
             else if (ln == "v") {
                 const QString v = xml.readElementText();
-                if (inCat)      labels.push_back(v);
-                else if (inVal) values.push_back(v.toDouble());
-                else if (inTitleTx && title.isEmpty()) title = v;
+                --depth;                                  // readElementText ate </c:v>
+                if (inTx)            serName = v;
+                else if (inCat)      { if (labels.size() < 512) labels.push_back(v); }
+                else if (inVal)      serValues.push_back(v.toDouble());
+                else if (inTitle && title.isEmpty()) title = v;
             }
         } else if (tok == QXmlStreamReader::EndElement) {
             const QString ln = xml.name().toString();
-            if (ln == "cat")   inCat = false;
+            if (ln == "ser" && depth == serDepth) { flushSeries(); inSer = false; serDepth = -1; }
+            else if (ln == "cat")   inCat = false;
             else if (ln == "val")   inVal = false;
-            else if (ln == "title") inTitleTx = false;
-            else if (ln == "ser")   inFirstSer = false;
+            else if (ln == "tx")    inTx = false;
+            else if (ln == "title") inTitle = false;
+            else if (ln == "dLbls") inDLbls = false;
+            --depth;
         }
     }
-    if (values.empty()) return false;
-    // A multi-level category cache repeats labels per level; keep one per value.
-    if (labels.size() > values.size()) labels.resize(values.size());
-    while (labels.size() < values.size()) labels.push_back(QString());
+    flushSeries();
+    if (item.chartSeries.empty()) return false;
+
+    // Categories come from the first series' cache; later series repeat them, and
+    // a multi-level cache repeats them per level. Keep one label per data point.
+    const size_t n = item.chartSeries.front().size();
+    if (labels.size() > n) labels.resize(n);
+    while (labels.size() < n) labels.push_back(QString());
+
     item.type        = SlideItemType::Chart;
     item.chartTitle  = title;
     item.chartLabels = labels;
-    item.chartValues = values;
+    item.chartValues = item.chartSeries.front();   // series 0 mirror
     return true;
 }
 

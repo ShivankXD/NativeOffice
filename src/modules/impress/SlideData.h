@@ -168,7 +168,16 @@ struct SlideItem {
     ChartKind            chartKind { ChartKind::Bar };
     QString              chartTitle;
     std::vector<QString> chartLabels;
-    std::vector<double>  chartValues;
+    std::vector<double>  chartValues;    // series 0 (mirrors chartSeries[0])
+
+    // Extra series, so an imported comparison chart isn't reduced to one bar
+    // set. chartSeries[0] == chartValues when populated; empty means "single
+    // series", which is what natively-inserted charts use.
+    std::vector<QString>             chartSeriesNames;
+    std::vector<std::vector<double>> chartSeries;
+    std::vector<QColor>              chartSeriesColors;   // authored series fills
+    bool                             chartShowValues { false };  // data labels
+    bool                             chartShowLegend { false };
 };
 
 // ── Review comment attached to a slide ───────────────────────────────────────
