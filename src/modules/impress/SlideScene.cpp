@@ -92,26 +92,46 @@ public:
         m_brightness = brightness;
         m_contrast   = contrast;
         m_display = adjustedSource();
+        m_scaled = QPixmap();                   // source changed → drop the cache
         const QSize sz = pixmap().size().isEmpty() ? m_original.size() : pixmap().size();
         // The base pixmap only defines the item's on-slide geometry; the full-
         // resolution source is what actually gets painted (see paint()).
         setPixmap(m_display.scaled(sz, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
     }
 
-    // Paint the full-resolution source into the item's rectangle with smooth
-    // scaling, so the image stays crisp at any zoom / in full-screen slide show
-    // (the inherited QGraphicsPixmapItem would paint only the downscaled base
-    // pixmap, which looks blurry when the view scales it back up).
+    // Paint the full-resolution source into the item's rectangle, so the image
+    // stays crisp at any zoom / in full-screen slide show (the inherited
+    // QGraphicsPixmapItem would paint only the downscaled base pixmap, which
+    // looks blurry when the view scales it back up).
     void paint(QPainter* p, const QStyleOptionGraphicsItem* opt, QWidget* w) override {
         const QPixmap& src = m_display.isNull() ? m_original : m_display;
         if (src.isNull()) { QGraphicsPixmapItem::paint(p, opt, w); return; }
+        const QRectF target = QGraphicsPixmapItem::boundingRect();
         p->setRenderHint(QPainter::SmoothPixmapTransform, true);
-        p->drawPixmap(QGraphicsPixmapItem::boundingRect(), src, QRectF(src.rect()));
+
+        // How large the image actually lands, in device pixels.
+        const QSize dev = p->transform().mapRect(target).size().toSize();
+        // drawPixmap filters bilinearly: it samples 2x2 texels regardless of how
+        // far it is shrinking, so anything past ~2x downscale drops detail
+        // between samples. On a screenshot pasted into a small frame that eats
+        // the text — a deck's 846x778 X-ray in a 367x169 frame is a 4.6x vertical
+        // squeeze, and its caption came out shredded. QPixmap::scaled averages
+        // over the whole footprint, so downscale through it and cache the result
+        // (keyed on the device size, so a zoom just rebuilds it once).
+        if (!dev.isEmpty() &&
+            (src.width() > dev.width() * 1.2 || src.height() > dev.height() * 1.2)) {
+            if (m_scaled.size() != dev)
+                m_scaled = src.scaled(dev, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            p->drawPixmap(target, m_scaled, QRectF(m_scaled.rect()));
+        } else {
+            p->drawPixmap(target, src, QRectF(src.rect()));
+        }
     }
 
 private:
     QPixmap m_original;
     QPixmap m_display;            // full-res, brightness/contrast-adjusted source
+    QPixmap m_scaled;             // cache: m_display area-averaged to device size
     int     m_brightness { 0 };
     int     m_contrast   { 0 };
 };
