@@ -326,6 +326,14 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
     QColor shapeFill;
     QString anchor = "t";
     double cornerAdj = 0.16667;          // roundRect default when no <a:gd adj>
+    // <a:bodyPr><a:normAutofit fontScale="92500" lnSpcReduction="10000"/> —
+    // PowerPoint's shrink-text-on-overflow, with the computed scale baked in at
+    // save time. Bare <a:normAutofit/> means the text fit at 100%; only the
+    // baked attributes matter. Ignoring them overflowed every dense slide of a
+    // real 43-slide deck (42 of its bodies carry normAutofit, 18 with scales
+    // down to 85%).
+    double autofitScale = 1.0;           // multiplies every run's font size
+    double autofitLnRed = 0.0;           // fraction shaved off line spacing
 
 
     QVector<TextPara> paras;
@@ -369,6 +377,13 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
                 }
             }
             else if (ln == "bodyPr") { const QString a = av(attrs, "anchor"); if (!a.isEmpty()) anchor = a; }
+            else if (ln == "normAutofit" && path.contains("bodyPr")) {
+                bool ok = false;
+                const double fs = av(attrs, "fontScale").toDouble(&ok);
+                if (ok && fs > 0 && fs <= 100000) autofitScale = fs / 100000.0;
+                const double lr = av(attrs, "lnSpcReduction").toDouble(&ok);
+                if (ok && lr > 0 && lr < 100000) autofitLnRed = lr / 100000.0;
+            }
             else if (ln == "p") { paras.push_back(TextPara{}); }
             else if (ln == "pPr" && !paras.isEmpty()) {
                 const QString a = av(attrs, "algn");
@@ -460,12 +475,16 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
         bool first = true;
         for (const TextPara& p : paras) {
             QString pstyle = "margin:0;";
-            if (p.lineSpacingPct > 0)
-                pstyle += QString("line-height:%1%;").arg(p.lineSpacingPct, 0, 'f', 0);
+            // lnSpcReduction applies on top of the paragraph's own spacing (or
+            // the 100% default), same percent-of-font-size model as spcPct.
+            double lnPct = p.lineSpacingPct;
+            if (autofitLnRed > 0) lnPct = (lnPct > 0 ? lnPct : 100.0) * (1.0 - autofitLnRed);
+            if (lnPct > 0)
+                pstyle += QString("line-height:%1%;").arg(lnPct, 0, 'f', 0);
             html += QString("<p align=\"%1\" style=\"%2\">").arg(p.align, pstyle);
             if (p.runs.isEmpty()) html += "<br/>";
             for (const TextRun& r : p.runs) {
-                const double units = std::max(1.0, r.fmt.sizePt * ptToUnit);
+                const double units = std::max(1.0, r.fmt.sizePt * autofitScale * ptToUnit);
                 if (first) { item.fontSize = units; item.penColor =
                     r.fmt.color.isValid() ? r.fmt.color : QColor("#1C1E26"); first = false; }
                 // px, not pt: Qt converts CSS pt to pixels at ~96dpi, which would
