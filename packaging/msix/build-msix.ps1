@@ -3,18 +3,19 @@
 #   Dev/sideload build (self-signed, installable locally after trusting the cert):
 #       powershell -ExecutionPolicy Bypass -File build-msix.ps1
 #
-#   Store build (real identity from Partner Center; Store signs it, so no cert):
-#       powershell -ExecutionPolicy Bypass -File build-msix.ps1 -ForStore `
-#           -IdentityName "12345ShivankXD.NativeOffice" `
-#           -Publisher "CN=A1B2C3D4-...-GUID-FROM-PARTNER-CENTER" `
-#           -PublisherDisplay "ShivankXD"
+#   Store build (identity defaults below are the real Partner Center values;
+#   the Store signs it, so no cert):
+#       powershell -ExecutionPolicy Bypass -File build-msix.ps1 -ForStore
 #
 # The app version is read from src/app/main.cpp (setApplicationVersion) and
 # becomes <version>.0 -- MSIX needs four parts and the Store requires .0 last.
 param(
-    [string]$IdentityName     = "ShivankXD.NativeOffice",
-    [string]$Publisher        = "CN=NativeOffice Dev",
-    [string]$PublisherDisplay = "ShivankXD",
+    # Real identity from Partner Center (Product management -> Product identity).
+    # Dev builds reuse it too: the self-signed sideload cert is created with the
+    # same CN, so the manifest always matches the signature.
+    [string]$IdentityName     = "ShivankTechTools.NativeOffice",
+    [string]$Publisher        = "CN=9504A08B-6A1B-4A2D-8006-97FADF4DD1E8",
+    [string]$PublisherDisplay = "Shivank Tech Tools",
     [switch]$ForStore,
     [string]$SdkBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x64"
 )
