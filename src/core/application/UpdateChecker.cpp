@@ -16,7 +16,26 @@
 #include <QStandardPaths>
 #include <QUrl>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <appmodel.h>
+#endif
+
 namespace NativeOffice {
+
+// True when the process runs from an MSIX package (Microsoft Store install).
+// Store builds must not self-update: the package directory is read-only, and
+// running the downloaded Inno installer would plant a second, unmanaged copy
+// of the app beside the Store one. The Store delivers updates itself, so the
+// same binary serves both channels — packaged installs just report UpToDate.
+static bool runningPackaged() {
+#ifdef Q_OS_WIN
+    UINT32 len = 0;
+    return GetCurrentPackageFullName(&len, nullptr) != APPMODEL_ERROR_NO_PACKAGE;
+#else
+    return false;
+#endif
+}
 
 // The manifest key for this platform's installer.
 #if defined(Q_OS_WIN)
@@ -69,6 +88,10 @@ QString UpdateChecker::bannerMessage() const {
 void UpdateChecker::checkForUpdates() {
     if (m_checked) return;             // once per process only
     m_checked = true;
+    if (runningPackaged()) {           // Store install: updates are the Store's job
+        setState(State::UpToDate);
+        return;
+    }
     setState(State::Scanning);
 
     QNetworkRequest req(QUrl(AuthManager::instance().baseUrl()
