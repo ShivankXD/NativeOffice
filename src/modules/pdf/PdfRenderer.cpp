@@ -20,6 +20,7 @@
 #include <QFileInfo>
 
 #include <algorithm>
+#include <cmath>
 
 namespace NativeOffice::Pdf {
 
@@ -200,9 +201,63 @@ std::vector<Renderer::CharBox> Renderer::pageChars(int pageIndex) const {
         CharBox cb;
         cb.ch  = QChar(ushort(FPDFText_GetUnicode(tp, i)));
         cb.box = QRectF(l, pageH - t, r - l, t - b);    // flip to top-left origin
+
+        // GetFontSize returns the unscaled Tf operand; text that is shrunk via
+        // the text matrix (common for tightly-set headings/labels) reports a
+        // huge nominal size. Multiply by the matrix's vertical scale to get the
+        // size actually seen on the page — without this a 13pt label set at
+        // Tf 77pt with a 0.17 matrix scaled a résumé to 20 Word pages.
+        cb.fontSize = FPDFText_GetFontSize(tp, i);      // points (nominal)
+        FS_MATRIX cm;
+        if (FPDFText_GetMatrix(tp, i, &cm)) {
+            const double scaleY = std::sqrt(double(cm.b) * cm.b + double(cm.d) * cm.d);
+            if (scaleY > 0) cb.fontSize *= scaleY;
+        }
+
+        unsigned int R = 0, G = 0, B = 0, A = 0;
+        if (FPDFText_GetFillColor(tp, i, &R, &G, &B, &A) && A > 0)
+            cb.color = QColor(int(R), int(G), int(B));
+
+        // Weight/slant: the descriptor flags are authoritative when present
+        // (ForceBold bit 19, Italic bit 7), but many bold/italic fonts don't
+        // set them — fall back to the font's own name.
+        int flags = 0;
+        char nameBuf[128] = {0};
+        const unsigned long nlen =
+            FPDFText_GetFontInfo(tp, i, nameBuf, sizeof(nameBuf), &flags);
+        const QString fontName =
+            QString::fromUtf8(nameBuf, nlen > 0 ? int(nlen) - 1 : 0);
+        cb.italic = (flags & (1 << 6)) != 0
+                 || fontName.contains("Italic", Qt::CaseInsensitive)
+                 || fontName.contains("Oblique", Qt::CaseInsensitive);
+        cb.bold = (flags & (1 << 18)) != 0
+               || fontName.contains("Bold", Qt::CaseInsensitive)
+               || fontName.contains("Black", Qt::CaseInsensitive)
+               || fontName.contains("Heavy", Qt::CaseInsensitive)
+               || fontName.contains("Semibold", Qt::CaseInsensitive);
+
         out.push_back(cb);
     }
     return out;
+}
+
+// Shared conversion of a PDFium bitmap into a Qt image (deep copy: the caller
+// destroys the FPDF_BITMAP right after).
+static QImage bitmapToQImage(void* bmpv) {
+    FPDF_BITMAP bmp = static_cast<FPDF_BITMAP>(bmpv);
+    const int w = FPDFBitmap_GetWidth(bmp);
+    const int h = FPDFBitmap_GetHeight(bmp);
+    const int stride = FPDFBitmap_GetStride(bmp);
+    const int format = FPDFBitmap_GetFormat(bmp);
+    const auto* buf = static_cast<const uchar*>(FPDFBitmap_GetBuffer(bmp));
+    if (w <= 0 || h <= 0 || !buf) return {};
+    QImage::Format qf = (format == FPDFBitmap_BGRA) ? QImage::Format_ARGB32
+                      : (format == FPDFBitmap_BGRx) ? QImage::Format_RGB32
+                                                    : QImage::Format_RGB888;
+    // BGR(x/a) memory maps to Qt's ARGB32/RGB32 on little-endian; BGR
+    // (3-channel) needs an explicit swap.
+    QImage img(buf, w, h, stride, qf);
+    return format == FPDFBitmap_BGR ? img.rgbSwapped().copy() : img.copy();
 }
 
 std::vector<QImage> Renderer::pageImages(int pageIndex) const {
@@ -213,25 +268,35 @@ std::vector<QImage> Renderer::pageImages(int pageIndex) const {
     for (int i = 0; i < nObj; ++i) {
         FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, i);
         if (!obj || FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_IMAGE) continue;
-        // Render the image object to a bitmap with the document's decode
-        // (handles the colorspace/filters PDFium supports).
         FPDF_BITMAP bmp = FPDFImageObj_GetRenderedBitmap(m_doc, page, obj);
         if (!bmp) continue;
-        const int w = FPDFBitmap_GetWidth(bmp);
-        const int h = FPDFBitmap_GetHeight(bmp);
-        const int stride = FPDFBitmap_GetStride(bmp);
-        const int format = FPDFBitmap_GetFormat(bmp);
-        const auto* buf = static_cast<const uchar*>(FPDFBitmap_GetBuffer(bmp));
-        if (w > 0 && h > 0 && buf) {
-            QImage::Format qf = (format == FPDFBitmap_BGRA) ? QImage::Format_ARGB32
-                              : (format == FPDFBitmap_BGRx) ? QImage::Format_RGB32
-                                                            : QImage::Format_RGB888;
-            // BGR(x/a) memory maps to Qt's ARGB32/RGB32 on little-endian;
-            // BGR (3-channel) needs an explicit swap.
-            QImage img(buf, w, h, stride, qf);
-            out.push_back(format == FPDFBitmap_BGR ? img.rgbSwapped().copy() : img.copy());
-        }
+        QImage img = bitmapToQImage(bmp);
+        if (!img.isNull()) out.push_back(std::move(img));
         FPDFBitmap_Destroy(bmp);
+    }
+    return out;
+}
+
+std::vector<Renderer::PlacedImage> Renderer::pagePlacedImages(int pageIndex) const {
+    std::vector<PlacedImage> out;
+    FPDF_PAGE page = pageHandle(pageIndex);
+    if (!page) return out;
+    const qreal pageH = pageSizePt(pageIndex).height();
+    const int nObj = FPDFPage_CountObjects(page);
+    for (int i = 0; i < nObj; ++i) {
+        FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, i);
+        if (!obj || FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_IMAGE) continue;
+        float l = 0, b = 0, r = 0, t = 0;
+        if (!FPDFPageObj_GetBounds(obj, &l, &b, &r, &t)) continue;
+        FPDF_BITMAP bmp = FPDFImageObj_GetRenderedBitmap(m_doc, page, obj);
+        if (!bmp) continue;
+        QImage img = bitmapToQImage(bmp);
+        FPDFBitmap_Destroy(bmp);
+        if (img.isNull()) continue;
+        PlacedImage pi;
+        pi.img = std::move(img);
+        pi.box = QRectF(l, pageH - t, r - l, t - b);   // flip to top-left origin
+        out.push_back(std::move(pi));
     }
     return out;
 }

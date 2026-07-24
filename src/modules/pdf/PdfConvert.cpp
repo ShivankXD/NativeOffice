@@ -7,6 +7,7 @@
 #include <QtCore/private/qzipwriter_p.h>
 
 #include <QBuffer>
+#include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -15,6 +16,8 @@
 #include <QPainter>
 #include <QPdfWriter>
 #include <QRegularExpression>
+
+#include <cmath>
 
 #include <algorithm>
 #include <vector>
@@ -125,43 +128,262 @@ OpResult toImages(const QString& in, const QString& outDir, const QString& baseN
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PDF → Word (.docx)
+//
+// Reconstructs an editable, formatted document rather than dumping plain text:
+// glyphs are grouped into visual lines, each line split into runs that share a
+// style (size / bold / italic / colour), word gaps re-inserted from glyph
+// spacing, and paragraphs positioned with left indent + vertical spacing that
+// mirror the page. Embedded images are placed inline at their own position and
+// size, interleaved with the text in reading order. The Word page is sized to
+// the PDF page. It is not pixel-perfect — it is a faithful, editable stand-in.
 // ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+int toEmu(double pt)   { return int(pt * 12700.0 + 0.5); }   // 914400 EMU / inch
+int toTwips(double pt) { return int(pt * 20.0 + 0.5); }      // 1440 twips / inch
+
+struct StyledRun { QString text; int szHalfPt; QColor color; bool bold; bool italic; };
+
+struct DocLine {
+    double top = 1e9, bottom = -1e9, left = 1e9, right = -1e9;
+    QVector<StyledRun> runs;
+};
+
+// One emittable block (a text line or an image), carrying the geometry needed
+// to place it: paragraphs get a left indent / alignment and vertical spacing.
+struct Block {
+    double top, bottom, left, right;
+    QString inner;      // run/drawing XML, wrapped in <w:p> at emit time
+};
+
+// Cluster a page's glyphs into visual lines, then each line into styled runs.
+QVector<DocLine> buildLines(std::vector<Renderer::CharBox> cs) {
+    std::vector<Renderer::CharBox> g;
+    g.reserve(cs.size());
+    for (auto& c : cs) if (c.box.height() > 0.5) g.push_back(c);
+    std::sort(g.begin(), g.end(), [](const Renderer::CharBox& a, const Renderer::CharBox& b) {
+        const double ay = a.box.center().y(), by = b.box.center().y();
+        if (std::abs(ay - by) > 0.5) return ay < by;
+        return a.box.left() < b.box.left();
+    });
+
+    QVector<QVector<Renderer::CharBox>> lineGlyphs;
+    double curTop = 0, curBot = 0;
+    for (auto& c : g) {
+        const double cy = c.box.center().y();
+        if (!lineGlyphs.isEmpty() && cy >= curTop && cy <= curBot) {
+            lineGlyphs.back().push_back(c);
+            curTop = std::min(curTop, c.box.top());
+            curBot = std::max(curBot, c.box.bottom());
+        } else {
+            lineGlyphs.append({ c });
+            curTop = c.box.top();
+            curBot = c.box.bottom();
+        }
+    }
+
+    auto sizeHalfPt = [](const Renderer::CharBox& c) {
+        const double s = c.fontSize > 0 ? c.fontSize : c.box.height();
+        return std::clamp(int(s * 2.0 + 0.5), 2, 800);
+    };
+
+    QVector<DocLine> lines;
+    for (auto& lc : lineGlyphs) {
+        std::sort(lc.begin(), lc.end(), [](const Renderer::CharBox& a, const Renderer::CharBox& b) {
+            return a.box.left() < b.box.left();
+        });
+        DocLine dl;
+        StyledRun cur;
+        bool have = false;
+        double prevRight = 0;
+        for (const auto& c : lc) {
+            const int   sz  = sizeHalfPt(c);
+            const QColor col = c.color.isValid() ? c.color : QColor();
+            const bool sameStyle = have && cur.szHalfPt == sz && cur.bold == c.bold
+                                 && cur.italic == c.italic && cur.color == col;
+            // Re-insert a space where glyphs are visually separated (positioned
+            // text often carries no space glyph between words). 0.35x the font
+            // size keeps a spaced-out heading ("SHIVANK") from being split into
+            // "SH IVAN K"; the trade-off is that a few very tightly-set words in
+            // secondary text may join — acceptable, and far better than a broken
+            // name. (Per-line adaptive thresholds do worse on mixed-size lines.)
+            if (have && c.box.left() - prevRight > 0.35 * (c.fontSize > 0 ? c.fontSize : c.box.height())
+                && !cur.text.endsWith(' '))
+                cur.text += ' ';
+            if (!sameStyle) {
+                if (have && !cur.text.trimmed().isEmpty()) dl.runs.push_back(cur);
+                else if (have && !cur.text.isEmpty() && !dl.runs.isEmpty())
+                    dl.runs.last().text += cur.text;   // fold a pure-space run into the previous
+                cur = StyledRun{ QString(), sz, col, c.bold, c.italic };
+                have = true;
+            }
+            cur.text += c.ch;
+            prevRight = c.box.right();
+            dl.top = std::min(dl.top, c.box.top());
+            dl.bottom = std::max(dl.bottom, c.box.bottom());
+            dl.left = std::min(dl.left, c.box.left());
+            dl.right = std::max(dl.right, c.box.right());
+        }
+        if (have && !cur.text.isEmpty()) dl.runs.push_back(cur);
+        if (!dl.runs.isEmpty()) lines.push_back(dl);
+    }
+    return lines;
+}
+
+} // namespace
 
 OpResult toDocx(const QString& in, const QString& out) {
     OpResult err{ true, {} };
     auto r = openOrError(in, err);
     if (!r) return err;
 
+    // Page dimensions for the section come from the first page.
+    const QSizeF page0 = r->pageCount() > 0 ? r->pageSizePt(0) : QSizeF(612, 792);
+
+    auto runXml = [](const StyledRun& rn) -> QString {
+        QString rpr = "<w:rPr>";
+        if (rn.bold)   rpr += "<w:b/>";
+        if (rn.italic) rpr += "<w:i/>";
+        if (rn.color.isValid())
+            rpr += "<w:color w:val=\"" + rn.color.name(QColor::HexRgb).mid(1).toUpper() + "\"/>";
+        rpr += "<w:sz w:val=\"" + QString::number(rn.szHalfPt) + "\"/>"
+               "<w:szCs w:val=\"" + QString::number(rn.szHalfPt) + "\"/></w:rPr>";
+        return "<w:r>" + rpr + "<w:t xml:space=\"preserve\">" + xmlEscape(rn.text) + "</w:t></w:r>";
+    };
+
+    // Alignment from a block's horizontal position within the page.
+    auto alignOf = [](double left, double right, double pageW) -> QString {
+        if (pageW <= 0) return "left";
+        const double lg = left, rg = pageW - right;
+        if (rg > 0.02 * pageW && std::abs(lg - rg) < 0.12 * pageW && lg > 0.12 * pageW) return "center";
+        if (rg < 0.10 * pageW && lg > 0.20 * pageW) return "right";
+        return "left";
+    };
+
     QString body;
+    QString imageRels;
+    QVector<QPair<QString, QByteArray>> media;   // (part name, bytes)
+    int relId = 0;       // image relationship ids (rId1..)
+    int drawId = 1;      // unique drawing/docPr ids
+
     for (int p = 0; p < r->pageCount(); ++p) {
-        for (const QString& line : pageTextLines(*r, p)) {
-            const QString t = line.trimmed();
-            if (t.isEmpty()) continue;
-            body += "<w:p><w:r><w:t xml:space=\"preserve\">"
-                  + xmlEscape(t) + "</w:t></w:r></w:p>";
+        const QSizeF ps = r->pageSizePt(p);
+        const double pageW = ps.width();
+
+        std::vector<Block> blocks;
+        for (const DocLine& dl : buildLines(r->pageChars(p))) {
+            QString inner;
+            for (const StyledRun& rn : dl.runs) inner += runXml(rn);
+            blocks.push_back({ dl.top, dl.bottom, dl.left, dl.right, inner });
         }
-        if (p + 1 < r->pageCount())
-            body += "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>";
+        for (const Renderer::PlacedImage& pi : r->pagePlacedImages(p)) {
+            if (pi.img.isNull() || pi.box.width() <= 0 || pi.box.height() <= 0) continue;
+            ++relId;
+            const QString partName = QStringLiteral("image%1.png").arg(relId);
+            media.push_back({ partName, encodeImage(pi.img, "PNG") });
+            imageRels += QStringLiteral(
+                "<Relationship Id=\"rId%1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/%2\"/>")
+                .arg(relId).arg(partName);
+            const int cx = toEmu(pi.box.width()), cy = toEmu(pi.box.height());
+            const int id = drawId++;
+            const QString draw = QStringLiteral(
+                "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
+                "<wp:extent cx=\"%1\" cy=\"%2\"/><wp:docPr id=\"%3\" name=\"Image%3\"/>"
+                "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">"
+                "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
+                "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
+                "<pic:nvPicPr><pic:cNvPr id=\"%3\" name=\"Image%3\"/><pic:cNvPicPr/></pic:nvPicPr>"
+                "<pic:blipFill><a:blip r:embed=\"rId%4\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+                "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%1\" cy=\"%2\"/></a:xfrm>"
+                "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>"
+                "</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>")
+                .arg(cx).arg(cy).arg(id).arg(relId);
+            blocks.push_back({ pi.box.top(), pi.box.bottom(), pi.box.left(), pi.box.right(), draw });
+        }
+
+        std::sort(blocks.begin(), blocks.end(), [](const Block& a, const Block& b) {
+            if (std::abs(a.top - b.top) > 1.0) return a.top < b.top;
+            return a.left < b.left;
+        });
+
+        double prevBottom = 0;   // bottom of the previous block, for gap detection
+        bool   firstBlock = true;
+        for (const Block& blk : blocks) {
+            const QString align = alignOf(blk.left, blk.right, pageW);
+            // Add spacing only for a real vertical gap (a blank line / section
+            // break), and keep it modest and capped. Reproducing the absolute
+            // page position of every line — as an earlier version did — inflated
+            // a one-page résumé to 21 Word pages; flowing text with occasional
+            // gaps is both compact and what an editable conversion wants.
+            const double lineH = std::max(1.0, blk.bottom - blk.top);
+            const double gap   = blk.top - prevBottom;
+            double before = 0.0;
+            if (!firstBlock && gap > 1.2 * lineH) before = std::min(gap - lineH, 24.0);
+            firstBlock = false;
+            QString pr = "<w:pPr><w:spacing w:after=\"0\"";
+            if (before > 0) pr += " w:before=\"" + QString::number(toTwips(before)) + "\"";
+            pr += " w:line=\"240\" w:lineRule=\"auto\"/>";
+            if (align == "center") pr += "<w:jc w:val=\"center\"/>";
+            else if (align == "right") pr += "<w:jc w:val=\"right\"/>";
+            // No absolute left indent: mapping a glyph's page-x to an indent
+            // squeezed right-hand column text into a sliver that wrapped every
+            // word (a one-page résumé blew up to 20 pages). Flowing text inside
+            // normal margins is compact and editable; alignment is still kept.
+            pr += "</w:pPr>";
+            body += "<w:p>" + pr + blk.inner + "</w:p>";
+            prevBottom = blk.bottom;
+        }
+
+        // No forced page break between PDF pages: an editable Word document
+        // should reflow, and a hard break here linearises worse (and, in this
+        // app's own importer, a lone break-only paragraph paginates wildly).
     }
 
     const QString documentXml =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+        "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
+        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" "
+        "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" "
+        "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
+        "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
         "<w:body>" + body +
-        "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:body></w:document>";
+        "<w:sectPr><w:pgSz w:w=\"" + QString::number(toTwips(page0.width())) +
+        "\" w:h=\"" + QString::number(toTwips(page0.height())) + "\"/>"
+        "<w:pgMar w:top=\"720\" w:right=\"720\" w:bottom=\"720\" w:left=\"720\" "
+        "w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>";
+
+    // Document defaults. Without a styles part, Word-family readers apply their
+    // own built-in Normal style — here that meant a large paragraph space-after
+    // and 1.15 line spacing, which inflated a ~5-page conversion to 20 pages.
+    // Pin space-after to 0 and single line spacing, with an 11pt default size.
+    const QString stylesXml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+        "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+        "<w:docDefaults>"
+        "<w:rPrDefault><w:rPr><w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/></w:rPr></w:rPrDefault>"
+        "<w:pPrDefault><w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr></w:pPrDefault>"
+        "</w:docDefaults></w:styles>";
 
     const QString contentTypes =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
         "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
         "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+        "<Default Extension=\"png\" ContentType=\"image/png\"/>"
         "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
+        "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
         "</Types>";
     const QString rootRels =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
         "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>"
         "</Relationships>";
+    const QString documentRels =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+        "<Relationship Id=\"rIdSty\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>"
+        + imageRels + "</Relationships>";
 
     QZipWriter zip(out);
     if (zip.status() != QZipWriter::NoError)
@@ -169,6 +391,10 @@ OpResult toDocx(const QString& in, const QString& out) {
     zip.addFile("[Content_Types].xml", contentTypes.toUtf8());
     zip.addFile("_rels/.rels", rootRels.toUtf8());
     zip.addFile("word/document.xml", documentXml.toUtf8());
+    zip.addFile("word/styles.xml", stylesXml.toUtf8());
+    zip.addFile("word/_rels/document.xml.rels", documentRels.toUtf8());
+    for (const auto& m : media)
+        zip.addFile("word/media/" + m.first, m.second);
     zip.close();
     return zip.status() == QZipWriter::NoError
         ? OpResult{ true, {} } : OpResult{ false, "The Word file could not be finalized." };

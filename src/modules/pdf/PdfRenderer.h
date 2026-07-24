@@ -11,6 +11,7 @@
 // interaction smooth with a raster cache, not with worker threads.
 // ─────────────────────────────────────────────────────────────────────────────
 
+#include <QColor>
 #include <QImage>
 #include <QRectF>
 #include <QSizeF>
@@ -75,12 +76,24 @@ public:
     struct CharBox {
         QChar  ch;
         QRectF box;
+        double fontSize = 0;      // text size in points (0 if unknown)
+        QColor color;             // fill colour (invalid → treat as black)
+        bool   bold   = false;
+        bool   italic = false;
     };
     [[nodiscard]] std::vector<CharBox> pageChars(int pageIndex) const;
 
     // Decoded raster images embedded in a page (for "Extract Picture").
     // Returns the rendered bitmaps in page order; empty if the page has none.
     [[nodiscard]] std::vector<QImage> pageImages(int pageIndex) const;
+
+    // An embedded image together with its placement on the page, in page
+    // points with a top-left origin — for reconstructing layout (PDF → Word).
+    struct PlacedImage {
+        QImage img;
+        QRectF box;
+    };
+    [[nodiscard]] std::vector<PlacedImage> pagePlacedImages(int pageIndex) const;
 
     // Line-grouped rectangles for the characters inside `area` (page points,
     // top-left origin) — what Highlight/Underline/StrikeOut snap to.
