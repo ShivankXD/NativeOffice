@@ -300,7 +300,6 @@ QWidget* ImageResizerWidget::buildSettingsPanel() {
     auto* pickRow = new QHBoxLayout;
     pickRow->setSpacing(8);
     m_fillPick = new QRadioButton(tr("Pick a color"), m_fillGroup);
-    m_fillPick->setChecked(true);
     m_fillPick->setCursor(Qt::PointingHandCursor);
     m_fillHex = new QLabel(m_fillColor.name().toUpper(), m_fillGroup);
     m_fillHex->setObjectName("rszMuted");
@@ -317,6 +316,12 @@ QWidget* ImageResizerWidget::buildSettingsPanel() {
     m_fillTransparent = new QRadioButton(tr("Transparent"), m_fillGroup);
     m_fillTransparent->setToolTip(tr("PNG output only — JPG has no transparency"));
     m_fillTransparent->setCursor(Qt::PointingHandCursor);
+    // Default padding to transparent: resizing a transparent image to exact
+    // pixel dimensions (which requires unlocking the aspect ratio and so
+    // reveals this group) must never silently paint solid bars behind it. A
+    // solid background is still one click away via "Pick a color"; JPG output,
+    // which has no alpha, composites onto white/the chosen colour regardless.
+    m_fillTransparent->setChecked(true);
     fg->addWidget(m_fillTransparent);
     sv->addWidget(m_fillGroup);
     pv->addWidget(m_pageSize);

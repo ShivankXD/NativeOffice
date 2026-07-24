@@ -1347,13 +1347,13 @@ void PdfModule::doConvert(PdfAction which) {
     case A::ToPpt: {
         const QString out = saveAs(tr("PowerPoint presentations (*.pptx)"), "pptx");
         if (out.isEmpty()) return;
-        r = Pdf::toPptx(src, out, 150);
+        r = Pdf::toPptx(src, out, 200);
         break;
     }
     case A::ToImageOnlyPdf: {
         const QString out = saveAs(tr("PDF files (*.pdf)"), "pdf");
         if (out.isEmpty()) return;
-        r = Pdf::toImageOnlyPdf(src, out, 150);
+        r = Pdf::toImageOnlyPdf(src, out, 200);
         break;
     }
     case A::ToPicture:

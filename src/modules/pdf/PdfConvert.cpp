@@ -381,24 +381,43 @@ OpResult toPptx(const QString& in, const QString& out, int dpi) {
 
 namespace {
 
+// One page per image, each page sized to its image's aspect ratio, with the
+// FULL-resolution image embedded — not a copy pre-scaled to the page's pixel
+// grid, which threw away source pixels and capped every output at ~150 dpi
+// (a 12MP photo came out as a soft page). QPdfWriter embeds whatever image it
+// is handed, so drawing the original preserves its resolution.
 OpResult writeImagesPdf(const std::vector<QImage>& images, const QString& out) {
     if (images.empty()) return { false, "No images to write." };
     QPdfWriter writer(out);
-    writer.setPageSize(QPageSize(QPageSize::Letter));
-    writer.setResolution(150);
-    QPainter painter(&writer);
-    if (!painter.isActive()) return { false, "Could not create the PDF." };
+    writer.setResolution(300);
 
-    bool first = true;
+    // Physical page: the image's aspect on a 10-inch long edge. Only the print
+    // scale depends on this; the embedded pixel resolution comes from the image.
+    auto pageSizeFor = [](const QImage& img) {
+        const QSize px = img.size();
+        const double longIn = 10.0;
+        const QSizeF in = px.width() >= px.height()
+            ? QSizeF(longIn, longIn * px.height() / double(std::max(1, px.width())))
+            : QSizeF(longIn * px.width() / double(std::max(1, px.height())), longIn);
+        return QPageSize(in, QPageSize::Inch);
+    };
+
+    QPainter painter;
+    bool started = false;
     for (const QImage& img : images) {
         if (img.isNull()) continue;
-        if (!first) writer.newPage();
-        first = false;
-        const QRectF page = painter.viewport();
-        QImage scaled = img.scaled(page.size().toSize(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        const QPointF at((page.width() - scaled.width()) / 2, (page.height() - scaled.height()) / 2);
-        painter.drawImage(at, scaled);
+        writer.setPageSize(pageSizeFor(img));
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0));
+        if (!started) {
+            if (!painter.begin(&writer)) return { false, "Could not create the PDF." };
+            started = true;
+        } else {
+            writer.newPage();
+        }
+        // Fill the (aspect-matched) page with the original image.
+        painter.drawImage(painter.viewport(), img);
     }
+    if (!started) return { false, "No images to write." };
     painter.end();
     return { true, {} };
 }

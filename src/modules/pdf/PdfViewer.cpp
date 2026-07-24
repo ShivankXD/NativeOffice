@@ -141,10 +141,17 @@ void Viewer::renderVisible() {
         const QRectF pr = pageViewRect(i);
         if (!pr.intersects(vp)) continue;
         if (m_cache.count(i)) continue;
-        QImage img = m_session->renderer()->renderPage(i, m_zoom * dpr);
+        // Quality floor: never rasterize a page below 1:1 (72dpi-equivalent),
+        // even when it is displayed shrunk (fit-width of a large page, or a
+        // zoomed-out view). Rendering at m_zoom alone made small-zoom pages
+        // soft; here we render at max(m_zoom, 1.0)*dpr and carry the extra
+        // resolution as the pixmap's device-pixel-ratio, so the on-screen
+        // size is unchanged but the text stays sharp.
+        const qreal renderScale = std::max(m_zoom, qreal(1.0)) * dpr;
+        QImage img = m_session->renderer()->renderPage(i, renderScale);
         if (img.isNull()) continue;
         QPixmap pm = QPixmap::fromImage(std::move(img));
-        pm.setDevicePixelRatio(dpr);
+        pm.setDevicePixelRatio(renderScale / m_zoom);
         m_cache[i] = std::move(pm);
     }
 
@@ -165,7 +172,8 @@ void Viewer::paintEvent(QPaintEvent*) {
     // Deferred fit-width: by the first paint the viewport has its real size.
     if (m_pendingFitWidth && viewport()->width() > 50) {
         m_pendingFitWidth = false;
-        fitPage();          // open showing the whole first page, not zoomed-in
+        fitWidth();         // open with the page filling the width — readable,
+                            // not shrunk to a tiny whole-page view
         goToPage(0);        // a freshly opened document starts at the top
     }
 
@@ -496,7 +504,7 @@ void Viewer::fitWidthWhenReady() {
     // not enough — only trust the viewport once the widget is actually
     // visible; otherwise wait for the first real paint.
     if (isVisible() && viewport()->width() > 200) {
-        fitPage();          // open at whole-page view; users zoom in as needed
+        fitWidth();         // open with the page filling the width — readable
         goToPage(0);
     } else {
         m_pendingFitWidth = true;
