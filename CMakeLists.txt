@@ -109,7 +109,13 @@ add_custom_command(TARGET PdfRenderSmoke POST_BUILD
 # "pass" on something the user would never see.
 qt_add_executable(WatermarkSmoke tools/WatermarkSmoke.cpp
     ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
-target_link_libraries(WatermarkSmoke PRIVATE NativeOfficeCore pdfium Qt6::Gui)
+target_link_libraries(WatermarkSmoke PRIVATE NativeOfficeCore WriterModule pdfium Qt6::Gui)
+target_include_directories(WatermarkSmoke PRIVATE ${CMAKE_SOURCE_DIR}/src/modules/writer)
+foreach(_d IN LISTS _qtcore_inc2)
+    if(EXISTS "${_d}/${Qt6Core_VERSION}/QtCore/private/qzipreader_p.h")
+        target_include_directories(WatermarkSmoke PRIVATE "${_d}/${Qt6Core_VERSION}")
+    endif()
+endforeach()
 add_custom_command(TARGET WatermarkSmoke POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:pdfium>" "$<TARGET_FILE_DIR:WatermarkSmoke>")

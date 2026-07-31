@@ -14,6 +14,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "watermark/Watermark.h"
 #include "watermark/WatermarkPdf.h"
+#include "DocxIo.h"
+
+#include <QtCore/private/qzipreader_p.h>
+#include <QTextDocument>
 
 #include <fpdf_doc.h>
 #include <fpdfview.h>
@@ -157,6 +161,44 @@ int main(int argc, char** argv) {
 
     FPDF_CloseDocument(doc);
     FPDF_DestroyLibrary();
+
+    // ── DOCX ─────────────────────────────────────────────────────────────────
+    // A malformed package is the failure mode that matters here: Word refuses
+    // the whole file rather than ignoring the mark, so check every part the
+    // footer depends on is present and wired up.
+    {
+        QTextDocument td;
+        td.setPlainText(QStringLiteral("Watermark package check.\n\nSecond paragraph."));
+        const QString dx = QDir::temp().filePath("nativeoffice-watermark-smoke.docx");
+        QFile::remove(dx);
+        check(NativeOffice::DocxIo::exportDocx(&td, dx), "DOCX written");
+
+        QZipReader zr(dx);
+        check(zr.isReadable(), "DOCX opens as a ZIP");
+        QStringList names;
+        for (const auto& e : zr.fileInfoList()) names << e.filePath;
+
+        check(names.contains("word/footer9001.xml"),               "DOCX has the footer part");
+        check(names.contains("word/_rels/footer9001.xml.rels"),    "DOCX has the footer rels");
+        check(names.contains("word/media/nativeoffice-watermark.png"), "DOCX embeds the artwork");
+
+        const QString ct  = QString::fromUtf8(zr.fileData("[Content_Types].xml"));
+        const QString doc = QString::fromUtf8(zr.fileData("word/document.xml"));
+        const QString ftr = QString::fromUtf8(zr.fileData("word/footer9001.xml"));
+        const QString frl = QString::fromUtf8(zr.fileData("word/_rels/footer9001.xml.rels"));
+        const QString drl = QString::fromUtf8(zr.fileData("word/_rels/document.xml.rels"));
+
+        check(ct.contains("footer9001.xml"),        "DOCX declares the footer content type");
+        check(doc.contains("footerReference"),      "DOCX section references the footer");
+        check(drl.contains("footer9001.xml"),       "DOCX relates the footer to the document");
+        check(ftr.contains("hlinkClick"),           "DOCX footer picture carries a hyperlink");
+        check(frl.contains("TargetMode=\"External\"") &&
+              frl.contains(NativeOffice::Watermark::targetUrl()),
+                                                    "DOCX footer link targets the site");
+        check(frl.contains("nativeoffice-watermark.png"), "DOCX footer relates the artwork");
+        // No text run means nothing for Word to colour or underline as a link.
+        check(!ftr.contains("<w:u "),               "DOCX footer has no underline styling");
+    }
 
     std::printf("\n%s (%d failure(s))\nfile: %s\n",
                 failures ? "FAILED" : "PASSED", failures, qPrintable(out));

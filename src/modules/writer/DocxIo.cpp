@@ -26,6 +26,9 @@
 #include <QFont>
 #include <functional>
 
+#include "core/watermark/Watermark.h"
+#include "core/watermark/WatermarkOoxml.h"
+
 namespace NativeOffice {
 
 namespace {
@@ -232,14 +235,30 @@ bool DocxIo::exportDocx(QTextDocument* doc, const QString& path) {
         }
     }
 
+    // ── Export watermark ────────────────────────────────────────────────────
+    // The mark goes in a footer part so it repeats on every page rather than
+    // appearing once. The hyperlink sits on the picture, which keeps the hit
+    // area exactly the artwork; putting it on a text run would have extended it
+    // into the paragraph's trailing whitespace.
+    const bool wantMark = NativeOffice::Watermark::enabledForExport();
+    QString footerRef;
+    if (wantMark) {
+        relEntries << "<Relationship Id=\"rIdWmFtr\" "
+                      "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" "
+                      "Target=\"footer9001.xml\"/>";
+        footerRef = QStringLiteral("<w:footerReference w:type=\"default\" r:id=\"rIdWmFtr\"/>");
+    }
+
     // ── Assemble the package parts ──────────────────────────────────────────
     const QString documentXml =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<w:document xmlns:w=\"" + QString(kWNs) + "\" xmlns:r=\"" + QString(kRNs) + "\""
         " xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">"
         "<w:body>" + body +
-        "<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/>"
-        "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr>"
+        "<w:sectPr>" + footerRef +
+        "<w:pgSz w:w=\"11906\" w:h=\"16838\"/>"
+        "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" "
+        "w:footer=\"567\"/></w:sectPr>"
         "</w:body></w:document>";
 
     QString contentTypes =
@@ -251,6 +270,8 @@ bool DocxIo::exportDocx(QTextDocument* doc, const QString& path) {
         "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>";
     if (usesLists)
         contentTypes += "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>";
+    if (wantMark)
+        contentTypes += "<Override PartName=\"/word/footer9001.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>";
     contentTypes += "</Types>";
 
     const QString rootRels =
@@ -298,6 +319,23 @@ bool DocxIo::exportDocx(QTextDocument* doc, const QString& path) {
         zip.addFile("word/_rels/document.xml.rels", docRels.toUtf8());
     for (const auto& m : media)
         zip.addFile("word/media/" + m.first, m.second);
+
+    if (wantMark) {
+        namespace WO = NativeOffice::Watermark::Ooxml;
+        const QString imgRel  = QStringLiteral("rIdWmImg");
+        const QString linkRel = QStringLiteral("rIdWmLink");
+
+        zip.addFile("word/media/nativeoffice-watermark.png", WO::pngBytes());
+        zip.addFile("word/footer9001.xml", WO::docxFooterXml(imgRel, linkRel));
+        // The footer's own rels: the picture it draws and the URL it points at.
+        zip.addFile("word/_rels/footer9001.xml.rels",
+            (QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                            "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
+                            "package/2006/relationships\">")
+             + WO::imageRel(imgRel, QStringLiteral("media/nativeoffice-watermark.png"))
+             + WO::hyperlinkRel(linkRel)
+             + QStringLiteral("</Relationships>")).toUtf8());
+    }
     zip.close();
     return zip.status() == QZipWriter::NoError;
 }
