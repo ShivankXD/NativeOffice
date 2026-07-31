@@ -15,6 +15,9 @@
 #include <QPageSize>
 #include <QPainter>
 #include <QPdfWriter>
+
+#include "core/watermark/Watermark.h"
+#include "core/watermark/WatermarkOoxml.h"
 #include <QRegularExpression>
 
 #include <cmath>
@@ -340,6 +343,14 @@ OpResult toDocx(const QString& in, const QString& out) {
         // app's own importer, a lone break-only paragraph paginates wildly).
     }
 
+    // Converting a PDF to Word produces a document like any other, so it is
+    // marked like any other. Without this, "PDF to Word" would have been a way
+    // for a free account to get an unmarked .docx out of the app.
+    const bool wantMark = NativeOffice::Watermark::enabledForExport();
+    const QString wmFooterRef = wantMark
+        ? QStringLiteral("<w:footerReference w:type=\"default\" r:id=\"rIdWmFtr\"/>")
+        : QString();
+
     const QString documentXml =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
@@ -348,7 +359,8 @@ OpResult toDocx(const QString& in, const QString& out) {
         "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
         "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
         "<w:body>" + body +
-        "<w:sectPr><w:pgSz w:w=\"" + QString::number(toTwips(page0.width())) +
+        "<w:sectPr>" + wmFooterRef +
+        "<w:pgSz w:w=\"" + QString::number(toTwips(page0.width())) +
         "\" w:h=\"" + QString::number(toTwips(page0.height())) + "\"/>"
         "<w:pgMar w:top=\"720\" w:right=\"720\" w:bottom=\"720\" w:left=\"720\" "
         "w:header=\"0\" w:footer=\"0\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>";
@@ -373,7 +385,8 @@ OpResult toDocx(const QString& in, const QString& out) {
         "<Default Extension=\"png\" ContentType=\"image/png\"/>"
         "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>"
         "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
-        "</Types>";
+        + (wantMark ? QStringLiteral("<Override PartName=\"/word/footer9001.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>") : QString())
+        + "</Types>";
     const QString rootRels =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
@@ -383,7 +396,9 @@ OpResult toDocx(const QString& in, const QString& out) {
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
         "<Relationship Id=\"rIdSty\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>"
-        + imageRels + "</Relationships>";
+        + imageRels
+        + (wantMark ? QStringLiteral("<Relationship Id=\"rIdWmFtr\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer9001.xml\"/>") : QString())
+        + "</Relationships>";
 
     QZipWriter zip(out);
     if (zip.status() != QZipWriter::NoError)
@@ -395,6 +410,18 @@ OpResult toDocx(const QString& in, const QString& out) {
     zip.addFile("word/_rels/document.xml.rels", documentRels.toUtf8());
     for (const auto& m : media)
         zip.addFile("word/media/" + m.first, m.second);
+    if (wantMark) {
+        namespace WO = NativeOffice::Watermark::Ooxml;
+        zip.addFile("word/media/nativeoffice-watermark.png", WO::pngBytes());
+        zip.addFile("word/footer9001.xml",
+                    WO::docxFooterXml(QStringLiteral("rIdWmImg"), QStringLiteral("rIdWmLink")));
+        zip.addFile("word/_rels/footer9001.xml.rels",
+            (QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">")
+             + WO::imageRel(QStringLiteral("rIdWmImg"), QStringLiteral("media/nativeoffice-watermark.png"))
+             + WO::hyperlinkRel(QStringLiteral("rIdWmLink"))
+             + QStringLiteral("</Relationships>")).toUtf8());
+    }
     zip.close();
     return zip.status() == QZipWriter::NoError
         ? OpResult{ true, {} } : OpResult{ false, "The Word file could not be finalized." };
@@ -429,6 +456,10 @@ QString colRef(int col) {   // 0 -> A, 26 -> AA
 } // namespace
 
 OpResult toXlsx(const QString& in, const QString& out) {
+    // Same rule as every other spreadsheet this app writes.
+    const bool wantMark = NativeOffice::Watermark::enabledForExport();
+    const QString wmSheetDraw = wantMark
+        ? QStringLiteral("<drawing r:id=\"rIdWmDraw\"/>") : QString();
     OpResult err{ true, {} };
     auto r = openOrError(in, err);
     if (!r) return err;
@@ -451,11 +482,17 @@ OpResult toXlsx(const QString& in, const QString& out) {
             ++rowNum;
         }
         sheetXmls << ("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
-            "<sheetData>" + rows + "</sheetData></worksheet>");
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+            "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+            "<sheetData>" + rows + "</sheetData>" + wmSheetDraw + "</worksheet>");
         sheetNames << QStringLiteral("Page %1").arg(p + 1);
     }
     if (sheetXmls.isEmpty()) { sheetXmls << ""; sheetNames << "Page 1"; }
+
+    QString wmDrawOverrides;
+    if (wantMark)
+        for (int i = 0; i < sheetXmls.size(); ++i)
+            wmDrawOverrides += QStringLiteral("<Override PartName=\"/xl/drawings/drawing%1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>").arg(i + 1);
 
     QString sheetsRefs, wbRels, ctOverrides;
     for (int i = 0; i < sheetNames.size(); ++i) {
@@ -478,7 +515,9 @@ OpResult toXlsx(const QString& in, const QString& out) {
         "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
         "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
         "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
-        + ctOverrides + "</Types>";
+        + ctOverrides
+        + (wantMark ? QStringLiteral("<Default Extension=\"png\" ContentType=\"image/png\"/>") : QString())
+        + wmDrawOverrides + "</Types>";
     const QString rootRels =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
         "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
@@ -498,6 +537,24 @@ OpResult toXlsx(const QString& in, const QString& out) {
     zip.addFile("xl/_rels/workbook.xml.rels", workbookRels.toUtf8());
     for (int i = 0; i < sheetXmls.size(); ++i)
         zip.addFile(QStringLiteral("xl/worksheets/sheet%1.xml").arg(i + 1), sheetXmls[i].toUtf8());
+    if (wantMark) {
+        namespace WO = NativeOffice::Watermark::Ooxml;
+        zip.addFile("xl/media/nativeoffice-watermark.png", WO::pngBytes());
+        const QString relsHead = QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+        for (int i = 0; i < sheetXmls.size(); ++i) {
+            zip.addFile(QStringLiteral("xl/drawings/drawing%1.xml").arg(i + 1),
+                WO::xlsxDrawingXml(QStringLiteral("rIdWmPic"), QStringLiteral("rIdWmLink"), 1, 2));
+            zip.addFile(QStringLiteral("xl/drawings/_rels/drawing%1.xml.rels").arg(i + 1),
+                (relsHead + WO::imageRel(QStringLiteral("rIdWmPic"), QStringLiteral("../media/nativeoffice-watermark.png"))
+                 + WO::hyperlinkRel(QStringLiteral("rIdWmLink")) + QStringLiteral("</Relationships>")).toUtf8());
+            zip.addFile(QStringLiteral("xl/worksheets/_rels/sheet%1.xml.rels").arg(i + 1),
+                QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                    "<Relationship Id=\"rIdWmDraw\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing%1.xml\"/>"
+                    "</Relationships>").arg(i + 1).toUtf8());
+        }
+    }
     zip.close();
     return zip.status() == QZipWriter::NoError
         ? OpResult{ true, {} } : OpResult{ false, "The Excel file could not be finalized." };
@@ -508,6 +565,8 @@ OpResult toXlsx(const QString& in, const QString& out) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 OpResult toPptx(const QString& in, const QString& out, int dpi) {
+    // Same rule as every other deck this app writes.
+    const bool wantMark = NativeOffice::Watermark::enabledForExport();
     OpResult err{ true, {} };
     auto r = openOrError(in, err);
     if (!r) return err;
@@ -526,6 +585,14 @@ OpResult toPptx(const QString& in, const QString& out, int dpi) {
     QZipWriter zip(out);
     if (zip.status() != QZipWriter::NoError)
         return { false, "Could not create the PowerPoint file." };
+
+    const QString wmSlidePic = wantMark
+        ? NativeOffice::Watermark::Ooxml::pptxPicXml(9001, QStringLiteral("rIdWmImg"),
+              QStringLiteral("rIdWmLink"), qint64(slideW), qint64(slideH))
+        : QString();
+    if (wantMark)
+        zip.addFile("ppt/media/nativeoffice-watermark.png",
+                    NativeOffice::Watermark::Ooxml::pngBytes());
 
     // Per-slide parts.
     for (int i = 0; i < n; ++i) {
@@ -546,6 +613,7 @@ OpResult toPptx(const QString& in, const QString& out, int dpi) {
             "<p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"" + QString::number(qint64(slideW))
             + "\" cy=\"" + QString::number(qint64(slideH)) + "\"/></a:xfrm>"
             "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
+            + wmSlidePic +
             "</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping "
             "bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" "
             "accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" "
@@ -556,7 +624,10 @@ OpResult toPptx(const QString& in, const QString& out, int dpi) {
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
             "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
             "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/image"
-            + QString::number(i + 1) + ".png\"/></Relationships>";
+            + QString::number(i + 1) + ".png\"/>"
+            + (wantMark ? NativeOffice::Watermark::Ooxml::imageRel(QStringLiteral("rIdWmImg"), QStringLiteral("../media/nativeoffice-watermark.png"))
+                            + NativeOffice::Watermark::Ooxml::hyperlinkRel(QStringLiteral("rIdWmLink")) : QString())
+            + "</Relationships>";
         zip.addFile(QStringLiteral("ppt/slides/_rels/slide%1.xml.rels").arg(i + 1), slideRels.toUtf8());
 
         slideRefs += QStringLiteral("<p:sldId id=\"%1\" r:id=\"rId%2\"/>").arg(256 + i).arg(i + 1);
