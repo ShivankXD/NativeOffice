@@ -47,8 +47,8 @@ bool zlibDeflateAll(const QByteArray& in, QByteArray& out, int level) {
 // directly rather than copying from the source).
 class Copier {
 public:
-    Copier(const Document& src, Writer& dst, bool recompress)
-        : m_src(src), m_dst(dst), m_recompress(recompress) {}
+    Copier(const Document& src, Writer& dst, bool recompress, int level = 9)
+        : m_src(src), m_dst(dst), m_recompress(recompress), m_level(level) {}
 
     int copy(Ref oldRef) {
         if (oldRef.num < 0) return -oldRef.num;   // sentinel passthrough
@@ -90,13 +90,14 @@ private:
         QByteArray inflated;
         if (!zlibInflateAll(obj.streamData, inflated)) return;
         QByteArray recompressed;
-        if (zlibDeflateAll(inflated, recompressed, 9) && recompressed.size() < obj.streamData.size())
+        if (zlibDeflateAll(inflated, recompressed, m_level) && recompressed.size() < obj.streamData.size())
             obj.streamData = recompressed;
     }
 
     const Document& m_src;
     Writer& m_dst;
     bool m_recompress;
+    int  m_level = 9;      // zlib level; lossless, so this trades size against time
     std::map<Ref, int> m_map;
 };
 
@@ -604,7 +605,7 @@ OpResult resizePages(const QString& inputPath, const std::vector<int>& pages,
     return selfCheck(outputPath, doc.pageCount());
 }
 
-OpResult compressPdf(const QString& inputPath, const QString& outputPath) {
+OpResult compressPdf(const QString& inputPath, const QString& outputPath, int deflateLevel) {
     OpenStatus status;
     auto doc = Document::open(inputPath, status);
     if (!doc) return { false, reasonFor(inputPath, status) };
@@ -613,7 +614,7 @@ OpResult compressPdf(const QString& inputPath, const QString& outputPath) {
     const int pagesNum = writer.allocate();
     const int catalogNum = writer.allocate();
 
-    Copier copier(*doc, writer, /*recompress=*/true);
+    Copier copier(*doc, writer, /*recompress=*/true, qBound(1, deflateLevel, 9));
     std::vector<int> newPageNums;
     for (const PageInfo& page : doc->pages())
         newPageNums.push_back(copier.copyPageWithParent(page.dict, pagesNum));

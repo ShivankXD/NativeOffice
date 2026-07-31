@@ -22,6 +22,7 @@
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 #include "core/watermark/WatermarkPdf.h"
+#include "core/settings/ExportPrefs.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -678,7 +679,13 @@ void PdfModule::doCompress() {
         tr("PDF files (*.pdf)"));
     if (out.isEmpty()) return;
     const qint64 before = QFileInfo(m_session->currentRevisionPath()).size();
-    const OpResult r = Pdf::compressPdf(m_session->currentRevisionPath(), out);
+    // Premium "PDF compression". Lossless either way, so this only moves the
+    // size/time trade-off; everyone else keeps the previous maximum setting.
+    using C = NativeOffice::ExportPrefs::Compression;
+    const C level = NativeOffice::ExportPrefs::pdfCompression();
+    const int deflate = level == C::Light ? 1 : (level == C::Balanced ? 6 : 9);
+
+    const OpResult r = Pdf::compressPdf(m_session->currentRevisionPath(), out, deflate);
     if (!r.ok) { toast(r.message); return; }
     // Stamped after compression so the mark is not re-encoded by it.
     NativeOffice::Watermark::stampIfRequired(out);

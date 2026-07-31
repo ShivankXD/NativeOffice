@@ -26,6 +26,7 @@
 #include "core/application/UpdateChecker.h"
 #include "core/auth/AuthManager.h"
 #include "core/watermark/WatermarkPdf.h"
+#include "core/settings/ExportPrefs.h"
 
 #include "WriterModule.h"
 #include "CalcModule.h"
@@ -214,16 +215,19 @@ public:
         QString path = QFileDialog::getSaveFileName(
             this, "Save As…",
             m_writer->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/" + baseName() + ".docx"
+                ? QDir::homePath() + "/" + baseName() + "."
+                      + NativeOffice::ExportPrefs::defaultDocFormat()
                 : m_writer->currentFilePath(),
             WRITER_SAVE_FILTER, &selectedFilter);
 
         if (path.isEmpty()) return false;
         // Append an extension matching the chosen filter if the user omitted one.
+        // With no filter hint, fall back to the premium default format.
         if (QFileInfo(path).suffix().isEmpty()) {
             if      (selectedFilter.contains("noff")) path += ".noff";
             else if (selectedFilter.contains("html")) path += ".html";
-            else                                      path += ".docx";
+            else if (selectedFilter.contains("docx")) path += ".docx";
+            else path += "." + NativeOffice::ExportPrefs::defaultDocFormat();
         }
         return performSave(path);
     }
@@ -318,16 +322,19 @@ public:
         QString path = QFileDialog::getSaveFileName(
             this, "Save As…",
             m_calc->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/" + baseName() + ".xlsx"
+                ? QDir::homePath() + "/" + baseName() + "."
+                      + NativeOffice::ExportPrefs::defaultSheetFormat()
                 : m_calc->currentFilePath(),
             CALC_SAVE_FILTER, &selectedFilter);
 
         if (path.isEmpty()) return false;
         // Append the extension matching the chosen filter if the user omitted one.
+        // With no filter hint, fall back to the premium default format.
         if (QFileInfo(path).suffix().isEmpty()) {
             if      (selectedFilter.contains("noff")) path += ".noff";
             else if (selectedFilter.contains("csv"))  path += ".csv";
-            else                                       path += ".xlsx";
+            else if (selectedFilter.contains("xlsx")) path += ".xlsx";
+            else path += "." + NativeOffice::ExportPrefs::defaultSheetFormat();
         }
         return performSave(path);
     }
@@ -417,11 +424,12 @@ public:
     NativeOffice::ImpressModule* impress() const { return m_impress; }
 
     bool saveAs() {
+        const QString ext = "." + NativeOffice::ExportPrefs::defaultDeckFormat();
         const QString suggested =
             m_impress->currentFilePath().isEmpty()
-                ? QDir::homePath() + "/" + baseName() + ".pptx"
+                ? QDir::homePath() + "/" + baseName() + ext
                 : QFileInfo(m_impress->currentFilePath()).absolutePath() + "/"
-                      + QFileInfo(m_impress->currentFilePath()).completeBaseName() + ".pptx";
+                      + QFileInfo(m_impress->currentFilePath()).completeBaseName() + ext;
         const QString path = QFileDialog::getSaveFileName(
             this, "Save As…", suggested, IMPRESS_SAVE_FILTER);
 
@@ -960,7 +968,8 @@ static void writerExportToPdf(NativeOffice::WriterModule* writer, QWidget* paren
     pdfWriter.setPageOrientation(QPageLayout::Portrait);
     // 20 mm margins on all sides (matches the Writer canvas visual margin)
     pdfWriter.setPageMargins(QMarginsF(20, 20, 20, 20), QPageLayout::Millimeter);
-    pdfWriter.setResolution(300);   // 300 dpi for print-quality output
+    // Premium "PDF export quality"; 300 dpi for everyone else, as before.
+    pdfWriter.setResolution(NativeOffice::ExportPrefs::pdfExportDpi());
 
     // ── Print via QTextDocument::print() ─────────────────────────────────────
     // QTextDocument::print() automatically handles pagination, rich text,

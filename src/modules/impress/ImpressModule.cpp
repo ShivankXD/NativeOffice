@@ -15,6 +15,7 @@
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 #include "core/watermark/WatermarkPdf.h"
+#include "core/settings/ExportPrefs.h"
 #include "core/watermark/Watermark.h"
 #include "core/watermark/WatermarkOoxml.h"
 
@@ -1720,7 +1721,9 @@ void ImpressModule::exportToPdf() {
     writer.setPageSize(QPageSize(QSizeF(338.667, 190.5), QPageSize::Millimeter,
                                   "Widescreen 16:9"));
     writer.setPageMargins(QMarginsF(0, 0, 0, 0));
-    writer.setResolution(150);
+    // Slides are image-heavy, so the ceiling matters more than for text: honour
+    // the premium quality setting, falling back to the previous 150 dpi.
+    writer.setResolution(qMin(NativeOffice::ExportPrefs::pdfExportDpi(), 300));
 
     QPainter painter(&writer);
     if (!painter.isActive()) {

@@ -14,6 +14,7 @@
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 #include "core/watermark/WatermarkPdf.h"
+#include "core/settings/ExportPrefs.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -3191,6 +3192,8 @@ void CalcModule::exportToPdf() {
     writer.setPageSize(QPageSize(QPageSize::A4));
     writer.setPageOrientation(QPageLayout::Landscape);
     writer.setPageMargins(QMarginsF(12, 12, 12, 12), QPageLayout::Millimeter);
+    // Premium "PDF export quality". Previously this used QPdfWriter's default.
+    writer.setResolution(NativeOffice::ExportPrefs::pdfExportDpi());
 
     QPainter p(&writer);
     if (!p.isActive()) {

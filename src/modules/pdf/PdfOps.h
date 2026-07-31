@@ -32,7 +32,10 @@ OpResult splitPdf(const QString& inputPath, int startPage, int endPage, const QS
 // already using /FlateDecode. Streams under any other/no filter (e.g.
 // DCTDecode/JPEG images) are left untouched — no re-encoding, no quality
 // loss, no risk of misinterpreting a filter we don't handle.
-OpResult compressPdf(const QString& inputPath, const QString& outputPath);
+// deflateLevel is a zlib level (1..9). The recompression is lossless, so this
+// trades output size against the time spent, not image quality.
+OpResult compressPdf(const QString& inputPath, const QString& outputPath,
+                     int deflateLevel = 9);
 
 // Returns the page count of a PDF, or -1 with `error` set if it can't be
 // opened (used by the UI to validate a split range before running).

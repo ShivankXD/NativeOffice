@@ -331,9 +331,9 @@ QWidget* SettingsDialog::buildPremiumPage() {
     form->addRow(mkLbl("Default presentation format"), m_deckFmtCombo);
 
     m_pdfQualCombo = new QComboBox(page);
-    m_pdfQualCombo->addItem("Standard — 150 dpi", 150);
-    m_pdfQualCombo->addItem("High — 300 dpi", 300);
-    m_pdfQualCombo->addItem("Print — 600 dpi", 600);
+    m_pdfQualCombo->addItem("Standard - 150 dpi", 150);
+    m_pdfQualCombo->addItem("High - 300 dpi", 300);
+    m_pdfQualCombo->addItem("Print - 600 dpi", 600);
     {
         const int dpi = st.value("premium/pdfExportDpi", 300).toInt();
         m_pdfQualCombo->setCurrentIndex(dpi >= 600 ? 2 : (dpi <= 150 ? 0 : 1));
@@ -341,9 +341,9 @@ QWidget* SettingsDialog::buildPremiumPage() {
     form->addRow(mkLbl("PDF export quality"), m_pdfQualCombo);
 
     m_pdfCompCombo = new QComboBox(page);
-    m_pdfCompCombo->addItem("Light — keep quality", "light");
+    m_pdfCompCombo->addItem("Light - fastest", "light");
     m_pdfCompCombo->addItem("Balanced", "balanced");
-    m_pdfCompCombo->addItem("Maximum — smallest file", "max");
+    m_pdfCompCombo->addItem("Maximum - smallest file", "max");
     {
         const QString lvl = st.value("premium/pdfCompressLevel", "balanced").toString();
         m_pdfCompCombo->setCurrentIndex(lvl == "light" ? 0 : (lvl == "max" ? 2 : 1));
