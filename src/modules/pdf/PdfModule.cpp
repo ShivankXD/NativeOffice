@@ -21,6 +21,7 @@
 #include "PdfViewer.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
+#include "core/watermark/WatermarkPdf.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -371,6 +372,11 @@ bool PdfModule::saveToPath(const QString& path) {
         if (!err.isEmpty()) toast(err);
         return false;
     }
+    // Stamped on the bytes just written, never on the in-memory session. Saving
+    // again rewrites the file from the session and re-stamps once, so repeated
+    // saves cannot stack up marks, and merely opening a document that already
+    // carries one adds nothing.
+    NativeOffice::Watermark::stampIfRequired(path);
     emit documentModified();
     return true;
 }
@@ -638,6 +644,7 @@ void PdfModule::doMerge() {
 
     const OpResult r = Pdf::mergePdfs(files, out);
     if (!r.ok) { toast(r.message); return; }
+    NativeOffice::Watermark::stampIfRequired(out);
     if (QMessageBox::question(this, tr("Merge PDFs"),
             tr("Merged %1 files.\nOpen the result?").arg(files.size()))
         == QMessageBox::Yes)
@@ -659,6 +666,7 @@ void PdfModule::doSplit() {
         QFileInfo(currentFilePath()).path() + "/split.pdf", tr("PDF files (*.pdf)"));
     if (out.isEmpty()) return;
     const OpResult r = Pdf::extractPages(m_session->currentRevisionPath(), pages, out);
+    if (r.ok) NativeOffice::Watermark::stampIfRequired(out);
     toast(r.ok ? tr("Wrote %1 page(s) to \"%2\".").arg(pages.size()).arg(QFileInfo(out).fileName())
                : r.message);
 }
@@ -672,6 +680,8 @@ void PdfModule::doCompress() {
     const qint64 before = QFileInfo(m_session->currentRevisionPath()).size();
     const OpResult r = Pdf::compressPdf(m_session->currentRevisionPath(), out);
     if (!r.ok) { toast(r.message); return; }
+    // Stamped after compression so the mark is not re-encoded by it.
+    NativeOffice::Watermark::stampIfRequired(out);
     const qint64 after = QFileInfo(out).size();
     toast(tr("Compressed: %1 KB → %2 KB.").arg(before / 1024).arg(after / 1024));
 }
@@ -1354,6 +1364,7 @@ void PdfModule::doConvert(PdfAction which) {
         const QString out = saveAs(tr("PDF files (*.pdf)"), "pdf");
         if (out.isEmpty()) return;
         r = Pdf::toImageOnlyPdf(src, out, 200);
+        if (r.ok) NativeOffice::Watermark::stampIfRequired(out);
         break;
     }
     case A::ToPicture:
@@ -1427,6 +1438,7 @@ void PdfModule::doPictureToPdf() {
     if (out.isEmpty()) return;
     const OpResult r = Pdf::imagesToPdf(images, out);
     if (!r.ok) { toast(r.message); return; }
+    NativeOffice::Watermark::stampIfRequired(out);
     if (QMessageBox::question(this, tr("Picture to PDF"),
             tr("Created \"%1\".\nOpen it now?").arg(QFileInfo(out).fileName()))
         == QMessageBox::Yes)

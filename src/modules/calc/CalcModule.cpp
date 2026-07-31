@@ -13,6 +13,7 @@
 #include "XlsxIo.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
+#include "core/watermark/WatermarkPdf.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -3198,6 +3199,11 @@ void CalcModule::exportToPdf() {
     }
     renderSheet(p, QRectF(0, 0, writer.width(), writer.height()));
     p.end();
+
+    // Applied after the painter closes the file: QPdfWriter cannot carry the
+    // link annotation, so the mark is stamped in a second PDFium pass.
+    NativeOffice::Watermark::stampIfRequired(path);
+
     QMessageBox::information(this, "Export to PDF", QString("Saved to:\n%1").arg(path));
 }
 

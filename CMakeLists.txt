@@ -102,6 +102,18 @@ add_custom_command(TARGET PdfRenderSmoke POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:pdfium>" "$<TARGET_FILE_DIR:PdfRenderSmoke>")
 
+# Dev-only check that the export watermark's link annotation is present on every
+# page, scoped to the artwork, and not triggered by clicks near it.
+# The brand mark lives in resources.qrc, which the app target owns; the smoke
+# test needs it too or it would render the artwork without its icon and quietly
+# "pass" on something the user would never see.
+qt_add_executable(WatermarkSmoke tools/WatermarkSmoke.cpp
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+target_link_libraries(WatermarkSmoke PRIVATE NativeOfficeCore pdfium Qt6::Gui)
+add_custom_command(TARGET WatermarkSmoke POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:pdfium>" "$<TARGET_FILE_DIR:WatermarkSmoke>")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Installation rules (future-proofing)
 # ─────────────────────────────────────────────────────────────────────────────

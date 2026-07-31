@@ -10,6 +10,7 @@
 #include "WriterAi.h"
 #include "WriterCollab.h"
 #include "PagedTextEdit.h"
+#include "core/watermark/WatermarkPdf.h"
 #include "SpellChecker.h"
 #include "DocxIo.h"
 #include <QTextDocumentFragment>
@@ -4116,6 +4117,7 @@ void WriterRibbon::exportToPdf() {
     writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout::Millimeter);
     writer.setResolution(300);
     m_editor->document()->print(&writer);
+    NativeOffice::Watermark::stampIfRequired(path);
     QMessageBox::information(window(), "Export to PDF", "Exported to:\n" + path);
 }
 

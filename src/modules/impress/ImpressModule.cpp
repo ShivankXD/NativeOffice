@@ -14,6 +14,7 @@
 #include "PptxImport.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
+#include "core/watermark/WatermarkPdf.h"
 
 #include <QApplication>
 #include <QAbstractSpinBox>
@@ -1752,6 +1753,9 @@ void ImpressModule::exportToPdf() {
     }
 
     painter.end();
+
+    // One page per slide, so stamping every page marks every slide.
+    NativeOffice::Watermark::stampIfRequired(path);
 
     QMessageBox::information(this, "Export Complete",
         QString("Presentation exported to PDF successfully!\n\n%1 slide(s) → %2")
