@@ -2,7 +2,6 @@
 // UpdateChecker.cpp — see header.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "UpdateChecker.h"
-#include "core/auth/AuthManager.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -13,6 +12,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcess>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
 
@@ -46,7 +46,30 @@ static constexpr const char* kPlatformKey = "mac";
 static constexpr const char* kPlatformKey = "linux";
 #endif
 
-// Compare dotted numeric versions. >0 if a>b, <0 if a<b, 0 if equal.
+// Where the update manifest is fetched from.
+//
+// Deliberately NOT AuthManager::baseUrl(). That key exists so the API can be
+// pointed at a local backend during development, and updates used to ride on
+// it: with "auth/baseUrl" set to a dev server, the manifest poll went to
+// localhost, got no reply, and the app sat on State::Offline forever. The
+// symptom was a machine that silently never updated while every other install
+// updated fine, which is a miserable thing to diagnose.
+//
+// Updates now always check production. "update/baseUrl" is a separate, explicit
+// override for anyone who genuinely wants to test the update path elsewhere, so
+// changing the API target can no longer disable updates as a side effect.
+static QString updateOrigin() {
+    return QSettings()
+        .value(QStringLiteral("update/baseUrl"),
+               QStringLiteral("https://nativeoffice.online"))
+        .toString();
+}
+
+// Compare dotted numeric versions component by component: major, then minor,
+// then patch, returning at the first difference. 1.5.0 is correctly newer than
+// 1.4.16 because the minor component decides it and the patch is never reached.
+// Missing components count as 0, so "1.5" and "1.5.0" compare equal.
+// >0 if a>b, <0 if a<b, 0 if equal.
 static int cmpVersion(const QString& a, const QString& b) {
     const QStringList pa = a.split('.'), pb = b.split('.');
     const int n = qMax(pa.size(), pb.size());
@@ -94,8 +117,7 @@ void UpdateChecker::checkForUpdates() {
     }
     setState(State::Scanning);
 
-    QNetworkRequest req(QUrl(AuthManager::instance().baseUrl()
-                             + QStringLiteral("/version.json")));
+    QNetworkRequest req(QUrl(updateOrigin() + QStringLiteral("/version.json")));
     req.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
                      QNetworkRequest::AlwaysNetwork);
     req.setTransferTimeout(8000);      // keep the home-lock window short
