@@ -63,10 +63,19 @@ QString pptxPicXml(int shapeId, const QString& imageRelId, const QString& linkRe
 QByteArray xlsxDrawingXml(const QString& imageRelId, const QString& linkRelId,
                           int anchorCol, int anchorRow);
 
-// The <legacyDrawingHF> / footer picture plumbing is format-specific enough
-// that the sheet writer builds it inline; this is the odd-header-footer string
-// that references the picture: "&R&G" puts the graphic in the right footer.
-QString xlsxFooterRef();
+// ── Excel: the repeated footer graphic ──────────────────────────────────────
+// Excel repeats a header/footer picture on every printed page, which the
+// anchored drawing above cannot do. The two have to be separate elements:
+// footer graphics are referenced by a VML legacyDrawingHF part and the format
+// provides no way to attach a hyperlink to one. So this copy is the one that
+// repeats, and the drawing above is the one that is clickable.
+
+// <headerFooter> element naming the graphic. "&R&G" places it right-aligned.
+QString xlsxHeaderFooterXml();
+
+// The VML part the footer graphic is drawn from. o:relid points at the image
+// relationship in this part's own rels.
+QByteArray xlsxFooterVml(const QString& imageRelId);
 
 } // namespace Ooxml
 } // namespace Watermark

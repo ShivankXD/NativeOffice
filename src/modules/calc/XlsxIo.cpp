@@ -843,8 +843,13 @@ QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles) {
     }
     // The watermark drawing is referenced last: the schema requires <drawing>
     // after <mergeCells>, and Excel rejects the sheet if the order is wrong.
-    if (NativeOffice::Watermark::enabledForExport())
+    if (NativeOffice::Watermark::enabledForExport()) {
+        // Schema order matters here: drawing, then headerFooter, then
+        // legacyDrawingHF. Excel rejects the sheet otherwise.
         xml += "<drawing r:id=\"rIdWmDraw\"/>";
+        xml += NativeOffice::Watermark::Ooxml::xlsxHeaderFooterXml();
+        xml += "<legacyDrawingHF r:id=\"rIdWmVml\"/>";
+    }
 
     xml += "</worksheet>";
     return xml.toUtf8();
@@ -880,6 +885,7 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
                      .arg(i + 1);
         if (NativeOffice::Watermark::enabledForExport()) {
             s += "<Default Extension=\"png\" ContentType=\"image/png\"/>";
+            s += "<Default Extension=\"vml\" ContentType=\"application/vnd.openxmlformats-officedocument.vmlDrawing\"/>";
             for (int i = 0; i < nSheets; ++i)
                 s += QString("<Override PartName=\"/xl/drawings/drawing%1.xml\" "
                              "ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>")
@@ -919,6 +925,17 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
                  + WO::hyperlinkRel(QStringLiteral("rIdWmLink"))
                  + QStringLiteral("</Relationships>")).toUtf8());
 
+            // The repeated footer graphic: a VML part plus its image rel.
+            zip.add(QString("xl/drawings/vmlDrawing%1.vml").arg(i + 1),
+                    WO::xlsxFooterVml(QStringLiteral("rIdWmVmlImg")));
+            zip.add(QString("xl/drawings/_rels/vmlDrawing%1.vml.rels").arg(i + 1),
+                (QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                                "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
+                                "package/2006/relationships\">")
+                 + WO::imageRel(QStringLiteral("rIdWmVmlImg"),
+                                QStringLiteral("../media/nativeoffice-watermark.png"))
+                 + QStringLiteral("</Relationships>")).toUtf8());
+
             zip.add(QString("xl/worksheets/_rels/sheet%1.xml.rels").arg(i + 1),
                 QString("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
                         "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
@@ -926,6 +943,9 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
                         "<Relationship Id=\"rIdWmDraw\" "
                         "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
                         "relationships/drawing\" Target=\"../drawings/drawing%1.xml\"/>"
+                        "<Relationship Id=\"rIdWmVml\" "
+                        "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                        "relationships/vmlDrawing\" Target=\"../drawings/vmlDrawing%1.vml\"/>"
                         "</Relationships>").arg(i + 1).toUtf8());
         }
     }

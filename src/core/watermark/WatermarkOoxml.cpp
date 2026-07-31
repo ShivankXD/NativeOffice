@@ -152,7 +152,42 @@ QByteArray xlsxDrawingXml(const QString& imageRelId, const QString& linkRelId,
     return xml.toUtf8();
 }
 
-QString xlsxFooterRef() { return QStringLiteral("&amp;R&amp;G"); }
+QString xlsxHeaderFooterXml() {
+    // &R selects the right footer section, &G inserts the picture.
+    return QStringLiteral("<headerFooter><oddFooter>&amp;R&amp;G</oddFooter></headerFooter>");
+}
+
+QByteArray xlsxFooterVml(const QString& imageRelId) {
+    // Footer graphics are still VML, not DrawingML: this is the one place the
+    // modern schema never replaced. The size is given in points, matching the
+    // artwork, so Excel does not rescale it.
+    const QSizeF sz = sizePoints();
+    const QString xml = QStringLiteral(
+        "<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" "
+        "xmlns:o=\"urn:schemas-microsoft-com:office:office\" "
+        "xmlns:x=\"urn:schemas-microsoft-com:office:excel\">"
+        "<o:shapelayout v:ext=\"edit\"><o:idmap v:ext=\"edit\" data=\"1\"/></o:shapelayout>"
+        "<v:shapetype id=\"_x0000_t75\" coordsize=\"21600,21600\" o:spt=\"75\" "
+        "o:preferrelative=\"t\" path=\"m@4@5l@4@11@9@11@9@5xe\" filled=\"f\" stroked=\"f\">"
+        "<v:stroke joinstyle=\"miter\"/>"
+        "<v:formulas><v:f eqn=\"if lineDrawn pixelLineWidth 0\"/><v:f eqn=\"sum @0 1 0\"/>"
+        "<v:f eqn=\"sum 0 0 @1\"/><v:f eqn=\"prod @2 1 2\"/><v:f eqn=\"prod @3 21600 pixelWidth\"/>"
+        "<v:f eqn=\"prod @3 21600 pixelHeight\"/><v:f eqn=\"sum @0 0 1\"/><v:f eqn=\"prod @6 1 2\"/>"
+        "<v:f eqn=\"prod @7 21600 pixelWidth\"/><v:f eqn=\"sum @8 21600 0\"/>"
+        "<v:f eqn=\"prod @7 21600 pixelHeight\"/><v:f eqn=\"sum @10 21600 0\"/></v:formulas>"
+        "<v:path o:extrusionok=\"f\" gradientshapeok=\"t\" o:connecttype=\"rect\"/>"
+        "<o:lock v:ext=\"edit\" aspectratio=\"t\"/></v:shapetype>"
+        "<v:shape id=\"RF\" o:spid=\"_x0000_s1025\" type=\"#_x0000_t75\" "
+        "style=\"position:absolute;margin-left:0;margin-top:0;"
+        "width:%1pt;height:%2pt;z-index:1\">"
+        "<v:imagedata o:relid=\"%3\" o:title=\"Made with NativeOffice\"/>"
+        "<o:lock v:ext=\"edit\" rotation=\"t\"/></v:shape>"
+        "</xml>")
+        .arg(QString::number(sz.width(), 'f', 2),
+             QString::number(sz.height(), 'f', 2),
+             imageRelId);
+    return xml.toUtf8();
+}
 
 } // namespace Ooxml
 } // namespace Watermark

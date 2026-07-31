@@ -15,6 +15,7 @@
 #include "watermark/Watermark.h"
 #include "watermark/WatermarkPdf.h"
 #include "DocxIo.h"
+#include "XlsxIo.h"
 
 #include <QtCore/private/qzipreader_p.h>
 #include <QTextDocument>
@@ -198,6 +199,49 @@ int main(int argc, char** argv) {
         check(frl.contains("nativeoffice-watermark.png"), "DOCX footer relates the artwork");
         // No text run means nothing for Word to colour or underline as a link.
         check(!ftr.contains("<w:u "),               "DOCX footer has no underline styling");
+    }
+
+    // ── XLSX ─────────────────────────────────────────────────────────────────
+    // Both mechanisms have to be present and wired: the anchored drawing that
+    // carries the link, and the VML footer graphic that repeats on every
+    // printed page. Excel rejects the sheet if the element order is wrong, so
+    // the order is asserted too.
+    {
+        std::vector<NativeOffice::XlsxSheet> sheets;
+        NativeOffice::XlsxSheet sh;
+        sh.name = QStringLiteral("Sheet1");
+        sh.cells.push_back({ 0, 0, QStringLiteral("hello") });
+        sheets.push_back(sh);
+
+        const QString xl = QDir::temp().filePath("nativeoffice-watermark-smoke.xlsx");
+        QFile::remove(xl);
+        check(NativeOffice::exportXlsx(xl, sheets), "XLSX written");
+
+        QZipReader zr(xl);
+        QStringList names;
+        for (const auto& e : zr.fileInfoList()) names << e.filePath;
+
+        check(names.contains("xl/drawings/drawing1.xml"),          "XLSX has the linked drawing");
+        check(names.contains("xl/drawings/vmlDrawing1.vml"),       "XLSX has the footer VML");
+        check(names.contains("xl/media/nativeoffice-watermark.png"), "XLSX embeds the artwork");
+
+        const QString sheet = QString::fromUtf8(zr.fileData("xl/worksheets/sheet1.xml"));
+        const QString draw  = QString::fromUtf8(zr.fileData("xl/drawings/drawing1.xml"));
+        const QString rels  = QString::fromUtf8(zr.fileData("xl/worksheets/_rels/sheet1.xml.rels"));
+        const QString ct    = QString::fromUtf8(zr.fileData("[Content_Types].xml"));
+
+        check(draw.contains("hlinkClick"),         "XLSX drawing carries the hyperlink");
+        check(sheet.contains("legacyDrawingHF"),   "XLSX sheet references the footer graphic");
+        check(sheet.contains("oddFooter"),         "XLSX sheet sets the footer");
+        check(rels.contains("rIdWmDraw") && rels.contains("rIdWmVml"),
+                                                   "XLSX sheet relates both parts");
+        check(ct.contains("vmlDrawing"),           "XLSX declares the VML content type");
+
+        const int iDraw = sheet.indexOf("<drawing ");
+        const int iHF   = sheet.indexOf("<headerFooter>");
+        const int iLeg  = sheet.indexOf("<legacyDrawingHF");
+        check(iDraw > 0 && iHF > iDraw && iLeg > iHF,
+              "XLSX element order is drawing, headerFooter, legacyDrawingHF");
     }
 
     std::printf("\n%s (%d failure(s))\nfile: %s\n",
