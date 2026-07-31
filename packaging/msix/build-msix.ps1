@@ -43,7 +43,12 @@ New-Item -ItemType Directory -Force $staging | Out-Null
 # Same exclusions as the release zip: md4c.lib, underscore temp files. Also
 # strip pdb/ilk and (belt and braces) the offscreen QPA plugin, which must
 # never ship (no font database -> tofu text) and has crept into Release before.
-robocopy $release $staging /E /XF md4c.lib "_*" "*.pdb" "*.ilk" qoffscreen.dll /NJH /NJS /NDL /NFL | Out-Null
+#
+# *Smoke.exe covers the dev-only test executables (WatermarkSmoke,
+# PdfRenderSmoke, PdfSmokeTest). They build into the same Release directory and
+# must never reach a user; the single-exe check below catches them if this list
+# ever misses one.
+robocopy $release $staging /E /XF md4c.lib "_*" "*.pdb" "*.ilk" "*.exp" "*.lib" qoffscreen.dll "*Smoke.exe" "*SmokeTest.exe" /NJH /NJS /NDL /NFL | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 
 # -- 3. VC++ CRT (the zip channel relies on machine-wide vc_redist; the MSIX
