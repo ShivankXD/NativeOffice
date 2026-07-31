@@ -15,6 +15,7 @@
 #include <QDialog>
 
 class QCheckBox;
+class QComboBox;
 class QListWidget;
 class QSpinBox;
 class QStackedWidget;
@@ -30,6 +31,7 @@ private:
     QWidget* buildAccountPage();
     QWidget* buildGeneralPage();
     QWidget* buildWriterPage();
+    QWidget* buildPremiumPage();
     void     save();
 
     QListWidget*    m_nav   { nullptr };
@@ -41,6 +43,16 @@ private:
     QSpinBox*  m_autosaveSpin{ nullptr };
     QSpinBox*  m_zoomSpin    { nullptr };
     QCheckBox* m_rulersChk   { nullptr };
+
+    // Premium. Written only when the account is entitled: save() skips them
+    // otherwise, so a free user cannot leave a value behind that would take
+    // effect the moment they upgrade.
+    QCheckBox* m_wmChk       { nullptr };
+    QComboBox* m_docFmtCombo { nullptr };
+    QComboBox* m_sheetFmtCombo { nullptr };
+    QComboBox* m_deckFmtCombo{ nullptr };
+    QComboBox* m_pdfQualCombo{ nullptr };
+    QComboBox* m_pdfCompCombo{ nullptr };
 };
 
 } // namespace NativeOffice

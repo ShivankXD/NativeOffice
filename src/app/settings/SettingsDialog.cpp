@@ -4,8 +4,10 @@
 #include "SettingsDialog.h"
 #include "common/Avatars.h"
 #include "core/auth/AuthManager.h"
+#include "core/watermark/Watermark.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -63,6 +65,7 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     m_nav->addItem("👤   Account");
     m_nav->addItem("⚙   General");
     m_nav->addItem("📝   Writer");
+    m_nav->addItem("★   Premium");           // last: it sits below the free settings
     for (int i = 0; i < m_nav->count(); ++i)
         m_nav->item(i)->setSizeHint(QSize(0, 44));
 
@@ -70,6 +73,7 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     m_pages->addWidget(buildAccountPage());
     m_pages->addWidget(buildGeneralPage());
     m_pages->addWidget(buildWriterPage());
+    m_pages->addWidget(buildPremiumPage());
     connect(m_nav, &QListWidget::currentRowChanged,
             m_pages, &QStackedWidget::setCurrentIndex);
     m_nav->setCurrentRow(0);
@@ -264,6 +268,100 @@ QWidget* SettingsDialog::buildGeneralPage() {
     return page;
 }
 
+// ── Premium ───────────────────────────────────────────────────────────────────
+// Sits after every free-tier section. Free accounts see the controls, disabled,
+// under a line explaining why, plus the same upgrade route the Account page
+// uses. Showing them greyed rather than hiding them matches how the rest of
+// this dialog works and makes the offer legible.
+
+QWidget* SettingsDialog::buildPremiumPage() {
+    QSettings st;
+    auto& auth = AuthManager::instance();
+    const bool premium = auth.premiumActive();
+
+    auto* page = new QWidget(this);
+    auto* v = new QVBoxLayout(page);
+    v->setContentsMargins(28, 24, 28, 24);
+    v->setSpacing(16);
+    v->addWidget(sectionTitle("Premium Settings", page));
+
+    if (!premium) {
+        v->addWidget(text("Buy Premium to unlock these.", 13, "#E0B341", true, page));
+        auto* buy = new QPushButton("Buy Premium", page);
+        buy->setCursor(Qt::PointingHandCursor);
+        connect(buy, &QPushButton::clicked, this,
+                [] { AuthManager::instance().openPremiumPage(); });
+        auto* row = new QHBoxLayout();
+        row->addWidget(buy);
+        row->addStretch();
+        v->addLayout(row);
+    }
+
+    m_wmChk = new QCheckBox("Show watermark on exports", page);
+    // Off unless deliberately switched on, which is why an upgrade takes effect
+    // with no visit to this page.
+    m_wmChk->setChecked(st.value(QLatin1String(Watermark::kSettingsKey), false).toBool());
+    v->addWidget(m_wmChk);
+    v->addWidget(text("Free exports always carry the \"Made with NativeOffice\" mark.",
+                      12, "#7B8494", false, page));
+
+    auto* form = new QFormLayout();
+    form->setSpacing(10);
+    auto mkLbl = [&](const QString& t) { return text(t, 13, "#C3CAD8", false, page); };
+
+    m_docFmtCombo = new QComboBox(page);
+    m_docFmtCombo->addItem("Word document (.docx)", "docx");
+    m_docFmtCombo->addItem("NativeOffice document (.noff)", "noff");
+    m_docFmtCombo->setCurrentIndex(
+        st.value("premium/defaultDocFormat", "docx").toString() == "noff" ? 1 : 0);
+    form->addRow(mkLbl("Default document format"), m_docFmtCombo);
+
+    m_sheetFmtCombo = new QComboBox(page);
+    m_sheetFmtCombo->addItem("Excel workbook (.xlsx)", "xlsx");
+    m_sheetFmtCombo->addItem("NativeOffice sheet (.noff)", "noff");
+    m_sheetFmtCombo->setCurrentIndex(
+        st.value("premium/defaultSheetFormat", "xlsx").toString() == "noff" ? 1 : 0);
+    form->addRow(mkLbl("Default spreadsheet format"), m_sheetFmtCombo);
+
+    m_deckFmtCombo = new QComboBox(page);
+    m_deckFmtCombo->addItem("PowerPoint presentation (.pptx)", "pptx");
+    m_deckFmtCombo->addItem("NativeOffice deck (.noff)", "noff");
+    m_deckFmtCombo->setCurrentIndex(
+        st.value("premium/defaultDeckFormat", "pptx").toString() == "noff" ? 1 : 0);
+    form->addRow(mkLbl("Default presentation format"), m_deckFmtCombo);
+
+    m_pdfQualCombo = new QComboBox(page);
+    m_pdfQualCombo->addItem("Standard — 150 dpi", 150);
+    m_pdfQualCombo->addItem("High — 300 dpi", 300);
+    m_pdfQualCombo->addItem("Print — 600 dpi", 600);
+    {
+        const int dpi = st.value("premium/pdfExportDpi", 300).toInt();
+        m_pdfQualCombo->setCurrentIndex(dpi >= 600 ? 2 : (dpi <= 150 ? 0 : 1));
+    }
+    form->addRow(mkLbl("PDF export quality"), m_pdfQualCombo);
+
+    m_pdfCompCombo = new QComboBox(page);
+    m_pdfCompCombo->addItem("Light — keep quality", "light");
+    m_pdfCompCombo->addItem("Balanced", "balanced");
+    m_pdfCompCombo->addItem("Maximum — smallest file", "max");
+    {
+        const QString lvl = st.value("premium/pdfCompressLevel", "balanced").toString();
+        m_pdfCompCombo->setCurrentIndex(lvl == "light" ? 0 : (lvl == "max" ? 2 : 1));
+    }
+    form->addRow(mkLbl("PDF compression"), m_pdfCompCombo);
+
+    v->addLayout(form);
+
+    if (!premium) {
+        for (QWidget* w : QList<QWidget*>{ m_wmChk, m_docFmtCombo, m_sheetFmtCombo,
+                                           m_deckFmtCombo, m_pdfQualCombo, m_pdfCompCombo })
+            w->setEnabled(false);
+    }
+
+    v->addStretch();
+    return page;
+}
+
 // ── Writer ────────────────────────────────────────────────────────────────────
 
 QWidget* SettingsDialog::buildWriterPage() {
@@ -316,6 +414,19 @@ void SettingsDialog::save() {
     st.setValue("writer/autosaveSec",  m_autosaveSpin->value());
     st.setValue("writer/defaultZoom",  m_zoomSpin->value());
     st.setValue("writer/rulers",       m_rulersChk->isChecked());
+
+    // Premium values are written only for an entitled account. The controls are
+    // disabled for free users anyway, but skipping the write means a free user
+    // cannot leave a value behind that would quietly take effect on upgrade —
+    // in particular a watermark toggle that should start off.
+    if (AuthManager::instance().premiumActive()) {
+        st.setValue(QLatin1String(Watermark::kSettingsKey), m_wmChk->isChecked());
+        st.setValue("premium/defaultDocFormat",   m_docFmtCombo->currentData().toString());
+        st.setValue("premium/defaultSheetFormat", m_sheetFmtCombo->currentData().toString());
+        st.setValue("premium/defaultDeckFormat",  m_deckFmtCombo->currentData().toString());
+        st.setValue("premium/pdfExportDpi",       m_pdfQualCombo->currentData().toInt());
+        st.setValue("premium/pdfCompressLevel",   m_pdfCompCombo->currentData().toString());
+    }
 }
 
 } // namespace NativeOffice

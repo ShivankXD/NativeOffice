@@ -163,8 +163,16 @@ void AuthManager::applyMe(const QByteArray& body) {
     st.setValue("license/premiumUntil",
                 static_cast<qint64>(premium.value("expires_at").toDouble(0)));
 
-    if (wasActive != premiumActive())
+    if (wasActive != premiumActive()) {
+        // Crossing into premium clears the export watermark preference, so an
+        // upgrade takes effect immediately instead of leaving the new premium
+        // user to find the toggle and turn it off themselves. Only the
+        // false->true edge does this, so switching it back on afterwards is
+        // respected; refreshEntitlement() runs every 30 minutes and does not
+        // re-fire unless the value actually changed.
+        if (premiumActive()) st.remove("premium/watermarkOnExport");
         emit entitlementChanged(premiumActive());
+    }
 
     const QString newIdentity = st.value("account/name").toString()
         + st.value("account/firstName").toString()
