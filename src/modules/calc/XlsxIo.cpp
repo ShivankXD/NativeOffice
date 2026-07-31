@@ -6,6 +6,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "XlsxIo.h"
 
+#include "core/watermark/Watermark.h"
+#include "core/watermark/WatermarkOoxml.h"
+
 #include <QByteArray>
 #include <QFile>
 #include <QHash>
@@ -775,7 +778,10 @@ QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles) {
 
     QString xml =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">";
+        // The r namespace is needed by the watermark's <drawing r:id>; declaring
+        // it unconditionally keeps the element list below uniform.
+        "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">";
 
     if (!sheet.colWidths.empty()) {
         xml += "<cols>";
@@ -835,6 +841,11 @@ QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles) {
             xml += QString("<mergeCell ref=\"%1\"/>").arg(m);
         xml += "</mergeCells>";
     }
+    // The watermark drawing is referenced last: the schema requires <drawing>
+    // after <mergeCells>, and Excel rejects the sheet if the order is wrong.
+    if (NativeOffice::Watermark::enabledForExport())
+        xml += "<drawing r:id=\"rIdWmDraw\"/>";
+
     xml += "</worksheet>";
     return xml.toUtf8();
 }
@@ -867,8 +878,56 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
             s += QString("<Override PartName=\"/xl/worksheets/sheet%1.xml\" "
                          "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>")
                      .arg(i + 1);
+        if (NativeOffice::Watermark::enabledForExport()) {
+            s += "<Default Extension=\"png\" ContentType=\"image/png\"/>";
+            for (int i = 0; i < nSheets; ++i)
+                s += QString("<Override PartName=\"/xl/drawings/drawing%1.xml\" "
+                             "ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>")
+                         .arg(i + 1);
+        }
         s += "</Types>";
         zip.add("[Content_Types].xml", s.toUtf8());
+    }
+
+    // ── Export watermark ────────────────────────────────────────────────────
+    // One drawing part per sheet, each anchored past the used range so it sits
+    // clear of the data, carrying the hyperlink on the picture.
+    if (NativeOffice::Watermark::enabledForExport()) {
+        namespace WO = NativeOffice::Watermark::Ooxml;
+        zip.add("xl/media/nativeoffice-watermark.png", WO::pngBytes());
+
+        for (int i = 0; i < nSheets; ++i) {
+            // Anchor just past the last used cell so the mark never lands on
+            // top of the user's data.
+            int col = 0, row = 0;
+            if (i < static_cast<int>(sheets.size())) {
+                for (const auto& c : sheets[i].cells) {
+                    col = std::max(col, c.col);
+                    row = std::max(row, c.row);
+                }
+            }
+            zip.add(QString("xl/drawings/drawing%1.xml").arg(i + 1),
+                    WO::xlsxDrawingXml(QStringLiteral("rIdWmPic"),
+                                       QStringLiteral("rIdWmLink"),
+                                       col + 1, row + 2));
+            zip.add(QString("xl/drawings/_rels/drawing%1.xml.rels").arg(i + 1),
+                (QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                                "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
+                                "package/2006/relationships\">")
+                 + WO::imageRel(QStringLiteral("rIdWmPic"),
+                                QStringLiteral("../media/nativeoffice-watermark.png"))
+                 + WO::hyperlinkRel(QStringLiteral("rIdWmLink"))
+                 + QStringLiteral("</Relationships>")).toUtf8());
+
+            zip.add(QString("xl/worksheets/_rels/sheet%1.xml.rels").arg(i + 1),
+                QString("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                        "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
+                        "package/2006/relationships\">"
+                        "<Relationship Id=\"rIdWmDraw\" "
+                        "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                        "relationships/drawing\" Target=\"../drawings/drawing%1.xml\"/>"
+                        "</Relationships>").arg(i + 1).toUtf8());
+        }
     }
 
     // _rels/.rels

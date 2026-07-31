@@ -15,6 +15,8 @@
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 #include "core/watermark/WatermarkPdf.h"
+#include "core/watermark/Watermark.h"
+#include "core/watermark/WatermarkOoxml.h"
 
 #include <QApplication>
 #include <QAbstractSpinBox>
@@ -2333,6 +2335,20 @@ bool ImpressModule::exportPptxTo(const QString& path) {
             ++shapeId;
         }
 
+        // ── Export watermark ────────────────────────────────────────────────
+        // Added to every slide's shape tree, not the master, so it survives a
+        // deck being re-opened and re-saved by another editor, and so it cannot
+        // be removed from inside this app by editing a master.
+        if (NativeOffice::Watermark::enabledForExport()) {
+            namespace WO = NativeOffice::Watermark::Ooxml;
+            const QString wmImg  = QStringLiteral("rIdWmImg");
+            const QString wmLink = QStringLiteral("rIdWmLink");
+            shapes += WO::pptxPicXml(9001, wmImg, wmLink, 9144000, 5143500);
+            slideRels += WO::imageRel(wmImg,
+                            QStringLiteral("../media/nativeoffice-watermark.png"));
+            slideRels += WO::hyperlinkRel(wmLink);
+        }
+
         const QString slideXml = QString(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
             "<p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
@@ -2354,6 +2370,11 @@ bool ImpressModule::exportPptxTo(const QString& path) {
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
             "<Relationships xmlns=\"%1\">%2</Relationships>").arg(kRelNs, slideRels).toUtf8());
     }
+
+    // One media part shared by every slide's watermark picture.
+    if (NativeOffice::Watermark::enabledForExport())
+        zip.add("ppt/media/nativeoffice-watermark.png",
+                NativeOffice::Watermark::Ooxml::pngBytes());
 
     const QByteArray pkg = zip.finish();
     QFile f(path);
