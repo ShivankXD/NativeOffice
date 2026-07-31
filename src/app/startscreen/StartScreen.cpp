@@ -940,6 +940,11 @@ void StartScreen::showNotificationsPopup(QWidget* anchor) {
         v->addWidget(row);
     };
 
+    item(Lucide::kSparkles, "Editing is now free for everyone",
+         "No more read-only mode. Free exports carry a small "
+         "\"Made with NativeOffice\" mark; Premium removes it and unlocks the new "
+         "Premium Settings.",
+         QStringLiteral("https://nativeoffice.online/premium"));
     item(Lucide::kStar, "Our family is growing",
          "The NativeOffice community is increasing day by day — "
          "thanks for being part of this family!",
