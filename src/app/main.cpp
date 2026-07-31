@@ -25,6 +25,7 @@
 #include "core/application/FileRouter.h"
 #include "core/application/UpdateChecker.h"
 #include "core/auth/AuthManager.h"
+#include "core/watermark/WatermarkPdf.h"
 
 #include "WriterModule.h"
 #include "CalcModule.h"
@@ -966,21 +967,20 @@ static void writerExportToPdf(NativeOffice::WriterModule* writer, QWidget* paren
     // inline images, fonts, and colors — all at the target device resolution.
     writer->document()->print(&pdfWriter);
 
+    // The PDF is complete on disk at this point; the mark and its link go on
+    // afterwards because QPdfWriter has no way to express an annotation.
+    NativeOffice::Watermark::stampIfRequired(path);
+
     QMessageBox::information(parent, "Export Complete",
         "Document exported to PDF successfully!\n\n" + path);
 }
 
-// Free-plan gate: put a freshly created module into view-only mode unless the
-// account is premium, and keep it in sync if entitlement changes while the
-// editor is open (e.g. the user activates a key on the website and returns).
-template <class Module>
-static void applyEntitlementLock(Module* m) {
-    auto& auth = NativeOffice::AuthManager::instance();
-    auto apply = [m, &auth] { m->setReadOnly(!auth.premiumActive()); };
-    apply();
-    QObject::connect(&auth, &NativeOffice::AuthManager::entitlementChanged,
-                     m, [apply](bool) { apply(); });
-}
+// Free accounts used to open every module read-only. That gate is gone: the
+// free tier now edits without restriction and the plan difference shows up on
+// export instead, as the "Made with NativeOffice" mark (core/watermark).
+//
+// Each module keeps its own setReadOnly() — it still drives Writer's Restrict
+// Editing and Read Mode, which are user-chosen states, not licensing.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build the Writer editor window with full menu bar
@@ -989,7 +989,6 @@ static WriterWindow* createWriterWindow(const QString& filePath) {
     auto* win    = new WriterWindow;
     auto* writer = new NativeOffice::WriterModule;
     win->setWriter(writer);
-    applyEntitlementLock(writer);
 
     // Centre on screen
     const QScreen* screen = QApplication::primaryScreen();
@@ -1097,7 +1096,6 @@ static CalcWindow* createCalcWindow(const QString& filePath) {
     auto* win  = new CalcWindow;
     auto* calc = new NativeOffice::CalcModule;
     win->setCalc(calc);
-    applyEntitlementLock(calc);
 
     // Centre on screen
     const QScreen* screen = QApplication::primaryScreen();
@@ -1182,7 +1180,6 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
     auto* win     = new ImpressWindow;
     auto* impress = new NativeOffice::ImpressModule(win);
     win->setImpress(impress);
-    applyEntitlementLock(impress);
 
     // Centre on screen
     const QScreen* screen = QApplication::primaryScreen();
@@ -1366,7 +1363,6 @@ static PdfWindow* createPdfWindow(const QString& filePath) {
     auto* win = new PdfWindow;
     auto* pdf = new NativeOffice::PdfModule;
     win->setPdf(pdf);
-    applyEntitlementLock(pdf);
 
     const QScreen* screen = QApplication::primaryScreen();
     win->move(screen->availableGeometry().center() - win->rect().center());
