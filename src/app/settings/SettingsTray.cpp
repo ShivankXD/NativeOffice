@@ -4,10 +4,12 @@
 #include "SettingsTray.h"
 #include "common/Avatars.h"
 #include "core/auth/AuthManager.h"
+#include "core/watermark/Watermark.h"
 #include "startscreen/LucideIcons.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QEasingCurve>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -148,6 +150,7 @@ QWidget* SettingsTray::buildPanel() {
     m_stack = new QStackedWidget(scroll);
     m_stack->addWidget(buildProfilePage());   // index 0 = Profile
     m_stack->addWidget(buildSettingsPage());  // index 1 = Settings
+    m_stack->addWidget(buildPremiumPage());   // index 2 = Premium
     scroll->setWidget(m_stack);
     rv->addWidget(scroll, 1);
 
@@ -188,13 +191,16 @@ QWidget* SettingsTray::buildSidebar() {
     };
     m_navProfile  = mkNav(Lucide::kUser,     tr("Profile"));
     m_navSettings = mkNav(Lucide::kSettings, tr("Settings"));
+    m_navPremium  = mkNav(Lucide::kSparkle,  tr("Premium"));
 
     auto* group = new QButtonGroup(bar);
     group->setExclusive(true);
     group->addButton(m_navProfile,  Profile);
     group->addButton(m_navSettings, Settings);
+    group->addButton(m_navPremium,  Premium);
     connect(m_navProfile,  &QToolButton::clicked, this, [this] { selectView(Profile); });
     connect(m_navSettings, &QToolButton::clicked, this, [this] { selectView(Settings); });
+    connect(m_navPremium,  &QToolButton::clicked, this, [this] { selectView(Premium); });
 
     v->addStretch();
     return bar;
@@ -256,7 +262,8 @@ QWidget* SettingsTray::buildProfilePage() {
             .arg(premium ? "#1E1A33" : "#161B26",
                  premium ? "#B7A6FF" : "#8A93A6",
                  premium ? "#332A5C" : "#232A38"));
-        memberVal->setText(a.joinedAt().isValid() ? a.joinedAt().toString("MMMM yyyy") : QStringLiteral("—"));
+        memberVal->setText(a.joinedAt().isValid() ? a.joinedAt().toString("MMMM yyyy")
+                                                  : QStringLiteral("Not set"));
         occVal->setText(a.occupation().isEmpty() ? QStringLiteral("Not set") : a.occupation());
     };
     refresh();
@@ -280,7 +287,7 @@ QWidget* SettingsTray::buildProfilePage() {
     });
     v->addWidget(manage);
 
-    v->addWidget(text(tr("Profile is managed on nativeoffice.online — changes sync back "
+    v->addWidget(text(tr("Profile is managed on nativeoffice.online. Changes sync back "
                          "automatically."), 11, "#6B7280", false, page));
     v->addStretch();
 
@@ -347,12 +354,115 @@ QWidget* SettingsTray::buildSettingsPage() {
     return page;
 }
 
+// ── Premium page (export defaults; entitlement gated; auto-save) ─────────────
+// These controls used to live on a Premium tab of SettingsDialog, which nothing
+// has opened since the tray replaced it, so they shipped unreachable. Same keys
+// and same defaults, rehomed onto a pane that is actually in the UI.
+QWidget* SettingsTray::buildPremiumPage() {
+    auto* page = new QWidget;
+    auto* v = new QVBoxLayout(page);
+    v->setContentsMargins(22, 6, 22, 22);
+    v->setSpacing(13);
+    QSettings st;
+
+    // Free accounts see the controls, disabled, under the upgrade route rather
+    // than not seeing them at all: it makes the offer legible and matches how
+    // the rest of this panel behaves.
+    auto* lockNote = text(tr("Buy Premium to unlock these."), 13, "#E0B341", true, page);
+    v->addWidget(lockNote);
+    auto* buy = actionButton(Lucide::kSparkle, tr("Buy Premium"), page);
+    connect(buy, &QPushButton::clicked, page, [] { AuthManager::instance().openPremiumPage(); });
+    v->addWidget(buy);
+    v->addSpacing(4);
+
+    v->addWidget(text(tr("Exports"), 13, "#8A93A6", true, page));
+
+    auto* wmChk = new QCheckBox(tr("Show watermark on exports"), page);
+    wmChk->setChecked(st.value(QLatin1String(Watermark::kSettingsKey), false).toBool());
+    v->addWidget(wmChk);
+    v->addWidget(text(tr("Free exports always carry the \"Made with NativeOffice\" mark."),
+                      11, "#6B7280", false, page));
+
+    // Combo rows follow the spin-row shape used on the Settings pane.
+    auto addCombo = [&](const QString& label,
+                        const QList<QPair<QString, QVariant>>& items,
+                        const QString& key, const QVariant& def) {
+        auto* row = new QHBoxLayout();
+        row->addWidget(text(label, 13, "#C7CEDC", false, page));
+        row->addStretch();
+        auto* c = new QComboBox(page);
+        for (const auto& it : items) c->addItem(it.first, it.second);
+        const QVariant cur = QSettings().value(key, def);
+        const int idx = c->findData(cur);
+        c->setCurrentIndex(idx >= 0 ? idx : 0);
+        // Written only for an entitled account. The controls are disabled for
+        // free users anyway, but skipping the write means a free user can never
+        // leave a value behind that would quietly take effect on upgrade.
+        connect(c, QOverload<int>::of(&QComboBox::currentIndexChanged), page, [c, key](int) {
+            if (AuthManager::instance().premiumActive())
+                QSettings().setValue(key, c->currentData());
+        });
+        row->addWidget(c);
+        v->addLayout(row);
+        return c;
+    };
+
+    connect(wmChk, &QCheckBox::toggled, page, [](bool on) {
+        if (AuthManager::instance().premiumActive())
+            QSettings().setValue(QLatin1String(Watermark::kSettingsKey), on);
+    });
+
+    v->addSpacing(6);
+    v->addWidget(text(tr("Default save formats"), 13, "#8A93A6", true, page));
+    auto* docCombo = addCombo(tr("Documents"),
+        {{ tr("Word document (.docx)"), "docx" }, { tr("NativeOffice document (.noff)"), "noff" }},
+        "premium/defaultDocFormat", "docx");
+    auto* sheetCombo = addCombo(tr("Spreadsheets"),
+        {{ tr("Excel workbook (.xlsx)"), "xlsx" }, { tr("NativeOffice sheet (.noff)"), "noff" }},
+        "premium/defaultSheetFormat", "xlsx");
+    auto* deckCombo = addCombo(tr("Presentations"),
+        {{ tr("PowerPoint presentation (.pptx)"), "pptx" }, { tr("NativeOffice deck (.noff)"), "noff" }},
+        "premium/defaultDeckFormat", "pptx");
+
+    v->addSpacing(6);
+    v->addWidget(text(tr("PDF export"), 13, "#8A93A6", true, page));
+    auto* dpiCombo = addCombo(tr("Quality"),
+        {{ tr("Standard, 150 dpi"), 150 }, { tr("High, 300 dpi"), 300 }, { tr("Print, 600 dpi"), 600 }},
+        "premium/pdfExportDpi", 300);
+    auto* compCombo = addCombo(tr("Compression"),
+        {{ tr("Light, fastest"), "light" }, { tr("Balanced"), "balanced" },
+         { tr("Maximum, smallest file"), "max" }},
+        "premium/pdfCompressLevel", "balanced");
+
+    v->addSpacing(4);
+    v->addWidget(text(tr("Preferences apply to new exports and save automatically."),
+                      11, "#6B7280", false, page));
+    v->addStretch();
+
+    // Live entitlement: buying Premium in the browser unlocks these without a
+    // restart, and signing out re-locks them.
+    const QList<QWidget*> gated { wmChk, docCombo, sheetCombo, deckCombo, dpiCombo, compCombo };
+    auto applyLock = [gated, lockNote, buy] {
+        const bool premium = AuthManager::instance().premiumActive();
+        for (QWidget* w : gated) w->setEnabled(premium);
+        lockNote->setVisible(!premium);
+        buy->setVisible(!premium);
+    };
+    applyLock();
+    connect(&AuthManager::instance(), &AuthManager::entitlementChanged, page,
+            [applyLock](bool) { applyLock(); });
+
+    return page;
+}
+
 void SettingsTray::selectView(View v) {
     m_view = v;
-    m_stack->setCurrentIndex(v == Profile ? 0 : 1);
+    m_stack->setCurrentIndex(v == Profile ? 0 : (v == Settings ? 1 : 2));
     m_navProfile->setChecked(v == Profile);
     m_navSettings->setChecked(v == Settings);
-    m_title->setText(v == Profile ? tr("Profile") : tr("Settings"));
+    m_navPremium->setChecked(v == Premium);
+    m_title->setText(v == Profile ? tr("Profile")
+                                  : (v == Settings ? tr("Settings") : tr("Premium")));
 }
 
 // ── Open / close ──────────────────────────────────────────────────────────────

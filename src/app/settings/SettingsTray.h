@@ -26,10 +26,10 @@ namespace NativeOffice {
 class SettingsTray : public QWidget {
     Q_OBJECT
 public:
-    // Two panes, switchable from the left nav: Profile (avatar / plan / sign
-    // out — opened by the profile picture) and Settings (app preferences —
-    // opened by the gear).
-    enum View { Profile, Settings };
+    // Three panes, switchable from the left nav: Profile (avatar / plan / sign
+    // out, opened by the profile picture), Settings (app preferences, opened by
+    // the gear) and Premium (export defaults, entitlement gated).
+    enum View { Profile, Settings, Premium };
 
     explicit SettingsTray(QWidget* parent);
 
@@ -48,6 +48,7 @@ private:
     QWidget* buildSidebar();
     QWidget* buildProfilePage();
     QWidget* buildSettingsPage();
+    QWidget* buildPremiumPage();
     void     selectView(View v);
     int      panelX(bool opened) const;             // docked vs off-screen x
 
@@ -55,6 +56,7 @@ private:
     QStackedWidget*     m_stack   { nullptr };
     QToolButton*        m_navProfile  { nullptr };
     QToolButton*        m_navSettings { nullptr };
+    QToolButton*        m_navPremium  { nullptr };
     QLabel*             m_title   { nullptr };
     QPropertyAnimation* m_anim    { nullptr };
     int                 m_panelW  { 520 };
