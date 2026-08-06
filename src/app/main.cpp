@@ -38,6 +38,7 @@
 #include <QDateTime>
 #include <QMainWindow>
 #include <QScreen>
+#include <QIcon>
 #include <QMenuBar>
 #include <QMenu>
 #include <QAction>
@@ -68,6 +69,46 @@
 #include <QPainter>
 #include <QPageSize>
 #include <QPageLayout>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Window sizing
+// ─────────────────────────────────────────────────────────────────────────────
+// Fit a freshly built top-level window to the display it will actually appear
+// on, then centre it there.
+//
+// Every window in this file is constructed at a fixed pixel size (1480x900 for
+// the shell, 1200x800 for the editors) chosen on a large monitor. Those are
+// LOGICAL pixels, so on a 1920x1080 screen at 150% scaling the usable desktop
+// is only about 1280x680 and the window opened wider and taller than the
+// screen, hanging off the right and bottom edges with no way to see what was
+// out there.
+//
+// The minimum size matters just as much as the requested size: a minimum
+// larger than the screen (Impress asked for 1100x680) makes the overflow
+// permanent, because the user cannot resize the window back down again. So
+// clamp both.
+//
+// Called after construction rather than inside it, so it sees the window's
+// real screen and the size the constructor asked for.
+static void fitWindowToScreen(QWidget* w) {
+    if (!w) return;
+    QScreen* scr = w->screen();
+    if (!scr) scr = QApplication::primaryScreen();
+    if (!scr) return;
+
+    const QRect avail = scr->availableGeometry();
+    // Small margin so the frame and its shadow are not flush against the edges
+    // of the work area (and the taskbar stays reachable).
+    const int maxW = qMax(480, avail.width()  - 48);
+    const int maxH = qMax(360, avail.height() - 48);
+
+    const QSize mn = w->minimumSize();
+    if (mn.width() > maxW || mn.height() > maxH)
+        w->setMinimumSize(qMin(mn.width(), maxW), qMin(mn.height(), maxH));
+
+    w->resize(qMin(w->width(), maxW), qMin(w->height(), maxH));
+    w->move(avail.center() - w->rect().center());
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -596,8 +637,7 @@ public:
 
 static ImageResizerWindow* createImageResizerWindow() {
     auto* win = new ImageResizerWindow;
-    const QScreen* screen = QApplication::primaryScreen();
-    win->move(screen->availableGeometry().center() - win->rect().center());
+    fitWindowToScreen(win);
     return win;
 }
 
@@ -636,8 +676,7 @@ private:
 
 static MarkdownEditorWindow* createMarkdownEditorWindow() {
     auto* win = new MarkdownEditorWindow;
-    const QScreen* screen = QApplication::primaryScreen();
-    win->move(screen->availableGeometry().center() - win->rect().center());
+    fitWindowToScreen(win);
     return win;
 }
 
@@ -1000,8 +1039,7 @@ static WriterWindow* createWriterWindow(const QString& filePath) {
     win->setWriter(writer);
 
     // Centre on screen
-    const QScreen* screen = QApplication::primaryScreen();
-    win->move(screen->availableGeometry().center() - win->rect().center());
+    fitWindowToScreen(win);
 
     // ── Load file if provided ─────────────────────────────────────────────
     if (!filePath.isEmpty()) {
@@ -1107,8 +1145,7 @@ static CalcWindow* createCalcWindow(const QString& filePath) {
     win->setCalc(calc);
 
     // Centre on screen
-    const QScreen* screen = QApplication::primaryScreen();
-    win->move(screen->availableGeometry().center() - win->rect().center());
+    fitWindowToScreen(win);
 
     // ── Load file if provided ─────────────────────────────────────────────
     if (!filePath.isEmpty()) {
@@ -1191,8 +1228,7 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
     win->setImpress(impress);
 
     // Centre on screen
-    const QScreen* screen = QApplication::primaryScreen();
-    win->move(screen->availableGeometry().center() - win->rect().center());
+    fitWindowToScreen(win);
 
     // ── Load file if provided ─────────────────────────────────────────────
     if (!filePath.isEmpty()) {
@@ -1357,7 +1393,7 @@ QMenuBar::item:pressed {
         QMessageBox::about(win, "About NativeOffice",
             "<h3>NativeOffice Impress</h3>"
             "<p>A high-performance, cross-platform presentation tool.</p>"
-            "<p>Version 1.5.0</p>"
+            "<p>Version 1.5.1</p>"
             "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
@@ -1373,8 +1409,7 @@ static PdfWindow* createPdfWindow(const QString& filePath) {
     auto* pdf = new NativeOffice::PdfModule;
     win->setPdf(pdf);
 
-    const QScreen* screen = QApplication::primaryScreen();
-    win->move(screen->availableGeometry().center() - win->rect().center());
+    fitWindowToScreen(win);
 
     if (!filePath.isEmpty()) pdf->setInitialFile(filePath);
 
@@ -1669,9 +1704,19 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("1.5.0");
+    app.setApplicationVersion("1.5.1");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
+
+    // Window icon, set explicitly rather than left to Windows.
+    //
+    // Nothing called setWindowIcon before, so the taskbar button fell back to
+    // the .exe resource icon. Setting the multi-resolution .ico here lets Qt
+    // hand Windows the frame that matches each surface (16px window corner,
+    // 32/40/48px taskbar depending on scaling, 256px alt-tab and thumbnails)
+    // instead of one frame being squashed to fit them all. Every window and
+    // dialog in the app inherits it.
+    app.setWindowIcon(QIcon(":/assets/app.ico"));
 
     // ── Parse the command line up front ─────────────────────────────────────
     // File paths open as tabs later (after the shell exists); a nativeoffice://
@@ -1720,9 +1765,8 @@ int main(int argc, char* argv[]) {
     MainShell shell;
     g_shell = &shell;
 
-    const QScreen* screen = QApplication::primaryScreen();
     shell.resize(1480, 900);
-    shell.move(screen->availableGeometry().center() - shell.rect().center());
+    fitWindowToScreen(&shell);
 
     // Home factories: the PINNED first tab always opens results as new tabs
     // (unchanged behavior), routing through AppController like before. Every
