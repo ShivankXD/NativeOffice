@@ -9,5 +9,10 @@
        <!-- Transparent brand mark (RGBA), used for the sidebar logo lockup
             and as the source for the Windows app icon. -->
        <file alias="nativeoffice-logo-mark.png">logo_white_bg.png</file>
+       <!-- The Windows app icon, multi-resolution (16 through 256). Also set
+            as the QApplication window icon so every window and dialog picks
+            the right size, instead of Windows falling back to squashing one
+            frame of the .exe icon. -->
+       <file alias="app.ico">nativeoffice.ico</file>
     </qresource>
 </RCC>

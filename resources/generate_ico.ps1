@@ -1,9 +1,37 @@
 Add-Type -AssemblyName System.Drawing
 
+# Builds resources/nativeoffice.ico from the master brand art.
+#
+# The source PNG is the full brand LOCKUP: the N mark, the three app tiles,
+# the "NativeOffice" wordmark and the "CREATE - ANALYZE - PRESENT" tagline,
+# stacked vertically on a 1024x1024 transparent canvas.
+#
+# Only the mark belongs in an app icon. The previous version of this script
+# scaled the whole lockup into each frame, so by the time it reached the 32px
+# and 16px entries that Windows uses for the taskbar and the window corner,
+# the wordmark and tagline had collapsed into unreadable smears and the mark
+# itself was left tiny in the middle of the frame.
+#
+# So: crop to the mark, then centre it in a square frame with a little
+# breathing room, and scale THAT to each size. Every entry is resampled once,
+# straight from the 1024px master, rather than from an already-shrunk bitmap.
+#
+# Crop box below is the mark's alpha bounding box in the master, measured
+# rather than eyeballed. Re-measure if the artwork is ever replaced: the
+# wordmark band starts at y=697, so anything at or below that is text.
+$srcX = 267; $srcY = 141; $srcW = 477; $srcH = 539
+
+# Fraction of the frame the mark fills. 0.88 keeps a hairline of padding so
+# the art does not touch the edges when Windows rounds the corners.
+$fill = 0.88
+
+# Windows asks for more than the classic six: 20/24/40 are used at 125%, 150%
+# and 200% display scaling, and 96 shows up in some Explorer views. Supplying
+# them means Windows never has to resample one of ours itself.
+$sizes = @(16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
+
 $src = Join-Path $PSScriptRoot "logo_white_bg.png"
 $dst = Join-Path $PSScriptRoot "nativeoffice.ico"
-$sizes = @(16, 32, 48, 64, 128, 256)
-
 $srcImg = [System.Drawing.Image]::FromFile($src)
 
 $entries = @()
@@ -11,11 +39,19 @@ foreach ($size in $sizes) {
     $bmp = New-Object System.Drawing.Bitmap($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-    $g.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+    $g.PixelOffsetMode   = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
     $g.Clear([System.Drawing.Color]::Transparent)
-    # Source is already square (1024x1024) so this preserves aspect ratio exactly.
-    $g.DrawImage($srcImg, 0, 0, $size, $size)
+
+    # Fit the crop inside `size * fill`, preserving aspect ratio, centred.
+    $box = $size * $fill
+    $scale = [Math]::Min($box / $srcW, $box / $srcH)
+    $dw = $srcW * $scale
+    $dh = $srcH * $scale
+    $dstRect = New-Object System.Drawing.RectangleF(
+        (($size - $dw) / 2.0), (($size - $dh) / 2.0), $dw, $dh)
+    $srcRect = New-Object System.Drawing.RectangleF($srcX, $srcY, $srcW, $srcH)
+    $g.DrawImage($srcImg, $dstRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
     $g.Dispose()
 
     $ms = New-Object System.IO.MemoryStream
