@@ -37,6 +37,7 @@
 
 #include "Cell.h"
 #include "ChartSpec.h"
+#include "DataCleanser.h"   // for the Op enum in the slot signature
 
 class QTableView;
 class QLineEdit;
@@ -149,6 +150,15 @@ private slots:
     void importStructuredData();           // paste JSON/YAML → grid
     void copySelectionAsJson();            // selection → JSON array of objects
     void copySelectionAsYaml();            // selection → YAML list of maps
+
+    // ── Data Cleanser (DataCleanser.h) ────────────────────────────────────────
+    // Trim and de-duplicate are free; date standardization and the two
+    // extractors are Premium. The tier lives in DataCleanser::requiresPremium
+    // and is enforced here, where AuthManager is reachable.
+    void showDataCleanser();                          // open the side panel
+    void runCleanserOp(NativeOffice::DataCleanser::Op op);
+    // Shows the upsell and returns false when the account is not entitled.
+    bool requirePremiumFor(const QString& featureName);
 
     // ── Find / Replace ───────────────────────────────────────────────────────
     void showFindDialog();
@@ -421,6 +431,7 @@ private:
 
     // ── Data-export & conditional-formatting state ────────────────────────────
     QWidget* m_pandasPanel { nullptr };   // live pandas-code panel (file-local type)
+    class DataCleanserPanel* m_cleanserPanel { nullptr };
     QDialog* m_condDialog  { nullptr };   // conditional-formatting manager dialog
     QLabel*  m_toast       { nullptr };   // transient snackbar label
 

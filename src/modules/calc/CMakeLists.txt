@@ -25,6 +25,12 @@ add_library(CalcModule STATIC
     StructuredData.h
     StructuredDataDialog.cpp
     StructuredDataDialog.h
+    # Data Cleanser. Also self-contained: delete these four files plus
+    # showDataCleanser/runCleanserOp/requirePremiumFor in CalcModule.
+    DataCleanser.cpp
+    DataCleanser.h
+    DataCleanserPanel.cpp
+    DataCleanserPanel.h
 )
 
 target_include_directories(CalcModule PUBLIC

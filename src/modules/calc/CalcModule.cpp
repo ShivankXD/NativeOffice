@@ -13,6 +13,9 @@
 #include "XlsxIo.h"
 #include "StructuredData.h"
 #include "StructuredDataDialog.h"
+#include "DataCleanser.h"
+#include "DataCleanserPanel.h"
+#include "core/auth/AuthManager.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 #include "core/watermark/WatermarkPdf.h"
@@ -2101,6 +2104,8 @@ void CalcModule::buildRibbon() {
         act(sortG, "reapply", "Reapply", "Re-apply the current filters", [this]{ applyFilters(); });
 
         QHBoxLayout* dt = group(pl, "Data Tools");
+        act(dt, "clear", "Data\nCleanser", "Trim, de-duplicate, standardize dates, extract emails and URLs",
+            [this]{ showDataCleanser(); });
         act(dt, "highlight-dup", "Highlight\nDup.", "Highlight duplicate values in the selection", [this]{ highlightDuplicates(); });
         act(dt, "manage-dup",    "Remove\nDup.",    "Remove duplicate rows", [this]{ removeDuplicates(); });
         act(dt, "text-columns",  "Text to\nCols",   "Split the active column by a delimiter", [this]{ textToColumns(); });
@@ -3788,6 +3793,135 @@ void CalcModule::copySelectionAsYaml() {
     }
     QGuiApplication::clipboard()->setText(StructuredData::toYaml(rangeToTable(m_model, r)));
     showToast("Copied as YAML!");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Data Cleanser (see DataCleanser.h)
+// ═════════════════════════════════════════════════════════════════════════════
+
+bool CalcModule::requirePremiumFor(const QString& featureName) {
+    if (AuthManager::instance().premiumActive()) return true;
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Information);
+    box.setWindowTitle(featureName);
+    box.setText(featureName + tr(" is a Premium feature."));
+    box.setInformativeText(
+        tr("Trim Whitespace and Remove Duplicates are free for everyone. Date "
+           "standardization and the email and URL extractors need Premium."));
+    QPushButton* buy = box.addButton(tr("See Premium"), QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() == buy) AuthManager::instance().openPremiumPage();
+    return false;
+}
+
+void CalcModule::showDataCleanser() {
+    if (!m_cleanserPanel) {
+        auto* p = new DataCleanserPanel(this);
+        m_cleanserPanel = p;
+        connect(p, &DataCleanserPanel::runRequested, this, &CalcModule::runCleanserOp);
+        connect(p, &DataCleanserPanel::closeRequested, this, [this] {
+            if (!m_cleanserPanel) return;
+            DataCleanserPanel* dead = m_cleanserPanel;
+            m_cleanserPanel = nullptr;
+            dead->deleteLater();
+        });
+        // Live entitlement, so buying Premium in the browser unlocks the gated
+        // actions without reopening the panel.
+        auto& auth = AuthManager::instance();
+        p->setPremiumActive(auth.premiumActive());
+        connect(&auth, &AuthManager::entitlementChanged, p,
+                [p](bool on) { p->setPremiumActive(on); });
+
+        const int pw = p->width();
+        p->setGeometry(std::max(8, width() - pw - 24), 96, pw,
+                       std::max(360, height() - 160));
+    }
+    m_cleanserPanel->show();
+    m_cleanserPanel->raise();
+}
+
+void CalcModule::runCleanserOp(DataCleanser::Op op) {
+    if (!m_cleanserPanel) return;
+    const QString name = DataCleanser::opName(op);
+
+    if (DataCleanser::requiresPremium(op) && !requirePremiumFor(name)) return;
+
+    // Region: the selection, or the whole used range.
+    QRect region;
+    if (m_cleanserPanel->wholeSheet()) {
+        int c1, r1, c2, r2;
+        if (!usedRange(m_model, c1, r1, c2, r2)) {
+            m_cleanserPanel->setStatus(tr("The sheet is empty."), true);
+            return;
+        }
+        region = QRect(QPoint(c1, r1), QPoint(c2, r2));
+    } else {
+        region = selectedRect();
+        if (region.width() <= 0 || region.height() <= 0) {
+            m_cleanserPanel->setStatus(tr("Select some cells first."), true);
+            return;
+        }
+        // A single cell almost always means "I clicked somewhere", not "clean
+        // exactly this one cell", so widen to the used range rather than doing
+        // something the user will not notice.
+        if (region.width() == 1 && region.height() == 1) {
+            int c1, r1, c2, r2;
+            if (usedRange(m_model, c1, r1, c2, r2))
+                region = QRect(QPoint(c1, r1), QPoint(c2, r2));
+        }
+    }
+
+    const DataCleanser::Options opt = m_cleanserPanel->options();
+    auto reader = [this](int col, int row) { return m_model->rawContent(col, row); };
+
+    DataCleanser::Result res;
+    switch (op) {
+        case DataCleanser::Op::TrimWhitespace:
+            res = DataCleanser::trimWhitespace(reader, region, opt);
+            break;
+        case DataCleanser::Op::RemoveDuplicates:
+            res = DataCleanser::removeDuplicateRows(reader, region, opt);
+            break;
+        case DataCleanser::Op::StandardizeDates:
+            res = DataCleanser::standardizeDates(reader, region, opt);
+            break;
+        case DataCleanser::Op::ExtractEmails:
+        case DataCleanser::Op::ExtractUrls: {
+            // Results go one column right of the region, provided that column
+            // is free and on the grid. Overwriting data to save a click is not
+            // a trade worth making.
+            const int target = region.right() + 1;
+            int usable = -1;
+            if (target < SpreadsheetModel::NUM_COLS) {
+                bool empty = true;
+                for (int row = region.top(); row <= region.bottom(); ++row)
+                    if (!m_model->rawContent(target, row).isEmpty()) { empty = false; break; }
+                if (empty) usable = target;
+            }
+            res = (op == DataCleanser::Op::ExtractEmails)
+                      ? DataCleanser::extractEmails(reader, region, usable, opt)
+                      : DataCleanser::extractUrls(reader, region, usable, opt);
+            break;
+        }
+    }
+
+    if (!res.ok) { m_cleanserPanel->setStatus(res.summary, true); return; }
+    if (res.changes.isEmpty()) { m_cleanserPanel->setStatus(res.summary, false); return; }
+
+    // One undo command for the whole operation: a cleanup that took twenty
+    // presses of Ctrl+Z to reverse would be worse than not having it.
+    std::vector<std::pair<QPoint, Cell>> edits;
+    edits.reserve(res.changes.size());
+    for (const DataCleanser::Change& ch : res.changes) {
+        Cell cell = m_model->cellAt(ch.col, ch.row);   // keep the formatting
+        cell.content = ch.text;
+        edits.push_back({ QPoint(ch.col, ch.row), cell });
+    }
+    m_model->applyCellEdits(edits, name);
+    m_cleanserPanel->setStatus(res.summary, false);
+    showToast(res.summary);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
