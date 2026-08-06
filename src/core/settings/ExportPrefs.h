@@ -7,7 +7,7 @@
 // to the value the app used before the setting existed, so a free account (or a
 // premium account that never opened Settings) behaves exactly as it did.
 //
-// Entitlement is not re-checked here. SettingsDialog only writes these keys for
+// Entitlement is not re-checked here. SettingsTray only writes these keys for
 // a premium account, so a free account has nothing stored and always gets the
 // defaults. Keeping the check in one place means these can stay plain lookups.
 // ─────────────────────────────────────────────────────────────────────────────

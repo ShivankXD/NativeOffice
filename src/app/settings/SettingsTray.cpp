@@ -355,9 +355,9 @@ QWidget* SettingsTray::buildSettingsPage() {
 }
 
 // ── Premium page (export defaults; entitlement gated; auto-save) ─────────────
-// These controls used to live on a Premium tab of SettingsDialog, which nothing
-// has opened since the tray replaced it, so they shipped unreachable. Same keys
-// and same defaults, rehomed onto a pane that is actually in the UI.
+// These controls used to live on a Premium tab of the old SettingsDialog (since
+// deleted), which nothing had opened since the tray replaced it, so they shipped
+// unreachable. Same keys and same defaults, rehomed onto a pane in the UI.
 QWidget* SettingsTray::buildPremiumPage() {
     auto* page = new QWidget;
     auto* v = new QVBoxLayout(page);

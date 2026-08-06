@@ -20,8 +20,6 @@ qt_add_executable(NativeOffice
     auth/LoginGate.h
     auth/InstanceGuard.cpp
     auth/InstanceGuard.h
-    settings/SettingsDialog.cpp
-    settings/SettingsDialog.h
     settings/SettingsTray.cpp
     settings/SettingsTray.h
     tools/ImageResizer.cpp

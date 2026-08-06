@@ -2,7 +2,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SettingsTray.h — the Settings/Account panel as a right-side slide-in tray.
 //
-// Replaces the old centered modal SettingsDialog with a website-style tray: it
+// The app's only settings UI, styled after the website rather than a modal: it
 // overlays the home screen, slides in from the right edge over the content, and
 // dismisses (slides back out) when you click anywhere off it, hit its close
 // button, or press Esc. It shows the account summary (plan, member since,
