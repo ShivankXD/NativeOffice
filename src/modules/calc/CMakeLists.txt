@@ -18,6 +18,13 @@ add_library(CalcModule STATIC
     Cell.h
     XlsxIo.cpp
     XlsxIo.h
+    # JSON/YAML converter. Self-contained: delete these four files and the
+    # importStructuredData/copySelectionAsJson/copySelectionAsYaml calls in
+    # CalcModule to remove the feature entirely.
+    StructuredData.cpp
+    StructuredData.h
+    StructuredDataDialog.cpp
+    StructuredDataDialog.h
 )
 
 target_include_directories(CalcModule PUBLIC

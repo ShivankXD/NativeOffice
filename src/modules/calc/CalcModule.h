@@ -143,6 +143,13 @@ private slots:
     void exportSelectionAsPandas();        // selection → live pandas-code panel
     void showConditionalFormatDialog();    // add/manage conditional-format rules
 
+    // ── JSON / YAML converter (StructuredData.h) ──────────────────────────────
+    // Free for everyone, no entitlement check: this is a small, self-contained
+    // convenience and gating it would buy nothing.
+    void importStructuredData();           // paste JSON/YAML → grid
+    void copySelectionAsJson();            // selection → JSON array of objects
+    void copySelectionAsYaml();            // selection → YAML list of maps
+
     // ── Find / Replace ───────────────────────────────────────────────────────
     void showFindDialog();
     void showReplaceDialog();

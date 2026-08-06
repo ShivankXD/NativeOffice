@@ -11,6 +11,8 @@
 #include "FormulaEngine.h"
 #include "Cell.h"
 #include "XlsxIo.h"
+#include "StructuredData.h"
+#include "StructuredDataDialog.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 #include "core/watermark/WatermarkPdf.h"
@@ -2120,6 +2122,12 @@ void CalcModule::buildRibbon() {
 
         QHBoxLayout* getG = group(pl, "Get & Transform");
         act(getG, "get-data", "Get\nData",   "Import a CSV into the sheet", [this]{ importData(); });
+        act(getG, "table", "JSON /\nYAML", "Paste JSON or YAML and turn it into a table",
+            [this]{ importStructuredData(); });
+        act(getG, "table", "Copy as\nJSON", "Copy the selection as a JSON array (first row = field names)",
+            [this]{ copySelectionAsJson(); });
+        act(getG, "table", "Copy as\nYAML", "Copy the selection as YAML (first row = field names)",
+            [this]{ copySelectionAsYaml(); });
         act(getG, "refresh",  "Refresh\nAll", "Recompute all formulas", [this]{ onCalculateNow(); });
         act(getG, "what-if",  "What-If",      "Goal Seek / scenarios (not yet)", [this]{ featureInfo("What-If Analysis", "Goal Seek / scenarios aren't supported yet."); });
 
@@ -3664,6 +3672,8 @@ void CalcModule::onGridContextMenu(const QPoint& pos) {
     QAction* delCol = menu.addAction("Delete Column");
     menu.addSeparator();
     QAction* mdCopy  = menu.addAction(calcIcon("table"), "Copy as Markdown Table");
+    QAction* jsonCopy = menu.addAction(calcIcon("table"), "Copy as JSON");
+    QAction* yamlCopy = menu.addAction(calcIcon("table"), "Copy as YAML");
     QAction* pandas  = menu.addAction(calcIcon("sigma"), "Export as Pandas Code");
     QAction* condFmt = menu.addAction(calcIcon("fill"),  "Conditional Formatting…");
 
@@ -3673,6 +3683,8 @@ void CalcModule::onGridContextMenu(const QPoint& pos) {
     else if (a == insCol)  m_model->insertColumnAt(col);
     else if (a == delCol)  m_model->deleteColumnAt(col);
     else if (a == mdCopy)  copySelectionAsMarkdown();
+    else if (a == jsonCopy) copySelectionAsJson();
+    else if (a == yamlCopy) copySelectionAsYaml();
     else if (a == pandas)  exportSelectionAsPandas();
     else if (a == condFmt) showConditionalFormatDialog();
 }
@@ -3685,6 +3697,97 @@ void CalcModule::copySelectionAsMarkdown() {
     if (r.width() == 0 || r.height() == 0) return;
     QGuiApplication::clipboard()->setText(rangeToMarkdown(m_model, r));
     showToast("Copied as Markdown!");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// JSON / YAML converter (see StructuredData.h)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Selection → Table, taking the first selected row as the field names. Same
+// convention as the Markdown export above, so the two behave alike.
+static StructuredData::Table rangeToTable(const SpreadsheetModel* m, const QRect& r) {
+    StructuredData::Table t;
+    for (int c = r.left(); c <= r.right(); ++c)
+        t.headers << m->displayValue(c, r.top());
+    for (int row = r.top() + 1; row <= r.bottom(); ++row) {
+        QStringList vals;
+        for (int c = r.left(); c <= r.right(); ++c)
+            vals << m->displayValue(c, row);
+        // Skip rows that are entirely blank rather than emitting empty records.
+        bool anything = false;
+        for (const QString& v : vals) if (!v.isEmpty()) { anything = true; break; }
+        if (anything) t.rows.append(vals);
+    }
+    return t;
+}
+
+void CalcModule::importStructuredData() {
+    StructuredDataDialog dlg(SpreadsheetModel::NUM_ROWS, SpreadsheetModel::NUM_COLS, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const StructuredData::Table t = dlg.table();
+    if (t.headers.isEmpty()) return;
+
+    // Anchor: the selection's top-left, or A1. Clamped so a selection near the
+    // right edge cannot push the table off the grid entirely.
+    int baseCol = 0, baseRow = 0;
+    if (dlg.insertAtSelection()) {
+        const QRect sel = selectedRect();
+        baseCol = qBound(0, sel.left(), SpreadsheetModel::NUM_COLS - 1);
+        baseRow = qBound(0, sel.top(),  SpreadsheetModel::NUM_ROWS - 1);
+    }
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int c = 0; c < t.headers.size(); ++c) {
+        const int col = baseCol + c;
+        if (col >= SpreadsheetModel::NUM_COLS) break;
+        Cell cell;
+        cell.content = t.headers.at(c);
+        cell.format.bold = true;              // header row reads as a header
+        edits.push_back({ QPoint(col, baseRow), cell });
+    }
+    for (int rIdx = 0; rIdx < t.rows.size(); ++rIdx) {
+        const int row = baseRow + 1 + rIdx;
+        if (row >= SpreadsheetModel::NUM_ROWS) break;
+        const QStringList& vals = t.rows.at(rIdx);
+        for (int c = 0; c < vals.size(); ++c) {
+            const int col = baseCol + c;
+            if (col >= SpreadsheetModel::NUM_COLS) break;
+            Cell cell;
+            // A leading '=' would otherwise be evaluated as a formula, which is
+            // not what a JSON string value means.
+            cell.content = vals.at(c).startsWith(QLatin1Char('='))
+                               ? QLatin1Char('\'') + vals.at(c)
+                               : vals.at(c);
+            edits.push_back({ QPoint(col, row), cell });
+        }
+    }
+
+    if (edits.empty()) return;
+    m_model->applyCellEdits(edits, "Import JSON/YAML");
+    showToast(QString("Imported %1 rows.").arg(t.rows.size()));
+}
+
+void CalcModule::copySelectionAsJson() {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() < 2) {
+        featureInfo("Copy as JSON",
+                    "Select at least two rows: the first is used as the field names.");
+        return;
+    }
+    QGuiApplication::clipboard()->setText(StructuredData::toJson(rangeToTable(m_model, r)));
+    showToast("Copied as JSON!");
+}
+
+void CalcModule::copySelectionAsYaml() {
+    const QRect r = selectedRect();
+    if (r.width() == 0 || r.height() < 2) {
+        featureInfo("Copy as YAML",
+                    "Select at least two rows: the first is used as the field names.");
+        return;
+    }
+    QGuiApplication::clipboard()->setText(StructuredData::toYaml(rangeToTable(m_model, r)));
+    showToast("Copied as YAML!");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
