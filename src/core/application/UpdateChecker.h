@@ -36,7 +36,14 @@ public:
         UpdateAvailable,  // newer version found; download about to start
         Downloading,      // fetching the installer
         ReadyToRestart,   // installer downloaded; awaiting user's "restart"
-        Failed            // manifest/download error (non-fatal; app still usable)
+        Failed,           // manifest/download error (non-fatal; app still usable)
+        // Packaged (Microsoft Store) install that is behind the manifest. The
+        // app must not install this itself: the package directory is read-only
+        // and running the Inno bootstrapper would plant a second, unmanaged
+        // copy beside the Store one. Only the Store can deliver it, so this
+        // state exists to SAY SO rather than let a Store user sit on an old
+        // build being told they are up to date.
+        StoreUpdateAvailable
     };
 
     static UpdateChecker& instance();
@@ -52,6 +59,10 @@ public slots:
     void checkForUpdates();
     // Launch the downloaded installer and quit so files can be replaced.
     void relaunchForUpdate();
+    // Open this app's page in the Microsoft Store, for StoreUpdateAvailable.
+    // Deep-links by package family name read at runtime, so no Store product
+    // id has to be hard-coded (and it cannot go stale).
+    void openStorePage();
 
 signals:
     void stateChanged(State state);

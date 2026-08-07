@@ -4,6 +4,7 @@
 #include "UpdateChecker.h"
 
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -15,6 +16,8 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
+
+#include <vector>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -104,6 +107,8 @@ QString UpdateChecker::bannerMessage() const {
     case State::Downloading:     return tr("Downloading the latest version…");
     case State::ReadyToRestart:  return tr("Update ready. Restart NativeOffice to finish.");
     case State::Failed:          return tr("Couldn't check for updates right now.");
+    case State::StoreUpdateAvailable:
+        return tr("Version %1 is available in the Microsoft Store.").arg(m_latest);
     default:                     return QString();
     }
 }
@@ -111,10 +116,11 @@ QString UpdateChecker::bannerMessage() const {
 void UpdateChecker::checkForUpdates() {
     if (m_checked) return;             // once per process only
     m_checked = true;
-    if (runningPackaged()) {           // Store install: updates are the Store's job
-        setState(State::UpToDate);
-        return;
-    }
+    // A packaged build still CHECKS; it just cannot install. It used to return
+    // UpToDate here without asking anyone, which meant a Store user running an
+    // old build was told they were current, with nothing anywhere in the UI
+    // hinting otherwise. The check now runs and resolves to
+    // StoreUpdateAvailable when the Store copy is behind.
     setState(State::Scanning);
 
     QNetworkRequest req(QUrl(updateOrigin() + QStringLiteral("/version.json")));
@@ -147,6 +153,16 @@ void UpdateChecker::onManifest(const QByteArray& body) {
         setState(State::UpToDate);     // equal or manifest older → nothing to do
         return;
     }
+
+    // Behind, but a Store install must not install anything itself: the
+    // package directory is read-only, and the Inno bootstrapper would plant a
+    // second unmanaged copy beside the Store one. Report it and point at the
+    // Store instead.
+    if (runningPackaged()) {
+        setState(State::StoreUpdateAvailable);
+        return;
+    }
+
     setState(State::UpdateAvailable);
     if (m_downloadUrl.isEmpty()) {     // newer, but no installer for this OS
         setState(State::Failed);
@@ -188,6 +204,29 @@ void UpdateChecker::startDownload() {
         f.close();
         setState(State::ReadyToRestart);
     });
+}
+
+// Open this app's Store listing so the user can pull the update.
+//
+// The PFN is read from the running package rather than a hard-coded product
+// id, so this cannot drift if the listing is ever recreated, and there is
+// nothing to keep in sync between the manifest and this file. If the family
+// name is unavailable for any reason, the Store's own Downloads and updates
+// page is the honest fallback: it is where "get updates" lives.
+void UpdateChecker::openStorePage() {
+#ifdef Q_OS_WIN
+    QString url = QStringLiteral("ms-windows-store://downloadsandupdates");
+    UINT32 len = 0;
+    if (GetCurrentPackageFamilyName(&len, nullptr) == ERROR_INSUFFICIENT_BUFFER && len > 0) {
+        std::vector<wchar_t> buf(len);
+        if (GetCurrentPackageFamilyName(&len, buf.data()) == ERROR_SUCCESS) {
+            const QString pfn = QString::fromWCharArray(buf.data());
+            if (!pfn.isEmpty())
+                url = QStringLiteral("ms-windows-store://pdp/?PFN=") + pfn;
+        }
+    }
+    QDesktopServices::openUrl(QUrl(url));
+#endif
 }
 
 void UpdateChecker::relaunchForUpdate() {
