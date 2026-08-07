@@ -260,20 +260,14 @@ void StartScreen::refreshUpdateBanner() {
     case S::UpdateAvailable: text = tr("Preparing update"); break;
     case S::Downloading:     text = tr("Installing update"); break;
     case S::ReadyToRestart:  text = tr("Restart to update"); break;
-    case S::StoreUpdateAvailable:
-        text = tr("Update available in the Store"); break;
     default: break;
     }
     m_updateText->setText(text);
 
-    // Both of these are actionable, so both get the blue call-to-action pill.
-    // A Store install cannot update itself, but the user still needs telling
-    // that an update exists and where to get it.
-    const bool ready = s == S::ReadyToRestart || s == S::StoreUpdateAvailable;
+    const bool ready = s == S::ReadyToRestart;
+    // A ready update turns the pill into a blue call-to-action button.
     if (ready) {
-        pill->onClick = (s == S::StoreUpdateAvailable)
-            ? std::function<void()>([] { UpdateChecker::instance().openStorePage(); })
-            : std::function<void()>([] { UpdateChecker::instance().relaunchForUpdate(); });
+        pill->onClick = [] { UpdateChecker::instance().relaunchForUpdate(); };
         pill->setStyleSheet("QFrame#updatePill { background:#1D4ED8;"
                             " border:1px solid #2E5BE0; border-radius:15px; }");
         m_updateText->setStyleSheet("background:transparent;color:#FFFFFF;font:700 12px 'Segoe UI';");

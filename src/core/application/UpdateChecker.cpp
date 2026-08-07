@@ -107,8 +107,6 @@ QString UpdateChecker::bannerMessage() const {
     case State::Downloading:     return tr("Downloading the latest version…");
     case State::ReadyToRestart:  return tr("Update ready. Restart NativeOffice to finish.");
     case State::Failed:          return tr("Couldn't check for updates right now.");
-    case State::StoreUpdateAvailable:
-        return tr("Version %1 is available in the Microsoft Store.").arg(m_latest);
     default:                     return QString();
     }
 }
@@ -151,15 +149,6 @@ void UpdateChecker::onManifest(const QByteArray& body) {
     const QString current = QCoreApplication::applicationVersion();
     if (m_latest.isEmpty() || cmpVersion(m_latest, current) <= 0) {
         setState(State::UpToDate);     // equal or manifest older → nothing to do
-        return;
-    }
-
-    // Behind, but a Store install must not install anything itself: the
-    // package directory is read-only, and the Inno bootstrapper would plant a
-    // second unmanaged copy beside the Store one. Report it and point at the
-    // Store instead.
-    if (runningPackaged()) {
-        setState(State::StoreUpdateAvailable);
         return;
     }
 
@@ -206,37 +195,64 @@ void UpdateChecker::startDownload() {
     });
 }
 
-// Open this app's Store listing so the user can pull the update.
-//
-// The PFN is read from the running package rather than a hard-coded product
-// id, so this cannot drift if the listing is ever recreated, and there is
-// nothing to keep in sync between the manifest and this file. If the family
-// name is unavailable for any reason, the Store's own Downloads and updates
-// page is the honest fallback: it is where "get updates" lives.
-void UpdateChecker::openStorePage() {
-#ifdef Q_OS_WIN
-    QString url = QStringLiteral("ms-windows-store://downloadsandupdates");
-    UINT32 len = 0;
-    if (GetCurrentPackageFamilyName(&len, nullptr) == ERROR_INSUFFICIENT_BUFFER && len > 0) {
-        std::vector<wchar_t> buf(len);
-        if (GetCurrentPackageFamilyName(&len, buf.data()) == ERROR_SUCCESS) {
-            const QString pfn = QString::fromWCharArray(buf.data());
-            if (!pfn.isEmpty())
-                url = QStringLiteral("ms-windows-store://pdp/?PFN=") + pfn;
-        }
-    }
-    QDesktopServices::openUrl(QUrl(url));
-#endif
-}
-
 void UpdateChecker::relaunchForUpdate() {
     if (m_installerPath.isEmpty() || !QFile::exists(m_installerPath)) return;
-    // Run the installer SILENTLY (/VERYSILENT): no wizard, no splash — it just
-    // downloads + extracts the new build in place (into the remembered install
-    // dir) and relaunches the app on finish. Then quit so this instance releases
-    // its files for replacement. (Previously it launched the installer with no
-    // args, which popped the full setup wizard on every "Restart to update".)
+
+#ifdef Q_OS_WIN
+    // Where the updated app will be once the bootstrapper has run.
+    //
+    // For a normal install that is where we already are. For a PACKAGED (Store)
+    // build it is not: we are executing from a read-only WindowsApps folder
+    // that the installer cannot touch, so it installs to LOCALAPPDATA instead.
+    // Relaunching our own path there would start the OLD copy again, which
+    // would find the same update still pending and ask to install it forever.
+    QString target = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    if (runningPackaged()) {
+        target = QDir::toNativeSeparators(
+            QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+            + QStringLiteral("/Programs/NativeOffice/NativeOffice.exe"));
+    }
+
+    // Hand the work to a detached script that outlives this process.
+    //
+    // Doing it inline raced the installer against our own shutdown: Inno would
+    // start replacing files while this process still held them open. The script
+    // waits, force-kills us by pid so nothing can keep a handle (a modal dialog
+    // is enough to stall a polite quit), runs the installer silently, then
+    // starts the updated app. It deletes itself last.
+    //
+    // A .bat rather than a long cmd /C string because the paths contain spaces
+    // and quotes, and Qt's argument quoting mangles nested quoting on Windows.
+    const QString bat = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                            .filePath(QStringLiteral("nativeoffice-update.bat"));
+    QFile f(bat);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        const QString script =
+            QStringLiteral(
+                "@echo off\r\n"
+                "ping 127.0.0.1 -n 3 >nul\r\n"
+                "taskkill /F /PID %1 >nul 2>&1\r\n"
+                "ping 127.0.0.1 -n 2 >nul\r\n"
+                "\"%2\" /VERYSILENT /NORESTART\r\n"
+                "ping 127.0.0.1 -n 2 >nul\r\n"
+                "start \"\" \"%3\"\r\n"
+                "del \"%~f0\"\r\n")
+                .arg(QCoreApplication::applicationPid())
+                .arg(QDir::toNativeSeparators(m_installerPath))
+                .arg(target);
+        f.write(script.toLocal8Bit());
+        f.close();
+        QProcess::startDetached(QStringLiteral("cmd.exe"),
+                                { QStringLiteral("/C"), QDir::toNativeSeparators(bat) });
+    } else {
+        // Could not stage the script: fall back to the direct call rather than
+        // leaving the user with a downloaded update and no way to apply it.
+        QProcess::startDetached(m_installerPath, { QStringLiteral("/VERYSILENT"),
+                                                   QStringLiteral("/NORESTART") });
+    }
+#else
     QProcess::startDetached(m_installerPath, { "/VERYSILENT", "/NORESTART" });
+#endif
     QCoreApplication::quit();
 }
 
