@@ -15,6 +15,8 @@
 #include "StructuredDataDialog.h"
 #include "DataCleanser.h"
 #include "DataCleanserPanel.h"
+#include "SheetSql.h"
+#include "SheetSqlPanel.h"
 #include "core/auth/AuthManager.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
@@ -2106,6 +2108,8 @@ void CalcModule::buildRibbon() {
         QHBoxLayout* dt = group(pl, "Data Tools");
         act(dt, "clear", "Data\nCleanser", "Trim, de-duplicate, standardize dates, extract emails and URLs",
             [this]{ showDataCleanser(); });
+        act(dt, "calc-sheet", "SQL", "Query your sheets with SQL",
+            [this]{ showSqlPanel(); });
         act(dt, "highlight-dup", "Highlight\nDup.", "Highlight duplicate values in the selection", [this]{ highlightDuplicates(); });
         act(dt, "manage-dup",    "Remove\nDup.",    "Remove duplicate rows", [this]{ removeDuplicates(); });
         act(dt, "text-columns",  "Text to\nCols",   "Split the active column by a delimiter", [this]{ textToColumns(); });
@@ -3922,6 +3926,164 @@ void CalcModule::runCleanserOp(DataCleanser::Op op) {
     m_model->applyCellEdits(edits, name);
     m_cleanserPanel->setStatus(res.summary, false);
     showToast(res.summary);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SQL on Sheets (see SheetSql.h)
+// ═════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+// Every sheet that has something in it, flattened into the engine's shape.
+// The top used row is the header and everything below it is data, matching how
+// the Markdown/JSON exporters and the cleanser already read a sheet.
+QVector<SheetSql::SourceSheet> collectSheets(const QVector<SpreadsheetModel*>& models) {
+    QVector<SheetSql::SourceSheet> out;
+    for (SpreadsheetModel* m : models) {
+        int c1, r1, c2, r2;
+        if (!usedRange(m, c1, r1, c2, r2)) continue;
+
+        SheetSql::SourceSheet s;
+        s.name = m->sheetName();
+        if (s.name.isEmpty()) continue;
+        for (int c = c1; c <= c2; ++c) s.headers << m->displayValue(c, r1);
+
+        for (int row = r1 + 1; row <= r2; ++row) {
+            QStringList vals;
+            bool anything = false;
+            for (int c = c1; c <= c2; ++c) {
+                const QString v = m->displayValue(c, row);
+                if (!v.isEmpty()) anything = true;
+                vals << v;
+            }
+            if (anything) s.rows.append(vals);   // blank rows are spacing, not data
+        }
+        out.append(s);
+    }
+    return out;
+}
+
+} // namespace
+
+void CalcModule::showSqlPanel() {
+    if (!m_sqlPanel) {
+        auto* p = new SheetSqlPanel(this);
+        m_sqlPanel = p;
+        connect(p, &SheetSqlPanel::runRequested, this, &CalcModule::runSqlQuery);
+        connect(p, &SheetSqlPanel::sendToSheetRequested, this, &CalcModule::sendSqlResultToSheet);
+        connect(p, &SheetSqlPanel::closeRequested, this, [this] {
+            if (!m_sqlPanel) return;
+            SheetSqlPanel* dead = m_sqlPanel;
+            m_sqlPanel = nullptr;
+            m_sqlResult = SheetSql::ResultTable{};
+            dead->deleteLater();
+        });
+        const int pw = std::min(720, std::max(420, width() - 80));
+        const int ph = std::min(460, std::max(320, height() - 120));
+        p->setGeometry(std::max(8, (width() - pw) / 2),
+                       std::max(8, height() - ph - 40), pw, ph);
+    }
+
+    // Show the table names exactly as they must be typed, quoting the ones that
+    // are not bare identifiers, so "Q1 Sales" does not look like a syntax error.
+    QStringList names;
+    for (const SheetSql::SourceSheet& s : collectSheets(m_sheets)) {
+        static const QRegularExpression bare(QStringLiteral("^[A-Za-z_][A-Za-z0-9_]*$"));
+        names << (bare.match(s.name).hasMatch() ? s.name : SheetSql::quoteIdentifier(s.name));
+    }
+    m_sqlPanel->setAvailableTables(names);
+    m_sqlPanel->show();
+    m_sqlPanel->raise();
+}
+
+void CalcModule::runSqlQuery() {
+    if (!m_sqlPanel) return;
+    const QString sql = m_sqlPanel->query().trimmed();
+    if (sql.isEmpty()) { m_sqlPanel->setStatus(tr("Type a query first."), true); return; }
+
+    const QVector<SheetSql::SourceSheet> sheets = collectSheets(m_sheets);
+    if (sheets.isEmpty()) {
+        m_sqlPanel->setStatus(tr("There is no data to query yet."), true);
+        return;
+    }
+
+    // Entitlement is decided from the query's shape BEFORE it runs, so a gated
+    // query costs nothing and nothing half-happens.
+    const SheetSql::QueryInfo info = SheetSql::analyze(sql, sheets);
+    if (!info.valid) { m_sqlPanel->setStatus(info.reason, true); return; }
+
+    if (info.multiTable && !requirePremiumFor(tr("Multi-sheet JOIN queries"))) {
+        m_sqlPanel->setStatus(
+            tr("Queries across more than one sheet need Premium. Single-sheet "
+               "SELECT, WHERE, ORDER BY and aggregates are free."), true);
+        return;
+    }
+    if (info.rowsInvolved > SheetSql::kFreeRowLimit
+        && !requirePremiumFor(tr("Queries over large sheets"))) {
+        m_sqlPanel->setStatus(
+            tr("This query touches %1 rows. The free tier covers up to %2.")
+                .arg(info.rowsInvolved).arg(SheetSql::kFreeRowLimit), true);
+        return;
+    }
+
+    const SheetSql::QueryResult res = SheetSql::run(sheets, sql);
+    if (!res.ok()) {
+        m_sqlResult = SheetSql::ResultTable{};
+        m_sqlPanel->clearResult();
+        m_sqlPanel->setStatus(res.error, true);
+        return;
+    }
+    m_sqlResult = res.table;
+    m_sqlPanel->showResult(res.table, res.truncatedTo);
+}
+
+void CalcModule::sendSqlResultToSheet() {
+    if (!m_sqlPanel || m_sqlResult.headers.isEmpty()) return;
+
+    // Unique name, so repeated runs do not collide with an existing sheet.
+    QString name;
+    for (int n = 1; ; ++n) {
+        name = QStringLiteral("Query%1").arg(n);
+        if (!sheetByName(name)) break;
+    }
+    addSheet(name);                       // also switches to it, so m_model is the new sheet
+
+    const int maxRows = SpreadsheetModel::NUM_ROWS;
+    const int maxCols = SpreadsheetModel::NUM_COLS;
+
+    std::vector<std::pair<QPoint, Cell>> edits;
+    for (int c = 0; c < m_sqlResult.headers.size() && c < maxCols; ++c) {
+        Cell cell;
+        cell.content = m_sqlResult.headers.at(c);
+        cell.format.bold = true;
+        edits.push_back({ QPoint(c, 0), cell });
+    }
+    int written = 0;
+    for (int r = 0; r < m_sqlResult.rows.size() && r + 1 < maxRows; ++r) {
+        const QStringList& row = m_sqlResult.rows.at(r);
+        for (int c = 0; c < row.size() && c < maxCols; ++c) {
+            Cell cell;
+            // A value beginning with '=' is data, not a formula to evaluate.
+            cell.content = row.at(c).startsWith(QLatin1Char('='))
+                               ? QLatin1Char('\'') + row.at(c) : row.at(c);
+            edits.push_back({ QPoint(c, r + 1), cell });
+        }
+        ++written;
+    }
+    if (!edits.empty()) m_model->applyCellEdits(edits, QStringLiteral("SQL Result"));
+
+    const int droppedRows = m_sqlResult.rows.size() - written;
+    const int droppedCols = qMax(0, m_sqlResult.headers.size() - maxCols);
+    QString msg = tr("Wrote %1 row(s) to %2.").arg(written).arg(name);
+    if (droppedRows > 0 || droppedCols > 0) {
+        msg += QLatin1Char(' ') + tr("The sheet is %1 x %2, so %3 row(s) and %4 column(s) "
+                                     "did not fit.")
+                                      .arg(maxRows).arg(maxCols).arg(droppedRows).arg(droppedCols);
+        m_sqlPanel->setStatus(msg, true);
+    } else {
+        m_sqlPanel->setStatus(msg, false);
+    }
+    showToast(msg);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

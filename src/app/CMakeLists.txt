@@ -73,8 +73,14 @@ if(WIN32)
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt
                  HINTS "${Qt6_DIR}/../../../bin")
     if(WINDEPLOYQT_EXECUTABLE)
+        # Linking Qt6::Sql (SQL on Sheets) makes windeployqt stage every SQL
+        # driver plugin it can find: Oracle, ODBC, PostgreSQL, InterBase and
+        # Mimer, about 580 KB of database clients this app has no way to reach.
+        # Only the bundled SQLite driver is ever loaded, so the rest are
+        # excluded by name rather than shipped and ignored.
         add_custom_command(TARGET NativeOffice POST_BUILD
             COMMAND "${WINDEPLOYQT_EXECUTABLE}" --no-translations
+                    --exclude-plugins qsqlibase,qsqlmimer,qsqloci,qsqlodbc,qsqlpsql
                     "$<TARGET_FILE:NativeOffice>"
             COMMENT "windeployqt: staging Qt runtime next to NativeOffice.exe")
     endif()

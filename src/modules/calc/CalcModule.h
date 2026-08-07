@@ -38,6 +38,7 @@
 #include "Cell.h"
 #include "ChartSpec.h"
 #include "DataCleanser.h"   // for the Op enum in the slot signature
+#include "SheetSql.h"       // for ResultTable held as a member
 
 class QTableView;
 class QLineEdit;
@@ -159,6 +160,13 @@ private slots:
     void runCleanserOp(NativeOffice::DataCleanser::Op op);
     // Shows the upsell and returns false when the account is not entitled.
     bool requirePremiumFor(const QString& featureName);
+
+    // ── SQL on Sheets (SheetSql.h) ────────────────────────────────────────────
+    // Single-sheet SELECT is free. Multi-sheet JOINs, and queries touching more
+    // rows than SheetSql::kFreeRowLimit, are Premium.
+    void showSqlPanel();
+    void runSqlQuery();
+    void sendSqlResultToSheet();
 
     // ── Find / Replace ───────────────────────────────────────────────────────
     void showFindDialog();
@@ -432,6 +440,10 @@ private:
     // ── Data-export & conditional-formatting state ────────────────────────────
     QWidget* m_pandasPanel { nullptr };   // live pandas-code panel (file-local type)
     class DataCleanserPanel* m_cleanserPanel { nullptr };
+    class SheetSqlPanel*     m_sqlPanel      { nullptr };
+    // Last successful query result, held so "put results in a new sheet" does
+    // not have to re-run the query (and cannot disagree with what is on screen).
+    NativeOffice::SheetSql::ResultTable m_sqlResult;
     QDialog* m_condDialog  { nullptr };   // conditional-formatting manager dialog
     QLabel*  m_toast       { nullptr };   // transient snackbar label
 

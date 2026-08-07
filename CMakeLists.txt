@@ -35,6 +35,9 @@ find_package(Qt6 REQUIRED COMPONENTS
     PrintSupport
     Charts
     Network
+    # SQL on Sheets (src/modules/calc/SheetSql.*) only. Adds 2.19 MB to the
+    # package: Qt6Sql.dll plus the bundled SQLite driver plugin.
+    Sql
 )
 
 qt_standard_project_setup()

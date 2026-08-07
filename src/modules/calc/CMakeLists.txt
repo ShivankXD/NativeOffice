@@ -31,6 +31,13 @@ add_library(CalcModule STATIC
     DataCleanser.h
     DataCleanserPanel.cpp
     DataCleanserPanel.h
+    # SQL on Sheets. The only feature here that costs a new Qt module
+    # (Qt6::Sql below): delete these four files, the showSqlPanel/runSqlQuery/
+    # sendSqlResultToSheet calls in CalcModule, and that link entry.
+    SheetSql.cpp
+    SheetSql.h
+    SheetSqlPanel.cpp
+    SheetSqlPanel.h
 )
 
 target_include_directories(CalcModule PUBLIC
@@ -45,4 +52,11 @@ target_link_libraries(CalcModule PUBLIC
     Qt6::Svg
     Qt6::Charts
     Qt6::PrintSupport
+    # SQL on Sheets only. Costs 2.19 MB in the shipped package: Qt6Sql.dll
+    # (304 KB) plus the bundled SQLite driver plugin qsqlite.dll (1,936 KB).
+    # See the header comment in SheetSql.h for why that was preferred to a
+    # hand-written SQL subset. Note the packaging step must ship ONLY the
+    # sqlite driver: the other sqldrivers plugins add ~5 MB of database clients
+    # nothing here can use.
+    Qt6::Sql
 )
