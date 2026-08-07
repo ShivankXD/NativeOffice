@@ -21,6 +21,10 @@ add_library(NativeOfficeCore STATIC
     watermark/WatermarkPdf.h
     watermark/WatermarkOoxml.cpp
     watermark/WatermarkOoxml.h
+    # Local version history. Generic key/value snapshot store, so Calc and
+    # Writer can both use it; only Calc is wired up so far.
+    history/DocHistory.cpp
+    history/DocHistory.h
 )
 
 target_include_directories(NativeOfficeCore PUBLIC

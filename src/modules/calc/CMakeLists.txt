@@ -38,6 +38,10 @@ add_library(CalcModule STATIC
     SheetSql.h
     SheetSqlPanel.cpp
     SheetSqlPanel.h
+    # Version history UI. The store itself lives in core/history/DocHistory
+    # so Writer can share it.
+    CalcHistoryPanel.cpp
+    CalcHistoryPanel.h
 )
 
 target_include_directories(CalcModule PUBLIC

@@ -17,7 +17,9 @@
 #include "DataCleanserPanel.h"
 #include "SheetSql.h"
 #include "SheetSqlPanel.h"
+#include "CalcHistoryPanel.h"
 #include "core/auth/AuthManager.h"
+#include "core/history/DocHistory.h"
 #include "core/theme/ThemeManager.h"
 #include "core/common/BrandBar.h"
 #include "core/watermark/WatermarkPdf.h"
@@ -2110,6 +2112,8 @@ void CalcModule::buildRibbon() {
             [this]{ showDataCleanser(); });
         act(dt, "calc-sheet", "SQL", "Query your sheets with SQL",
             [this]{ showSqlPanel(); });
+        act(dt, "auto-backup", "Version\nHistory", "Save, restore and compare versions of this workbook",
+            [this]{ showHistoryPanel(); });
         act(dt, "highlight-dup", "Highlight\nDup.", "Highlight duplicate values in the selection", [this]{ highlightDuplicates(); });
         act(dt, "manage-dup",    "Remove\nDup.",    "Remove duplicate rows", [this]{ removeDuplicates(); });
         act(dt, "text-columns",  "Text to\nCols",   "Split the active column by a delimiter", [this]{ textToColumns(); });
@@ -4084,6 +4088,194 @@ void CalcModule::sendSqlResultToSheet() {
         m_sqlPanel->setStatus(msg, false);
     }
     showToast(msg);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Version history (see core/history/DocHistory.h)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Workbook -> the generic key/value model. One key per non-empty cell, named
+// "SheetName!col,row", so a delta between two versions is literally the set of
+// cells that changed and the diff view can name each one.
+//
+// Empty cells are omitted rather than stored blank: a 100x26 grid is 2,600
+// cells and all but a handful are usually empty, so storing them would make
+// every snapshot the same large size and defeat the point of deltas.
+DocSnapshot CalcModule::workbookSnapshot() const {
+    DocSnapshot snap;
+    for (SpreadsheetModel* m : m_sheets) {
+        const QString sheet = m->sheetName();
+        const auto& cells = m->cells();
+        for (auto it = cells.begin(); it != cells.end(); ++it) {
+            const Cell& cell = it->second;
+            if (cell.content.isEmpty()) continue;
+            snap.insert(QStringLiteral("%1!%2,%3")
+                            .arg(sheet)
+                            .arg(SpreadsheetModel::keyCol(it->first))
+                            .arg(SpreadsheetModel::keyRow(it->first)),
+                        cell.content);
+        }
+        // A sheet with no content still has to exist after a restore, so it is
+        // recorded explicitly rather than inferred from the cell keys.
+        snap.insert(QStringLiteral("%1!#sheet").arg(sheet), QStringLiteral("1"));
+    }
+    return snap;
+}
+
+void CalcModule::applyWorkbookSnapshot(const DocSnapshot& snap) {
+    static const QRegularExpression keyRe(QStringLiteral("^(.*)!(\\d+),(\\d+)$"));
+
+    // Group the snapshot by sheet first, so each sheet is written once.
+    QHash<QString, QVector<QPair<QPoint, QString>>> bySheet;
+    QStringList sheetOrder;
+    for (auto it = snap.begin(); it != snap.end(); ++it) {
+        if (it.key().endsWith(QStringLiteral("!#sheet"))) {
+            const QString name = it.key().left(it.key().size() - 7);
+            if (!sheetOrder.contains(name)) sheetOrder << name;
+            continue;
+        }
+        const auto m = keyRe.match(it.key());
+        if (!m.hasMatch()) continue;
+        const QString name = m.captured(1);
+        if (!sheetOrder.contains(name)) sheetOrder << name;
+        bySheet[name].append({ QPoint(m.captured(2).toInt(), m.captured(3).toInt()), it.value() });
+    }
+
+    for (const QString& name : sheetOrder) {
+        SpreadsheetModel* model = sheetByName(name);
+        if (!model) { createSheet(name); model = sheetByName(name); }
+        if (!model) continue;
+
+        // Clear then rewrite, as one undoable step per sheet: a restore that
+        // could not be undone would be its own way of losing work.
+        std::vector<std::pair<QPoint, Cell>> edits;
+        const auto& existing = model->cells();
+        for (auto it = existing.begin(); it != existing.end(); ++it) {
+            if (it->second.content.isEmpty()) continue;
+            edits.push_back({ QPoint(SpreadsheetModel::keyCol(it->first),
+                                     SpreadsheetModel::keyRow(it->first)), Cell{} });
+        }
+        for (const auto& cv : bySheet.value(name)) {
+            Cell cell = model->cellAt(cv.first.x(), cv.first.y());
+            cell.content = cv.second;
+            edits.push_back({ cv.first, cell });
+        }
+        if (!edits.empty()) model->applyCellEdits(edits, QStringLiteral("Restore Version"));
+    }
+    refreshChartsData();
+    markDirty();
+}
+
+void CalcModule::showHistoryPanel() {
+    if (!m_historyPanel) {
+        auto* p = new CalcHistoryPanel(this);
+        m_historyPanel = p;
+        connect(p, &CalcHistoryPanel::commitRequested,   this, &CalcModule::commitVersion);
+        connect(p, &CalcHistoryPanel::rollbackRequested, this, &CalcModule::rollbackToVersion);
+        connect(p, &CalcHistoryPanel::compareRequested,  this, &CalcModule::compareVersions);
+        connect(p, &CalcHistoryPanel::closeRequested, this, [this] {
+            if (!m_historyPanel) return;
+            CalcHistoryPanel* dead = m_historyPanel;
+            m_historyPanel = nullptr;
+            dead->deleteLater();
+        });
+        const int pw = std::min(640, std::max(400, width() - 80));
+        const int ph = std::min(560, std::max(360, height() - 100));
+        p->setGeometry(std::max(8, (width() - pw) / 2), 60, pw, ph);
+    }
+
+    DocHistory hist(currentFilePath());
+    if (!hist.isUsable()) {
+        m_historyPanel->setVersions({});
+        m_historyPanel->setStatus(hist.lastError(), true);
+    } else {
+        m_historyPanel->setVersions(hist.snapshots());
+    }
+    m_historyPanel->show();
+    m_historyPanel->raise();
+}
+
+void CalcModule::commitVersion() {
+    if (!m_historyPanel) return;
+    DocHistory hist(currentFilePath());
+    if (!hist.isUsable()) { m_historyPanel->setStatus(hist.lastError(), true); return; }
+
+    const int id = hist.commit(workbookSnapshot(), m_historyPanel->message());
+    if (id < 0) { m_historyPanel->setStatus(hist.lastError(), true); return; }
+    if (id == 0) {
+        m_historyPanel->setStatus(tr("Nothing has changed since the last version."), false);
+        return;
+    }
+    m_historyPanel->clearMessage();
+    m_historyPanel->setVersions(hist.snapshots());
+    m_historyPanel->setStatus(tr("Saved version %1.").arg(id), false);
+    showToast(tr("Version %1 saved.").arg(id));
+}
+
+void CalcModule::rollbackToVersion() {
+    if (!m_historyPanel) return;
+    const QVector<int> ids = m_historyPanel->selectedIds();
+    if (ids.size() != 1) {
+        m_historyPanel->setStatus(tr("Select exactly one version to restore."), true);
+        return;
+    }
+    DocHistory hist(currentFilePath());
+    if (!hist.isUsable()) { m_historyPanel->setStatus(hist.lastError(), true); return; }
+
+    // Restoring overwrites what is on screen, so it is confirmed. The current
+    // state is committed first, which means the restore is itself reversible.
+    const auto btn = QMessageBox::question(this, tr("Restore version"),
+        tr("Replace the current contents with version %1?\n\n"
+           "The document as it is now is saved as a version first, so you can "
+           "come back to it.").arg(ids.first()),
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (btn != QMessageBox::Yes) return;
+
+    hist.commit(workbookSnapshot(), tr("Before restoring v%1").arg(ids.first()));
+
+    bool ok = false;
+    const DocSnapshot snap = hist.reconstruct(ids.first(), &ok);
+    if (!ok) { m_historyPanel->setStatus(hist.lastError(), true); return; }
+
+    applyWorkbookSnapshot(snap);
+    m_historyPanel->setVersions(hist.snapshots());
+    m_historyPanel->clearDiff();
+    m_historyPanel->setStatus(tr("Restored version %1.").arg(ids.first()), false);
+    showToast(tr("Restored version %1.").arg(ids.first()));
+}
+
+void CalcModule::compareVersions() {
+    if (!m_historyPanel) return;
+    if (!requirePremiumFor(tr("Visual version comparison"))) {
+        m_historyPanel->setStatus(
+            tr("Comparing versions needs Premium. Saving and restoring versions "
+               "are free and always will be."), true);
+        return;
+    }
+
+    const QVector<int> ids = m_historyPanel->selectedIds();
+    if (ids.isEmpty() || ids.size() > 2) {
+        m_historyPanel->setStatus(
+            tr("Select one version to compare with the document as it is now, "
+               "or two to compare with each other."), true);
+        return;
+    }
+    DocHistory hist(currentFilePath());
+    if (!hist.isUsable()) { m_historyPanel->setStatus(hist.lastError(), true); return; }
+
+    bool ok = false;
+    QVector<DocChange> changes;
+    QString caption;
+    if (ids.size() == 1) {
+        changes = hist.diffAgainst(ids.first(), workbookSnapshot(), &ok);
+        caption = tr("v%1 compared with the document now:").arg(ids.first());
+    } else {
+        changes = hist.diff(ids.first(), ids.last(), &ok);
+        caption = tr("v%1 compared with v%2:").arg(ids.first()).arg(ids.last());
+    }
+    if (!ok) { m_historyPanel->setStatus(hist.lastError(), true); return; }
+    m_historyPanel->showDiff(changes, caption);
+    m_historyPanel->setStatus(QString(), false);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -39,6 +39,7 @@
 #include "ChartSpec.h"
 #include "DataCleanser.h"   // for the Op enum in the slot signature
 #include "SheetSql.h"       // for ResultTable held as a member
+#include "core/history/DocHistory.h"   // for DocSnapshot in the signatures
 
 class QTableView;
 class QLineEdit;
@@ -167,6 +168,18 @@ private slots:
     void showSqlPanel();
     void runSqlQuery();
     void sendSqlResultToSheet();
+
+    // ── Version history (core/history/DocHistory.h) ───────────────────────────
+    // Saving a version and restoring one are FREE: losing work is what a user
+    // needs protecting from, and charging for "give me my document back" would
+    // be indefensible. Only the visual diff is Premium.
+    void showHistoryPanel();
+    void commitVersion();
+    void rollbackToVersion();
+    void compareVersions();
+    // Maps the workbook onto DocHistory's generic key/value model, and back.
+    [[nodiscard]] NativeOffice::DocSnapshot workbookSnapshot() const;
+    void applyWorkbookSnapshot(const NativeOffice::DocSnapshot& snap);
 
     // ── Find / Replace ───────────────────────────────────────────────────────
     void showFindDialog();
@@ -441,6 +454,7 @@ private:
     QWidget* m_pandasPanel { nullptr };   // live pandas-code panel (file-local type)
     class DataCleanserPanel* m_cleanserPanel { nullptr };
     class SheetSqlPanel*     m_sqlPanel      { nullptr };
+    class CalcHistoryPanel*  m_historyPanel  { nullptr };
     // Last successful query result, held so "put results in a new sheet" does
     // not have to re-run the query (and cannot disagree with what is on screen).
     NativeOffice::SheetSql::ResultTable m_sqlResult;
