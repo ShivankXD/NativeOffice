@@ -12,6 +12,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QPlainTextEdit>
+#include <QTextCursor>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTimer>
@@ -36,7 +37,29 @@ StructuredDataDialog::StructuredDataDialog(int maxRows, int maxCols, QWidget* pa
     , m_maxCols(maxCols)
 {
     setWindowTitle(tr("Import JSON / YAML"));
-    setMinimumSize(720, 560);
+    setMinimumSize(760, 620);
+    resize(880, 700);
+
+    // Explicit colours rather than inheriting the app sheet: the editor was
+    // rendering low-contrast grey on dark, which is what made pasted text look
+    // like it had not arrived at all.
+    setStyleSheet(R"(
+        QLabel { color:#C7CEDC; font:12px 'Segoe UI'; }
+        QLabel#section { color:#8A93A6; font:600 12px 'Segoe UI'; }
+        QPlainTextEdit { background:#0E131B; border:1px solid #2A3446; border-radius:6px;
+            color:#E6E9F0; font:13px 'Consolas','Courier New'; padding:8px;
+            selection-background-color:#2E4A7D; }
+        QTableWidget { background:#0E131B; border:1px solid #242D3C; border-radius:6px;
+            color:#D6DBE6; gridline-color:#20293A; font:12px 'Segoe UI'; }
+        QHeaderView::section { background:#1B2331; color:#9AA4B8; border:none;
+            border-right:1px solid #242D3C; padding:5px 8px; font:600 11px 'Segoe UI'; }
+        QComboBox { background:#161C27; border:1px solid #2A3446; border-radius:6px;
+            color:#E6E9F0; padding:5px 9px; }
+        QPushButton { background:#1B2331; border:1px solid #2A3446; border-radius:7px;
+            color:#E6E9F0; font:600 12px 'Segoe UI'; padding:7px 14px; }
+        QPushButton:hover { background:#222C3D; border:1px solid #38455C; }
+        QCheckBox { color:#C7CEDC; font:12px 'Segoe UI'; }
+    )");
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(16, 16, 16, 12);
@@ -70,15 +93,22 @@ StructuredDataDialog::StructuredDataDialog(int maxRows, int maxCols, QWidget* pa
            "dot-notation columns (address.city), and nested lists become "
            "indexed columns (tags.0, tags.1)."));
     m_input->setTabChangesFocus(true);
+    m_input->setMinimumHeight(190);
     v->addWidget(m_input, 3);
 
     // ── Preview ──────────────────────────────────────────────────────────────
-    v->addWidget(new QLabel(tr("Preview"), this));
+    auto* pv = new QLabel(tr("Preview"), this);
+    pv->setObjectName(QStringLiteral("section"));
+    v->addWidget(pv);
     m_preview = new QTableWidget(this);
     m_preview->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_preview->setSelectionMode(QAbstractItemView::NoSelection);
     m_preview->horizontalHeader()->setDefaultSectionSize(120);
     m_preview->verticalHeader()->setDefaultSectionSize(22);
+    // Row numbers here are the preview's own count, not the sheet's, so they
+    // are noise; hiding them also removes the stray narrow column on the left.
+    m_preview->verticalHeader()->setVisible(false);
+    m_preview->setMinimumHeight(150);
     v->addWidget(m_preview, 4);
 
     m_status = new QLabel(this);
@@ -95,6 +125,11 @@ StructuredDataDialog::StructuredDataDialog(int maxRows, int maxCols, QWidget* pa
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(pasteBtn, &QPushButton::clicked, this, [this] {
         m_input->setPlainText(QGuiApplication::clipboard()->text());
+        // Land at the top. setPlainText leaves the cursor at the end, which
+        // scrolls a long document past its own opening lines and makes it look
+        // like the wrong thing was pasted.
+        m_input->moveCursor(QTextCursor::Start);
+        m_input->ensureCursorVisible();
     });
     connect(m_format, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) { reparse(); });
@@ -163,8 +198,12 @@ void StructuredDataDialog::reparse() {
 
     const int droppedCols = m_parsed.headers.size() - m_clamped.headers.size();
     const int droppedRows = m_parsed.rows.size()    - m_clamped.rows.size();
-    QString msg = tr("%1 rows, %2 columns.")
-                      .arg(m_clamped.rows.size()).arg(m_clamped.headers.size());
+    // Lead with how it was READ. When the grid is a surprise, that sentence is
+    // the difference between "this is broken" and "ah, it saw a single record".
+    QString msg = res.shape.isEmpty()
+        ? tr("%1 rows, %2 columns.").arg(m_clamped.rows.size()).arg(m_clamped.headers.size())
+        : tr("Read as %1: %2 rows, %3 columns.")
+              .arg(res.shape).arg(m_clamped.rows.size()).arg(m_clamped.headers.size());
     if (droppedCols > 0 || droppedRows > 0) {
         QStringList lost;
         if (droppedRows > 0) lost << tr("%1 rows").arg(droppedRows);
@@ -192,6 +231,13 @@ void StructuredDataDialog::updatePreview() {
         for (int c = 0; c < cols; ++c)
             m_preview->setItem(r, c, new QTableWidgetItem(c < row.size() ? row.at(c) : QString()));
     }
+
+    // Size columns to their contents, then cap. A fixed width truncated the
+    // header text ("preadsheet.columns.l"), which is exactly when the user most
+    // needs to read it, and a long cell should not be able to push the rest off.
+    m_preview->resizeColumnsToContents();
+    for (int c = 0; c < cols; ++c)
+        m_preview->setColumnWidth(c, qBound(70, m_preview->columnWidth(c) + 12, 260));
 }
 
 } // namespace NativeOffice

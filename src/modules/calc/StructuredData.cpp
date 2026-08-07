@@ -97,8 +97,157 @@ void flattenInto(const QJsonValue& v, const QString& prefix,
     out.insert(key, textFromScalar(v));
 }
 
-// Turn a parsed document into a Table.
-Table tableFromJson(const QJsonValue& root) {
+// ── Finding the table inside the document ───────────────────────────────────
+// Real-world JSON almost never arrives as a bare array of records. It is
+// wrapped ({"data": [...]}), or it spells the table out explicitly
+// ({"columns": [...], "rows": [[...]]}), or it is a plain matrix of arrays.
+// Flattening those with the record rules gives one very wide row of
+// dot-indexed columns, which is technically what the rules say and useless in
+// practice, so the shape is worked out first.
+
+const QStringList& columnKeyNames() {
+    static const QStringList k{ QStringLiteral("columns"), QStringLiteral("headers"),
+                                QStringLiteral("fields"),  QStringLiteral("cols") };
+    return k;
+}
+const QStringList& rowKeyNames() {
+    static const QStringList k{ QStringLiteral("rows"), QStringLiteral("data"),
+                                QStringLiteral("values"), QStringLiteral("records") };
+    return k;
+}
+
+// Case-insensitive lookup of the first key matching any of `names`.
+QJsonValue valueForAnyKey(const QJsonObject& o, const QStringList& names) {
+    for (auto it = o.begin(); it != o.end(); ++it)
+        for (const QString& n : names)
+            if (it.key().compare(n, Qt::CaseInsensitive) == 0) return it.value();
+    return {};
+}
+
+// {columns:[...], rows:[...]} , under any of the accepted key spellings.
+bool looksLikeColumnsRows(const QJsonObject& o) {
+    const QJsonValue cols = valueForAnyKey(o, columnKeyNames());
+    const QJsonValue rows = valueForAnyKey(o, rowKeyNames());
+    if (!cols.isArray() || !rows.isArray()) return false;
+    // The columns entry has to be a list of plain names, or this is something
+    // else that happens to use the word "columns".
+    for (const QJsonValue& c : cols.toArray())
+        if (c.isObject() || c.isArray()) return false;
+    return true;
+}
+
+// Peel wrappers off until the actual payload is reached.
+QJsonValue unwrapToPayload(QJsonValue v) {
+    // Bounded rather than while(true): malformed or deeply nested input must
+    // not be able to spin here.
+    for (int depth = 0; depth < 8; ++depth) {
+        if (!v.isObject()) break;
+        const QJsonObject o = v.toObject();
+        if (o.isEmpty() || looksLikeColumnsRows(o)) break;   // this IS the payload
+
+        // A single key wrapping an object or array is packaging, not data:
+        // {"spreadsheet": {...}} , {"result": [...]}.
+        if (o.size() == 1) {
+            const QJsonValue inner = o.begin().value();
+            if (inner.isObject() || inner.isArray()) { v = inner; continue; }
+            break;
+        }
+
+        // Several keys where exactly one holds a non-empty array: that array is
+        // the table and the siblings are metadata ({"count": 4, "items": [...]}).
+        QJsonValue only;
+        int arrays = 0;
+        for (auto it = o.begin(); it != o.end(); ++it) {
+            if (it.value().isArray() && !it.value().toArray().isEmpty()) {
+                only = it.value();
+                ++arrays;
+            }
+        }
+        if (arrays == 1) { v = only; continue; }
+        break;
+    }
+    return v;
+}
+
+// Explicit {columns, rows}. Rows may be arrays (positional) or objects (keyed
+// by column name); both appear in the wild.
+Table tableFromColumnsRows(const QJsonObject& o) {
+    Table t;
+    for (const QJsonValue& c : valueForAnyKey(o, columnKeyNames()).toArray())
+        t.headers << textFromScalar(c);
+
+    for (const QJsonValue& r : valueForAnyKey(o, rowKeyNames()).toArray()) {
+        QStringList row;
+        if (r.isArray()) {
+            for (const QJsonValue& cell : r.toArray()) row << textFromScalar(cell);
+        } else if (r.isObject()) {
+            const QJsonObject ro = r.toObject();
+            for (const QString& h : t.headers) row << textFromScalar(ro.value(h));
+        } else {
+            row << textFromScalar(r);
+        }
+        while (row.size() < t.headers.size()) row << QString();
+        t.rows.append(row);
+    }
+    return t;
+}
+
+// Every element is an array: a plain matrix. The first row is taken as the
+// header when it reads like one (all non-empty text, and there is at least one
+// row under it); otherwise positional names are generated so no data is lost
+// to a header that was never there.
+bool isMatrix(const QJsonArray& a) {
+    if (a.isEmpty()) return false;
+    for (const QJsonValue& v : a) if (!v.isArray()) return false;
+    return true;
+}
+
+Table tableFromMatrix(const QJsonArray& a) {
+    Table t;
+    int width = 0;
+    for (const QJsonValue& v : a) width = qMax(width, v.toArray().size());
+
+    const QJsonArray first = a.first().toArray();
+    bool headerish = a.size() > 1 && first.size() == width;
+    if (headerish)
+        for (const QJsonValue& c : first)
+            if (!c.isString() || c.toString().trimmed().isEmpty()) { headerish = false; break; }
+
+    int start = 0;
+    if (headerish) {
+        for (const QJsonValue& c : first) t.headers << c.toString();
+        start = 1;
+    } else {
+        for (int i = 0; i < width; ++i) t.headers << QStringLiteral("Column%1").arg(i + 1);
+    }
+
+    for (int i = start; i < a.size(); ++i) {
+        QStringList row;
+        for (const QJsonValue& cell : a.at(i).toArray()) row << textFromScalar(cell);
+        while (row.size() < width) row << QString();
+        t.rows.append(row);
+    }
+    return t;
+}
+
+// Turn a parsed document into a Table. `shape` reports which rule fired.
+Table tableFromJson(const QJsonValue& rootIn, QString* shape = nullptr) {
+    const QJsonValue root = unwrapToPayload(rootIn);
+    auto note = [shape](const QString& s) { if (shape) *shape = s; };
+
+    if (root.isObject() && looksLikeColumnsRows(root.toObject())) {
+        note(QStringLiteral("a table with named columns"));
+        return tableFromColumnsRows(root.toObject());
+    }
+
+    if (root.isArray() && isMatrix(root.toArray())) {
+        note(QStringLiteral("a grid of rows"));
+        return tableFromMatrix(root.toArray());
+    }
+
+    note(root.isArray() ? QStringLiteral("a list of records, one per row")
+                        : QStringLiteral("a single record, as one row"));
+
     QVector<QJsonValue> records;
     if (root.isArray()) {
         const QJsonArray a = root.toArray();
@@ -601,7 +750,7 @@ ParseResult parseJson(const QString& text) {
     }
 
     const QJsonValue root = doc.isArray() ? QJsonValue(doc.array()) : QJsonValue(doc.object());
-    res.table = tableFromJson(root);
+    res.table = tableFromJson(root, &res.shape);
     if (res.table.headers.isEmpty())
         res.error = QStringLiteral("Parsed successfully, but there were no fields to put in a table.");
     return res;
@@ -626,7 +775,7 @@ ParseResult parseYaml(const QString& text) {
     const QJsonValue root = parser.parseDocument(err);
     if (!err.message.isEmpty()) { res.error = err.message; res.line = err.line; return res; }
 
-    res.table = tableFromJson(root);
+    res.table = tableFromJson(root, &res.shape);
     if (res.table.headers.isEmpty())
         res.error = QStringLiteral("Parsed successfully, but there were no fields to put in a table.");
     return res;

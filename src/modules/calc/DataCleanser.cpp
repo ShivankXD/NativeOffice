@@ -243,21 +243,27 @@ Result removeDuplicateRows(const CellReader& read, const QRect& region, const Op
 
     QSet<QString> seen;
     QVector<QStringList> keep;
+    int duplicates = 0;
     for (int row = start; row <= region.bottom(); ++row) {
         QStringList cells;
         for (int col = region.left(); col <= region.right(); ++col)
             cells << read(col, row);
 
-        // A wholly blank row is spacing, not data; leaving it out would silently
-        // pack the region upward for reasons the user did not ask for.
+        // A wholly blank row is spacing, not data. Carry it through untouched
+        // and never compare it, so a separator between two blocks survives and
+        // two blank rows are not called duplicates of each other.
+        //
+        // This used to `continue` here, which dropped the row from `keep`
+        // entirely: Remove Duplicates silently deleted every blank row in the
+        // range and counted each one as a duplicate it had removed.
         bool blank = true;
         for (const QString& c : cells) if (!c.isEmpty()) { blank = false; break; }
-        if (blank) continue;
+        if (blank) { keep.append(cells); continue; }
 
         // Unit Separator cannot appear in cell text, so it cannot make two
         // different rows collide the way a comma or a tab could.
         const QString key = cells.join(QChar(0x1F));
-        if (seen.contains(key)) continue;
+        if (seen.contains(key)) { ++duplicates; continue; }
         seen.insert(key);
         keep.append(cells);
     }
@@ -276,11 +282,11 @@ Result removeDuplicateRows(const CellReader& read, const QRect& region, const Op
             if (!read(col, row).isEmpty())
                 res.changes.append({ col, row, QString() });
 
-    const int removed = int(keep.size()) > 0 || start <= region.bottom()
-                            ? (region.bottom() - start + 1) - int(keep.size())
-                            : 0;
-    res.summary = removed <= 0 ? QStringLiteral("No duplicate rows found.")
-                               : QStringLiteral("Removed %1 duplicate row(s).").arg(removed);
+    // Counted directly rather than derived from how many rows survived, which
+    // also folded in the blank rows and over-reported.
+    res.summary = duplicates == 0
+        ? QStringLiteral("No duplicate rows found.")
+        : QStringLiteral("Removed %1 duplicate row(s).").arg(duplicates);
     return res;
 }
 
