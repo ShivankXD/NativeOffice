@@ -67,6 +67,7 @@ private:
     QNetworkAccessManager* m_nam { nullptr };
     State   m_state { State::Idle };
     bool    m_checked { false };      // guards against a second run this session
+    bool    m_relaunching { false };  // guards against applying the update twice
     QString m_latest;                 // manifest version
     QString m_downloadUrl;            // platform installer URL
     QString m_installerPath;          // temp path of the downloaded installer

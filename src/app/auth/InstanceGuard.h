@@ -5,11 +5,16 @@
 // Two jobs:
 //   • registerProtocolScheme(): registers the nativeoffice:// URL scheme for
 //     the current user (HKCU — no admin rights needed) pointing at this exe.
-//   • Single-instance forwarding for protocol launches: when the browser
-//     launches a second instance with a nativeoffice:// argument, the URL is
-//     forwarded over a QLocalSocket to the running instance (which reacts via
-//     urlReceived) and the second instance exits. Plain file-open launches are
-//     unaffected — only protocol URLs are forwarded.
+//   • Single-instance forwarding for EVERY launch. A second process hands its
+//     request to the running one over a QLocalSocket and exits, so there is
+//     only ever one NativeOffice window:
+//        nativeoffice://…   protocol URL   -> urlReceived
+//        open\n<path>\n…    files to open  -> filesReceived (opened as tabs)
+//        activate           bare launch    -> activateRequested (raise)
+//
+//     Plain launches used to skip this entirely and start a second full app.
+//     That showed up after an update: the installer relaunches the app itself,
+//     so anything else that also launched it produced two windows.
 //
 // The protocol is a best-effort fast path; the pairing flow works purely via
 // polling even if the browser blocks the custom scheme.
@@ -30,14 +35,20 @@ public:
     // Register nativeoffice:// for the current user (Windows; no-op elsewhere).
     static void registerProtocolScheme();
 
-    // True if a primary instance accepted the URL (caller should exit).
-    bool forwardToPrimary(const QString& url);
+    // True if a primary instance accepted the payload (caller should exit).
+    bool forwardToPrimary(const QString& payload);
+
+    // Payload builders, so the wire format lives in one place.
+    static QString openFilesPayload(const QStringList& paths);
+    static QString activatePayload();
 
     // Begin listening as the primary instance.
     void startPrimary();
 
 signals:
     void urlReceived(const QString& url);
+    void filesReceived(const QStringList& paths);
+    void activateRequested();
 
 private:
     QLocalServer* m_server { nullptr };

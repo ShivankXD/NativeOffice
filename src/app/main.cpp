@@ -1393,7 +1393,7 @@ QMenuBar::item:pressed {
         QMessageBox::about(win, "About NativeOffice",
             "<h3>NativeOffice Impress</h3>"
             "<p>A high-performance, cross-platform presentation tool.</p>"
-            "<p>Version 1.6.1</p>"
+            "<p>Version 1.6.2</p>"
             "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
@@ -1704,7 +1704,7 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("1.6.1");
+    app.setApplicationVersion("1.6.2");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
@@ -1741,6 +1741,20 @@ int main(int argc, char* argv[]) {
         && guard.forwardToPrimary(protocolUrl)) {
         return 0;
     }
+
+    // Every other launch hands over to the running instance too, and exits.
+    // Without this a second process started a whole second app, which is what
+    // produced two windows after an update: the installer relaunches the app
+    // on finish, so any other launch on top of that was one too many. It also
+    // means double-clicking a file while the app is open adds a tab instead of
+    // opening a rival copy of the same document.
+    if (protocolUrl.isEmpty()) {
+        const QString payload =
+            cliFiles.isEmpty() ? NativeOffice::InstanceGuard::activatePayload()
+                               : NativeOffice::InstanceGuard::openFilesPayload(cliFiles);
+        if (guard.forwardToPrimary(payload)) return 0;
+    }
+
     guard.startPrimary();
     NativeOffice::InstanceGuard::registerProtocolScheme();
 
@@ -1865,11 +1879,30 @@ int main(int argc, char* argv[]) {
         presentEditor(createImpressWindow());
 
     auto& auth = NativeOffice::AuthManager::instance();
+    // Bring the one real window to the front. Windows will not raise a window
+    // for a process that does not own the foreground, so the minimised case is
+    // handled explicitly rather than looking like the click did nothing.
+    auto surfaceShell = [&shell] {
+        if (shell.isMinimized()) shell.showNormal();
+        shell.show();
+        shell.raise();
+        shell.activateWindow();
+    };
+
     QObject::connect(&guard, &NativeOffice::InstanceGuard::urlReceived,
-                     &auth, [&auth, &shell](const QString&) {
+                     &auth, [&auth, surfaceShell](const QString&) {
         auth.pollNow();                   // browser says approval landed
         auth.refreshEntitlement();        // ...and may carry a fresh purchase/key
-        if (shell.isVisible()) { shell.raise(); shell.activateWindow(); }
+        surfaceShell();
+    });
+
+    // A second launch handed its work over instead of starting its own app.
+    QObject::connect(&guard, &NativeOffice::InstanceGuard::activateRequested,
+                     &shell, surfaceShell);
+    QObject::connect(&guard, &NativeOffice::InstanceGuard::filesReceived,
+                     &shell, [surfaceShell](const QStringList& paths) {
+        for (const QString& p : paths) openDocumentByPath(p);
+        surfaceShell();
     });
 
     // Premium sync without continuous polling: whenever the app regains focus

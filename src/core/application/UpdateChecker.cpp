@@ -197,6 +197,10 @@ void UpdateChecker::startDownload() {
 
 void UpdateChecker::relaunchForUpdate() {
     if (m_installerPath.isEmpty() || !QFile::exists(m_installerPath)) return;
+    // Pressing the banner twice before the process dies would stage and run the
+    // script twice, and two installers racing each other end with two apps.
+    if (m_relaunching) return;
+    m_relaunching = true;
 
 #ifdef Q_OS_WIN
     // Where the updated app will be once the bootstrapper has run.
@@ -227,6 +231,18 @@ void UpdateChecker::relaunchForUpdate() {
                             .filePath(QStringLiteral("nativeoffice-update.bat"));
     QFile f(bat);
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        // The installer relaunches the app itself when it finishes, so this
+        // script must NOT also start it: doing both is what opened two windows.
+        // The app is only started here when the installer's own relaunch would
+        // bring back the WRONG copy, i.e. a packaged build, where the installer
+        // lands in LOCALAPPDATA while the Store copy we are running stays put.
+        // `start` is guarded by an existence check so a failed install cannot
+        // leave the user with nothing running.
+        const QString relaunch = runningPackaged()
+            ? QStringLiteral("ping 127.0.0.1 -n 2 >nul\r\n"
+                             "if exist \"%1\" start \"\" \"%1\"\r\n").arg(target)
+            : QString();
+
         const QString script =
             QStringLiteral(
                 "@echo off\r\n"
@@ -234,12 +250,11 @@ void UpdateChecker::relaunchForUpdate() {
                 "taskkill /F /PID %1 >nul 2>&1\r\n"
                 "ping 127.0.0.1 -n 2 >nul\r\n"
                 "\"%2\" /VERYSILENT /NORESTART\r\n"
-                "ping 127.0.0.1 -n 2 >nul\r\n"
-                "start \"\" \"%3\"\r\n"
+                "%3"
                 "del \"%~f0\"\r\n")
                 .arg(QCoreApplication::applicationPid())
                 .arg(QDir::toNativeSeparators(m_installerPath))
-                .arg(target);
+                .arg(relaunch);
         f.write(script.toLocal8Bit());
         f.close();
         QProcess::startDetached(QStringLiteral("cmd.exe"),

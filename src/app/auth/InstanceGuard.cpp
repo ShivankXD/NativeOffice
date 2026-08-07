@@ -37,13 +37,23 @@ void InstanceGuard::registerProtocolScheme() {
 #endif
 }
 
-bool InstanceGuard::forwardToPrimary(const QString& url) {
+QString InstanceGuard::openFilesPayload(const QStringList& paths) {
+    return QStringLiteral("open\n") + paths.join(QLatin1Char('\n'));
+}
+QString InstanceGuard::activatePayload() {
+    return QStringLiteral("activate");
+}
+
+bool InstanceGuard::forwardToPrimary(const QString& payload) {
     QLocalSocket sock;
     sock.connectToServer(serverName());
     if (!sock.waitForConnected(500)) return false;   // no primary running
-    sock.write(url.toUtf8());
+    sock.write(payload.toUtf8());
     sock.flush();
-    sock.waitForBytesWritten(500);
+    // Must block until the bytes are actually out: the caller exits the process
+    // immediately after this returns, and a socket torn down mid-write would
+    // lose the request and silently drop the file the user double-clicked.
+    sock.waitForBytesWritten(1000);
     sock.disconnectFromServer();
     return true;
 }
@@ -57,9 +67,16 @@ void InstanceGuard::startPrimary() {
     connect(m_server, &QLocalServer::newConnection, this, [this]() {
         while (QLocalSocket* sock = m_server->nextPendingConnection()) {
             connect(sock, &QLocalSocket::readyRead, this, [this, sock]() {
-                const QString url = QString::fromUtf8(sock->readAll()).trimmed();
-                if (url.startsWith(QLatin1String("nativeoffice://")))
-                    emit urlReceived(url);
+                const QString msg = QString::fromUtf8(sock->readAll()).trimmed();
+                if (msg.startsWith(QLatin1String("nativeoffice://"))) {
+                    emit urlReceived(msg);
+                } else if (msg.startsWith(QLatin1String("open\n"))) {
+                    QStringList paths = msg.mid(5).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+                    if (!paths.isEmpty()) emit filesReceived(paths);
+                    else                  emit activateRequested();
+                } else if (msg == QLatin1String("activate")) {
+                    emit activateRequested();
+                }
                 sock->deleteLater();
             });
             connect(sock, &QLocalSocket::disconnected,
