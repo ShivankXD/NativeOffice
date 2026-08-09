@@ -36,6 +36,7 @@
 #include <QAbstractItemView>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QResizeEvent>
 #include <QFont>
 #include <QSizePolicy>
 #include <QFrame>
@@ -3841,11 +3842,8 @@ void CalcModule::showDataCleanser() {
         p->setPremiumActive(auth.premiumActive());
         connect(&auth, &AuthManager::entitlementChanged, p,
                 [p](bool on) { p->setPremiumActive(on); });
-
-        const int pw = p->width();
-        p->setGeometry(std::max(8, width() - pw - 24), 96, pw,
-                       std::max(360, height() - 160));
     }
+    placeFloatingPanels();
     m_cleanserPanel->show();
     m_cleanserPanel->raise();
 }
@@ -3982,11 +3980,8 @@ void CalcModule::showSqlPanel() {
             m_sqlResult = SheetSql::ResultTable{};
             dead->deleteLater();
         });
-        const int pw = std::min(720, std::max(420, width() - 80));
-        const int ph = std::min(460, std::max(320, height() - 120));
-        p->setGeometry(std::max(8, (width() - pw) / 2),
-                       std::max(8, height() - ph - 40), pw, ph);
     }
+    placeFloatingPanels();
 
     // Show the table names exactly as they must be typed, quoting the ones that
     // are not bare identifiers, so "Q1 Sales" does not look like a syntax error.
@@ -4179,10 +4174,8 @@ void CalcModule::showHistoryPanel() {
             m_historyPanel = nullptr;
             dead->deleteLater();
         });
-        const int pw = std::min(640, std::max(400, width() - 80));
-        const int ph = std::min(560, std::max(360, height() - 100));
-        p->setGeometry(std::max(8, (width() - pw) / 2), 60, pw, ph);
     }
+    placeFloatingPanels();
 
     DocHistory hist(currentFilePath());
     if (!hist.isUsable()) {
@@ -4299,11 +4292,8 @@ void CalcModule::exportSelectionAsPandas() {
             m_pandasPanel = nullptr;
             if (p) p->deleteLater();
         };
-        const int pw = 460, ph = 320;
-        const int x = std::max(8, width()  - pw - 24);
-        const int y = std::max(8, height() - ph - 60);
-        w->setGeometry(x, y, pw, ph);
     }
+    placeFloatingPanels();
     updatePandasCode();
     m_pandasPanel->show();
     m_pandasPanel->raise();
@@ -4840,6 +4830,39 @@ void CalcModule::deleteSelection() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Event filter — keep the marching-ants overlay sized to the viewport.
 // ─────────────────────────────────────────────────────────────────────────────
+// Every clamp below is a max(8, ...) so a panel can never be pushed off the left
+// or top edge. Those clamps only do their job because this runs again on each
+// resize; computed once at construction they just preserve the old window's
+// geometry. See the note on the declaration in CalcModule.h.
+void CalcModule::placeFloatingPanels() {
+    if (m_cleanserPanel) {
+        const int pw = m_cleanserPanel->width();       // fixed at construction
+        m_cleanserPanel->setGeometry(std::max(8, width() - pw - 24), 96, pw,
+                                     std::max(360, height() - 160));
+    }
+    if (m_sqlPanel) {
+        const int pw = std::min(720, std::max(420, width()  - 80));
+        const int ph = std::min(460, std::max(320, height() - 120));
+        m_sqlPanel->setGeometry(std::max(8, (width() - pw) / 2),
+                                std::max(8, height() - ph - 40), pw, ph);
+    }
+    if (m_historyPanel) {
+        const int pw = std::min(640, std::max(400, width()  - 80));
+        const int ph = std::min(560, std::max(360, height() - 100));
+        m_historyPanel->setGeometry(std::max(8, (width() - pw) / 2), 60, pw, ph);
+    }
+    if (m_pandasPanel) {
+        const int pw = 460, ph = 320;
+        m_pandasPanel->setGeometry(std::max(8, width()  - pw - 24),
+                                   std::max(8, height() - ph - 60), pw, ph);
+    }
+}
+
+void CalcModule::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    placeFloatingPanels();
+}
+
 bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
     if (watched == m_tableView->viewport()) {
         switch (event->type()) {

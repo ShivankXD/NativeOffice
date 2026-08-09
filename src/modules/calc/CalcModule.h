@@ -194,12 +194,22 @@ private slots:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     void buildUi();
     void buildActions();
     void buildRibbon();
     void applyStyles();
+
+    // The Cleanser, SQL, History and pandas panels float free of any layout, so
+    // they only sit where they are put. Placing them on every open, and again on
+    // every resize, is what keeps them reachable: a panel positioned once at
+    // construction stays where the window used to be, and shrinking the window
+    // can leave it clipped entirely outside the module. Reopening cannot rescue
+    // it either, because the panel still exists and the open path would skip
+    // placement, so the ribbon button looks dead for the rest of the session.
+    void placeFloatingPanels();
 
     // ── Freeze panes ───────────────────────────────────────────────────────────
     void setFreeze(int rows, int cols);   // freeze the top 'rows' / left 'cols'
