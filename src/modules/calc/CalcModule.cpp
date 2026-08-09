@@ -4174,6 +4174,12 @@ void CalcModule::showHistoryPanel() {
             m_historyPanel = nullptr;
             dead->deleteLater();
         });
+        // Live entitlement, so buying Premium in the browser drops the badge
+        // without reopening the panel.
+        auto& auth = AuthManager::instance();
+        p->setPremiumActive(auth.premiumActive());
+        connect(&auth, &AuthManager::entitlementChanged, p,
+                [p](bool on) { p->setPremiumActive(on); });
     }
     placeFloatingPanels();
 

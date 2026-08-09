@@ -89,10 +89,11 @@ CalcHistoryPanel::CalcHistoryPanel(QWidget* parent)
     connect(rollback, &QPushButton::clicked, this, &CalcHistoryPanel::rollbackRequested);
     actions->addWidget(rollback);
 
-    auto* compare = new QPushButton(tr("Compare  (Premium)"), this);
-    compare->setCursor(Qt::PointingHandCursor);
-    connect(compare, &QPushButton::clicked, this, &CalcHistoryPanel::compareRequested);
-    actions->addWidget(compare);
+    m_compare = new QPushButton(this);
+    m_compare->setCursor(Qt::PointingHandCursor);
+    connect(m_compare, &QPushButton::clicked, this, &CalcHistoryPanel::compareRequested);
+    actions->addWidget(m_compare);
+    refreshCompareLabel();
     actions->addStretch();
     v->addLayout(actions);
 
@@ -186,6 +187,19 @@ void CalcHistoryPanel::setStatus(const QString& msg, bool isError) {
     m_status->setText(msg);
     m_status->setStyleSheet(isError ? QStringLiteral("color:#F0736A; font:12px 'Segoe UI';")
                                     : QStringLiteral("color:#7B8494; font:12px 'Segoe UI';"));
+}
+
+void CalcHistoryPanel::refreshCompareLabel() {
+    // The button stays enabled either way so the upsell can explain itself when
+    // it is pressed, which is how the Cleanser panel behaves too.
+    m_compare->setText(m_premium ? tr("Compare")
+                                 : tr("Compare  (Premium)"));
+}
+
+void CalcHistoryPanel::setPremiumActive(bool on) {
+    if (m_premium == on) return;
+    m_premium = on;
+    refreshCompareLabel();
 }
 
 } // namespace NativeOffice

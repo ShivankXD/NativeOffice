@@ -34,6 +34,12 @@ public:
     void clearDiff();
     void setStatus(const QString& msg, bool isError = false);
 
+    // Badges the Compare button, exactly as DataCleanserPanel does. The panel is
+    // told the answer and never works it out, so it cannot unlock anything; the
+    // real gate stays in CalcModule::requirePremiumFor. Without this the button
+    // read "Compare  (Premium)" even for someone who had already paid.
+    void setPremiumActive(bool on);
+
     // Ids the user has selected, oldest first. Empty when nothing is selected.
     [[nodiscard]] QVector<int> selectedIds() const;
     [[nodiscard]] QString      message() const;
@@ -46,11 +52,15 @@ signals:
     void closeRequested();
 
 private:
+    void refreshCompareLabel();
+
     QLineEdit*    m_message  { nullptr };
     QListWidget*  m_versions { nullptr };
     QTableWidget* m_diff     { nullptr };
     QLabel*       m_diffCap  { nullptr };
     QLabel*       m_status   { nullptr };
+    QPushButton*  m_compare  { nullptr };
+    bool          m_premium  { false };
 };
 
 } // namespace NativeOffice
