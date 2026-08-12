@@ -366,6 +366,103 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
         }
     }
 
+    // ── numbering.xml: numId -> per-level number format ─────────────────────
+    // Without this, numId was read as if it were a style code, on the
+    // assumption that 1 means bullet and 2 means decimal. That happens to be
+    // true of files this app writes and is true of nothing else: numId is an
+    // arbitrary reference into numbering.xml, so documents from Word came in
+    // with their numbered lists as bullets and their bullets as numbers.
+    QHash<QString, QHash<int, QString>> numFmtByNumId;   // numId -> ilvl -> numFmt
+    {
+        const QByteArray numXml = zip.fileData("word/numbering.xml");
+        if (!numXml.isEmpty()) {
+            QHash<QString, QHash<int, QString>> byAbstract;   // abstractNumId -> ilvl -> fmt
+            QHash<QString, QString> abstractOfNum;            // numId -> abstractNumId
+            QXmlStreamReader nr(numXml);
+            QString curAbstract;
+            int curLvl = 0;
+            QString curNum;
+            while (!nr.atEnd()) {
+                const auto t = nr.readNext();
+                if (t == QXmlStreamReader::StartElement) {
+                    const QStringView n = nr.name();
+                    if (n == QLatin1String("abstractNum")) {
+                        curAbstract = nr.attributes().value("w:abstractNumId").toString();
+                        curNum.clear();
+                    } else if (n == QLatin1String("num")) {
+                        curNum = nr.attributes().value("w:numId").toString();
+                        curAbstract.clear();
+                    } else if (n == QLatin1String("abstractNumId") && !curNum.isEmpty()) {
+                        abstractOfNum.insert(curNum, nr.attributes().value("w:val").toString());
+                    } else if (n == QLatin1String("lvl")) {
+                        curLvl = nr.attributes().value("w:ilvl").toInt();
+                    } else if (n == QLatin1String("numFmt") && !curAbstract.isEmpty()) {
+                        byAbstract[curAbstract].insert(
+                            curLvl, nr.attributes().value("w:val").toString());
+                    }
+                }
+            }
+            for (auto it = abstractOfNum.cbegin(); it != abstractOfNum.cend(); ++it)
+                numFmtByNumId.insert(it.key(), byAbstract.value(it.value()));
+        }
+    }
+
+    // ── styles.xml: styleId -> character formatting ─────────────────────────
+    // Heading paragraphs in a Word document carry their look in styles.xml, not
+    // on the runs. Reading only the outline level meant every styled heading
+    // arrived as plain body text.
+    QHash<QString, QTextCharFormat> styleFmt;
+    {
+        const QByteArray stylesXml = zip.fileData("word/styles.xml");
+        if (!stylesXml.isEmpty()) {
+            QXmlStreamReader sr(stylesXml);
+            QString id;
+            QTextCharFormat fmt;
+            bool inStyle = false;
+            while (!sr.atEnd()) {
+                const auto t = sr.readNext();
+                if (t == QXmlStreamReader::StartElement) {
+                    const QStringView n = sr.name();
+                    if (n == QLatin1String("style")) {
+                        id = sr.attributes().value("w:styleId").toString();
+                        fmt = QTextCharFormat();
+                        inStyle = true;
+                    } else if (inStyle) {
+                        if      (n == QLatin1String("b"))      fmt.setFontWeight(QFont::Bold);
+                        else if (n == QLatin1String("i"))      fmt.setFontItalic(true);
+                        else if (n == QLatin1String("u"))      fmt.setFontUnderline(true);
+                        else if (n == QLatin1String("strike")) fmt.setFontStrikeOut(true);
+                        else if (n == QLatin1String("sz")) {
+                            const int half = sr.attributes().value("w:val").toInt();
+                            if (half > 0) fmt.setFontPointSize(half / 2.0);
+                        } else if (n == QLatin1String("rFonts")) {
+                            const QString fam = sr.attributes().value("w:ascii").toString();
+                            if (!fam.isEmpty()) fmt.setFontFamilies({ fam });
+                        } else if (n == QLatin1String("color")) {
+                            const QString v = sr.attributes().value("w:val").toString();
+                            if (v.size() == 6 && v != QLatin1String("auto"))
+                                fmt.setForeground(QColor("#" + v));
+                        }
+                    }
+                } else if (t == QXmlStreamReader::EndElement
+                           && sr.name() == QLatin1String("style")) {
+                    if (!id.isEmpty()) styleFmt.insert(id, fmt);
+                    inStyle = false;
+                }
+            }
+        }
+    }
+
+    // Fallback sizes for the built-in heading styles, used when styles.xml does
+    // not spell the heading out (Word often relies on the theme for these).
+    auto builtinHeadingFmt = [](int lvl) {
+        QTextCharFormat f;
+        static const double pt[6] = { 20, 16, 14, 12, 11, 10 };
+        f.setFontPointSize(pt[qBound(1, lvl, 6) - 1]);
+        f.setFontWeight(QFont::Bold);
+        return f;
+    };
+
     doc->clear();
     QTextCursor cur(doc);
     cur.beginEditBlock();
@@ -382,8 +479,15 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
 
         QTextBlockFormat bf;
         bf.setHeadingLevel(0);   // explicit, so a new block never inherits a heading
+        // A block inserted with no format copies the previous block's, which
+        // includes its list membership. Every paragraph after a list therefore
+        // silently joined it, which is why numbering ran on past the end of a
+        // list and picked up following headings.
+        bf.setObjectIndex(-1);
+        bf.setIndent(0);
         QTextCharFormat baseFmt;
         QString listFmt;
+        QString styleId;
         int listLevel = 0;
 
         QTextCharFormat runFmt;
@@ -395,6 +499,7 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
 
             if (n == QLatin1String("pStyle")) {
                 const QString v = xml.attributes().value("w:val").toString();
+                styleId = v;
                 if (v.startsWith("Heading")) {
                     const int lvl = v.mid(7).trimmed().toInt();
                     if (lvl >= 1 && lvl <= 6) bf.setHeadingLevel(lvl);
@@ -420,6 +525,17 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
                 runFmt = QTextCharFormat();
                 runFmt.setFontFamilies({ "Segoe UI" });
                 runFmt.setForeground(QColor("#1C1E26"));
+                // Seed from the paragraph style before reading the run's own
+                // rPr, so a styled heading keeps its font, size, weight and
+                // colour while anything the run states explicitly still wins.
+                // pPr precedes the runs in the XML, so styleId is known here.
+                if (!styleId.isEmpty()) {
+                    QTextCharFormat sf = styleFmt.value(styleId);
+                    const int hl = bf.headingLevel();
+                    if (sf.properties().isEmpty() && hl >= 1 && hl <= 6)
+                        sf = builtinHeadingFmt(hl);
+                    runFmt.merge(sf);
+                }
                 qint64 drawW = 0, drawH = 0;   // drawing extent (EMU), if present
                 while (!xml.atEnd()) {
                     const auto rt = xml.readNext();
@@ -487,10 +603,32 @@ bool DocxIo::importDocx(const QString& path, QTextDocument* doc) {
             }
         }
         if (!listFmt.isEmpty()) {
+            // Resolve the real number format for this numId at this level,
+            // rather than guessing from the numId itself.
+            const QString fmtName = numFmtByNumId.value(listFmt).value(listLevel);
             QTextListFormat lf;
-            lf.setStyle(listFmt == "2" ? QTextListFormat::ListDecimal : QTextListFormat::ListDisc);
+            if      (fmtName == QLatin1String("decimal"))     lf.setStyle(QTextListFormat::ListDecimal);
+            else if (fmtName == QLatin1String("lowerLetter")) lf.setStyle(QTextListFormat::ListLowerAlpha);
+            else if (fmtName == QLatin1String("upperLetter")) lf.setStyle(QTextListFormat::ListUpperAlpha);
+            else if (fmtName == QLatin1String("lowerRoman"))  lf.setStyle(QTextListFormat::ListLowerRoman);
+            else if (fmtName == QLatin1String("upperRoman"))  lf.setStyle(QTextListFormat::ListUpperRoman);
+            else if (fmtName == QLatin1String("bullet"))      lf.setStyle(QTextListFormat::ListDisc);
+            else if (fmtName.isEmpty())
+                // No numbering.xml entry (or an older file this app wrote, where
+                // numId 2 meant decimal). Keep the previous assumption as a
+                // fallback rather than dropping the list entirely.
+                lf.setStyle(listFmt == QLatin1String("2") ? QTextListFormat::ListDecimal
+                                                          : QTextListFormat::ListDisc);
+            else lf.setStyle(QTextListFormat::ListDisc);
             lf.setIndent(listLevel + 1);
             cur.createList(lf);
+        } else if (QTextList* inherited = cur.block().textList()) {
+            // insertBlock() copies the previous block's format, list membership
+            // included, so every paragraph after a list silently joined it.
+            // Clearing objectIndex on the block format is not enough, because
+            // merging a cleared property does not detach the block; it has to
+            // be removed from the list itself.
+            inherited->remove(cur.block());
         }
         cur.mergeBlockFormat(bf);
     };
