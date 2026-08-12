@@ -64,6 +64,8 @@
 #include <QFontDatabase>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QStandardPaths>
+#include <QRegularExpression>
 #include <QShortcut>
 #include <QKeySequence>
 #include <QGraphicsOpacityEffect>
@@ -231,46 +233,87 @@ public:
     // saveToCurrentPath() must never open a dialog. Writing to a path the
     // document already has cannot need one, and an autosave that could pop a
     // file chooser while someone types would be worse than no autosave.
-    virtual bool saveToCurrentPath() { return false; }
+    // Saves to an exact path with no dialog of any kind. Each window forwards
+    // this to the same performSave() its File menu uses.
+    virtual bool saveQuietlyTo(const QString& path) { Q_UNUSED(path); return false; }
     virtual bool autoSaveEnabled() const { return true; }
 
     // Writes at most once every kAutoSaveGapMs, so holding a key down cannot
     // turn into a save per keystroke on a large file.
     static constexpr qint64 kAutoSaveGapMs = 2500;
 
-    bool autoSaveTick() {
-        if (!autoSaveEnabled() || !docDirty() || currentDocPath().isEmpty())
-            return false;
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if (m_lastAutoSaveMs && now - m_lastAutoSaveMs < kAutoSaveGapMs) return false;
-        if (!saveToCurrentPath()) return false;
-        m_lastAutoSaveMs = now;
+    // A brand new document has no file behind it, which is exactly why the
+    // first version of this did nothing at all for the case that matters most.
+    // Autosave gives it one: a real file in Documents/NativeOffice named after
+    // whatever the rename field says, so from the first tick onwards it is an
+    // ordinary saved document that Save As can later move wherever you like.
+    QString reserveAutoSavePath() {
+        const QString ext = nameExt();
+        if (ext.isEmpty()) return {};                  // a tool, not a document
+        QDir dir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                 + QStringLiteral("/NativeOffice"));
+        if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) return {};
+
+        QString base = baseName().trimmed();
+        if (base.isEmpty()) base = QStringLiteral("untitled");
+        // Anything Windows forbids in a file name would make the save fail.
+        // Written as a plain character sweep rather than a regex: moc stops
+        // parsing this file at a raw string literal containing a quote, which
+        // silently strips the meta-objects from every class defined below it.
+        const QString forbidden = QStringLiteral("\\/:*?<>|") + QChar(0x22);
+        for (int i = 0; i < base.size(); ++i)
+            if (forbidden.contains(base.at(i))) base[i] = QLatin1Char('-');
+
+        QString path = dir.filePath(base + ext);
+        for (int n = 2; QFileInfo::exists(path) && n < 500; ++n)
+            path = dir.filePath(base + QStringLiteral("-") + QString::number(n) + ext);
+        return path;
+    }
+
+    // Stores the document right now, whether or not it has ever been saved.
+    // Returns true when there is nothing left unsaved.
+    bool autoSaveNow() {
+        if (!autoSaveEnabled() || !docDirty()) return true;
+        QString path = currentDocPath();
+        if (path.isEmpty()) path = reserveAutoSavePath();
+        if (path.isEmpty()) return false;
+        if (!saveQuietlyTo(path)) return false;
+        m_lastAutoSaveMs = QDateTime::currentMSecsSinceEpoch();
+        syncNameFromPath();          // tab + rename field adopt the new name
         return true;
     }
 
-    // "Autosaved 7s ago". Empty until the document has actually been stored, so
-    // it never claims a save that did not happen.
-    QString autoSaveStatusText() const {
-        if (!autoSaveEnabled() || currentDocPath().isEmpty())
-            return docDirty() ? QStringLiteral("Not saved yet") : QString();
-        if (!m_lastAutoSaveMs) return QStringLiteral("Autosave on");
-        const qint64 s = (QDateTime::currentMSecsSinceEpoch() - m_lastAutoSaveMs) / 1000;
-        if (s < 5)    return QStringLiteral("Autosaved just now");
-        if (s < 60)   return QStringLiteral("Autosaved %1s ago").arg(s);
-        if (s < 3600) return QStringLiteral("Autosaved %1m ago").arg(s / 60);
-        return QStringLiteral("Autosaved %1h ago").arg(s / 3600);
+    // The periodic tick only stores documents that already have a file. A blank
+    // new document reports dirty from the moment it is created, so naming those
+    // on a timer produced an empty untitled.docx every time a tab was opened and
+    // abandoned. Naming happens on close instead, where there is real content to
+    // keep, which is why closing still never asks anything.
+    bool autoSaveTick() {
+        if (!autoSaveEnabled() || !docDirty() || currentDocPath().isEmpty()) return false;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (m_lastAutoSaveMs && now - m_lastAutoSaveMs < kAutoSaveGapMs) return false;
+        return autoSaveNow();
     }
 
-    // Closing path. A document with a file behind it is simply stored and the
-    // tab goes, with nothing to ask about. The prompt survives for exactly one
-    // case: an untitled document with unsaved content, where there is no path
-    // to autosave into and dropping the question would silently destroy work.
-    bool closedCleanlyByAutoSave() {
-        if (!docDirty()) return true;
-        if (autoSaveEnabled() && !currentDocPath().isEmpty())
-            return saveToCurrentPath();
-        return false;
+    // Counts in seconds and switches to minutes once past 60, which is the
+    // wording that was asked for. "Autosave on" covers the moment before
+    // anything has been written, because claiming "0 sec ago" there would be
+    // reporting a save that has not happened.
+    QString autoSaveStatusText() const {
+        if (!autoSaveEnabled()) return {};
+        if (!m_lastAutoSaveMs)  return QStringLiteral("Autosave on");
+        const qint64 s = (QDateTime::currentMSecsSinceEpoch() - m_lastAutoSaveMs) / 1000;
+        if (s < 60) return QStringLiteral("Autosave %1 sec ago").arg(s);
+        const qint64 m = s / 60;
+        if (m < 60) return QStringLiteral("Autosave %1 min ago").arg(m);
+        return QStringLiteral("Autosave %1 hr ago").arg(m / 60);
     }
+
+    // Closing. Every dirty document is stored first, including one that has
+    // never been named, so there is nothing left to ask about. The old prompt
+    // now only appears if the write itself failed, where staying silent would
+    // mean losing the work.
+    bool closedCleanlyByAutoSave() { return autoSaveNow(); }
 
 signals:
     void displayNameChanged();
@@ -362,9 +405,7 @@ public:
     QString nameExt()        const override { return QStringLiteral(".docx"); }
     QString currentDocPath() const override { return m_writer ? m_writer->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_writer && m_writer->isDirty(); }
-    bool saveToCurrentPath() override {
-        return currentDocPath().isEmpty() ? false : save();
-    }
+    bool saveQuietlyTo(const QString& path) override { return performSave(path); }
 
     bool requestClose() override {
         if (closedCleanlyByAutoSave()) return true;
@@ -473,9 +514,7 @@ public:
     QString nameExt()        const override { return QStringLiteral(".xlsx"); }
     QString currentDocPath() const override { return m_calc ? m_calc->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_calc && m_calc->isDirty(); }
-    bool saveToCurrentPath() override {
-        return currentDocPath().isEmpty() ? false : save();
-    }
+    bool saveQuietlyTo(const QString& path) override { return performSave(path); }
 
     bool requestClose() override {
         if (closedCleanlyByAutoSave()) return true;
@@ -576,9 +615,7 @@ public:
     QString currentDocPath() const override { return m_impress ? m_impress->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_impress && m_impress->isDirty(); }
 
-    bool saveToCurrentPath() override {
-        return currentDocPath().isEmpty() ? false : save();
-    }
+    bool saveQuietlyTo(const QString& path) override { return performSave(path); }
 
     bool requestClose() override {
         if (closedCleanlyByAutoSave()) return true;
@@ -673,8 +710,9 @@ public:
     QString nameExt()        const override { return QStringLiteral(".pdf"); }
     QString currentDocPath() const override { return m_pdf ? m_pdf->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_pdf && m_pdf->isDirty(); }
-    bool saveToCurrentPath() override {
-        return currentDocPath().isEmpty() ? false : save();
+    // PdfWindow has no performSave(); it writes through the module directly.
+    bool saveQuietlyTo(const QString& path) override {
+        return m_pdf && m_pdf->saveToPath(path);
     }
 
     bool requestClose() override {
@@ -1051,7 +1089,16 @@ public:
         m_topBar->setStyleSheet("#shellTopBar { background:#0D1117; }");
         m_topBar->setAttribute(Qt::WA_Hover, true);
         m_topBar->installEventFilter(this);
-        auto* hb = new QHBoxLayout(m_topBar);
+        // Two rows: the tabs, and a scrollbar underneath that exists only when
+        // the tabs actually overflow. The first version reserved that second row
+        // permanently, which left a dark 4px band sitting directly under the
+        // selected tab's violet underline. That band was the "black line".
+        auto* topV = new QVBoxLayout(m_topBar);
+        topV->setContentsMargins(0, 0, 0, 0);
+        topV->setSpacing(0);
+        auto* row = new QWidget(m_topBar);
+        row->setStyleSheet("background:#0D1117;");
+        auto* hb = new QHBoxLayout(row);
         hb->setContentsMargins(0, 0, 0, 0);
         hb->setSpacing(0);
 
@@ -1073,10 +1120,11 @@ public:
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; height:0; }"
             "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }");
 
-        // Fixed height reserves the scrollbar's 5px permanently, so the strip
-        // does not grow and shove the whole document down the moment a tab
-        // overflows. With no overflow the reserved band is just background.
-        m_scroll->setFixedHeight(ShellTabBar::kTabHeight + 4);
+        // Exactly the tab height. The scrollbar is a separate widget on the row
+        // below, so nothing is reserved and the strip is only ever as tall as
+        // the tabs unless there is genuinely something to scroll.
+        m_scroll->setFixedHeight(ShellTabBar::kTabHeight);
+        m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
         m_bar = new ShellTabBar(m_scroll);
         m_scroll->setWidget(m_bar);
@@ -1110,6 +1158,26 @@ public:
         hb->addWidget(plus, 0, Qt::AlignTop);
         hb->addStretch(1);             // draggable gap
         hb->addWidget(m_controls, 0, Qt::AlignTop);
+
+        // The visible scrollbar, mirroring the scroll area's own hidden one.
+        // Hidden entirely when everything fits, so it costs no height at all.
+        m_hbar = new QScrollBar(Qt::Horizontal, m_topBar);
+        m_hbar->setFixedHeight(4);
+        m_hbar->hide();
+        m_hbar->setStyleSheet(
+            "QScrollBar:horizontal { height:4px; background:#0D1117; margin:0; border:none; }"
+            "QScrollBar::handle:horizontal { background:#39414F; border-radius:2px; min-width:40px; }"
+            "QScrollBar::handle:horizontal:hover { background:#5A657A; }"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; height:0; }"
+            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }");
+        connect(m_hbar, &QScrollBar::valueChanged, this, [this](int v) {
+            m_scroll->horizontalScrollBar()->setValue(v);
+        });
+        connect(m_scroll->horizontalScrollBar(), &QScrollBar::valueChanged,
+                this, [this](int v) { if (m_hbar->value() != v) m_hbar->setValue(v); });
+
+        topV->addWidget(row, 0);
+        topV->addWidget(m_hbar, 0);
 
         m_stack = new QStackedWidget(central);
 
@@ -1388,6 +1456,16 @@ private:
         m_fade->setGeometry(m_scroll->viewport()->rect());
         m_fade->setOverflow(sb->value() > sb->minimum(), sb->value() < sb->maximum());
         m_fade->raise();
+
+        // Mirror the real range onto the visible bar, and take it out of the
+        // layout completely when there is nothing to scroll.
+        if (m_hbar) {
+            const bool need = sb->maximum() > sb->minimum();
+            m_hbar->setRange(sb->minimum(), sb->maximum());
+            m_hbar->setPageStep(sb->pageStep());
+            m_hbar->setValue(sb->value());
+            m_hbar->setVisible(need);
+        }
     }
 
     // Keep the selected tab on screen when it is reached by keyboard.
@@ -1551,6 +1629,7 @@ private:
     QWidget*                   m_topBar { nullptr };
     QScrollArea*               m_scroll { nullptr };
     TabFade*                   m_fade   { nullptr };
+    QScrollBar*                m_hbar   { nullptr };
     QToolButton*               m_plus   { nullptr };
     WindowControls*            m_controls { nullptr };
     QTimer*                    m_hoverPoll { nullptr };
@@ -1990,7 +2069,7 @@ QMenuBar::item:pressed {
         QMessageBox::about(win, "About NativeOffice",
             "<h3>NativeOffice Impress</h3>"
             "<p>A high-performance, cross-platform presentation tool.</p>"
-            "<p>Version 1.6.5</p>"
+            "<p>Version 1.6.6</p>"
             "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
@@ -2301,7 +2380,7 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("1.6.5");
+    app.setApplicationVersion("1.6.6");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
