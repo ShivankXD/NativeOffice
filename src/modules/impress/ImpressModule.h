@@ -72,6 +72,10 @@ public:
     bool saveToPath(const QString& path);
     bool loadFromPath(const QString& path);
     void markClean();
+    // Re-clears the dirty flag across the open-time scene build, so opening a
+    // deck never leaves it looking modified (and autosave never rewrites a file
+    // the user has not edited).
+    void markCleanAfterLoad();
 
     [[nodiscard]] QUndoStack* undoStack() const noexcept { return m_undoStack; }
 

@@ -2587,6 +2587,18 @@ void CalcModule::setFreeze(int rows, int cols) {
 void CalcModule::updateFrozenViews() {
     if (!m_frozenTop && !m_frozenLeft && !m_frozenCorner) return;
 
+    // KNOWN LIMITATION. The frozen views are children of the grid drawn ON TOP
+    // of it, so the band always covers one band's worth of body content: scroll
+    // down with the top row frozen and the row sitting under the band is hidden
+    // rather than skipped.
+    //
+    // Clamping the scroll range does not fix it (tried, reverted): it only
+    // moves which row is hidden, and makes it worse at the top, where the
+    // covered row is currently the frozen row itself so nothing is lost.
+    // A real fix needs the band to occupy layout space instead of overlapping,
+    // i.e. a split view with the frozen rows in their own scroll area kept in
+    // sync with the body. That is an architectural change, not a tweak.
+
     auto syncSizes = [&](QTableView* v){
         for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c) v->setColumnWidth(c, m_tableView->columnWidth(c));
         for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r) v->setRowHeight(r, m_tableView->rowHeight(r));
@@ -3307,16 +3319,68 @@ void CalcModule::printPreview() {
     dlg.exec();
 }
 
-// Begin typing "=FN(" into the formula bar so the user can fill in arguments.
+// The range a function should default to: the current multi-cell selection if
+// there is one, otherwise the contiguous run of numbers directly above the
+// active cell, otherwise the run directly to its left. This is the guess Excel
+// makes for AutoSum, and it is what makes picking a function from the library
+// feel like it did something.
+QString CalcModule::suggestedFunctionRange() const {
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return {};
+
+    const QRect sel = selectedRect();
+    if (sel.width() > 1 || sel.height() > 1)
+        return FormulaEngine::cellAddress(sel.left(),  sel.top()) + ":"
+             + FormulaEngine::cellAddress(sel.right(), sel.bottom());
+
+    auto usable = [this](int c, int r) {
+        const QString raw = m_model->rawContent(c, r).trimmed();
+        if (raw.isEmpty()) return false;
+        if (raw.startsWith('=')) return true;      // a formula counts as a value
+        bool ok = false;
+        raw.toDouble(&ok);
+        return ok;
+    };
+
+    const int c = cur.column();
+    const int r = cur.row();
+
+    int top = r;
+    while (top - 1 >= 0 && usable(c, top - 1)) --top;
+    if (top < r)
+        return FormulaEngine::cellAddress(c, top) + ":"
+             + FormulaEngine::cellAddress(c, r - 1);
+
+    int left = c;
+    while (left - 1 >= 0 && usable(left - 1, r)) --left;
+    if (left < c)
+        return FormulaEngine::cellAddress(left, r) + ":"
+             + FormulaEngine::cellAddress(c - 1, r);
+
+    return {};
+}
+
+// Begin typing "=FN(" into the formula bar, prefilled with the range the user
+// most likely means. Previously this inserted a bare "=SUM(" and left them to
+// type the range and the closing bracket by hand, which is why picking a
+// function from the library was reported as doing nothing.
 void CalcModule::startFunctionEntry(const QString& fn) {
     const QModelIndex cur = m_tableView->currentIndex();
     if (!cur.isValid()) return;
-    const QString text = "=" + fn + "(";
+
+    const QString head = "=" + fn + "(";
+    const QString arg  = suggestedFunctionRange();
+    const QString text = head + arg + ")";
+
     m_updatingFormulaBar = true;
     m_formulaBar->setText(text);
     m_updatingFormulaBar = false;
     m_formulaBar->setFocus();
-    m_formulaBar->setCursorPosition(text.length());
+
+    if (arg.isEmpty())
+        m_formulaBar->setCursorPosition(head.length());   // caret inside the brackets
+    else
+        m_formulaBar->setSelection(head.length(), arg.length());  // overtype to change it
 }
 
 // Transient "coming soon" tip for features that are not implemented yet.
@@ -5842,6 +5906,17 @@ bool CalcModule::loadFromPath(const QString& path) {
     m_currentPath = path;
     m_dirty       = false;
     emit filePathChanged(path);
+    // Opening a workbook must not leave it marked as modified. Rebuilding the
+    // sheets emits model signals after m_ignoreChange is cleared, which set the
+    // dirty flag on a file nobody had edited, and autosave then rewrote it
+    // through the exporter, quietly degrading an .xlsx that came from Excel.
+    for (int delay : { 0, 250, 700 }) {
+        QTimer::singleShot(delay, this, [this] {
+            if (!m_dirty) return;
+            m_dirty = false;
+            emit documentModified();
+        });
+    }
     return true;
 }
 

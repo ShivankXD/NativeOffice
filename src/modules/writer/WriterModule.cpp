@@ -559,6 +559,7 @@ bool WriterModule::loadFromPath(const QString& path) {
         m_currentPath = path;
         m_dirty       = false;
         emit filePathChanged(path);
+        markCleanAfterLoad();
         QTimer::singleShot(400, this, [this]{ checkCrashRecovery(); });
         return true;
     }
@@ -577,10 +578,38 @@ bool WriterModule::loadFromPath(const QString& path) {
     m_currentPath = path;
     m_dirty       = false;
     emit filePathChanged(path);
+    markCleanAfterLoad();
 
     // After binding the file, offer to restore a leftover crash-recovery snapshot.
     QTimer::singleShot(400, this, [this]{ checkCrashRecovery(); });
     return true;
+}
+
+// Opening a document must not leave it marked as modified.
+//
+// m_ignoreChange only covers the import call itself. The open-time pagination
+// reflow and ruler sync run afterwards, on queued timers, and they touch the
+// document — which set the dirty flag on a file the user had not typed a single
+// character into. Autosave then rewrote that file through the exporter.
+//
+// For a document created in another office suite that was silently destructive:
+// the exporter writes none of the original styles.xml, numbering.xml, theme or
+// font table, so an untouched .docx lost its heading styles and list numbering
+// just by being opened, and every reopen degraded it further. That is the
+// mechanism behind the beta report of documents breaking after repeated opens.
+//
+// The 700ms sweep is deliberately longer than the open-time reflow and the
+// crash-recovery check. A genuine edit within that window would be missed, but
+// nobody types into a document before it has finished appearing, and quietly
+// overwriting someone's file is far worse than that trade.
+void WriterModule::markCleanAfterLoad() {
+    for (int delay : { 0, 250, 700 }) {
+        QTimer::singleShot(delay, this, [this] {
+            if (!m_dirty) return;
+            m_dirty = false;
+            emit documentModified();
+        });
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

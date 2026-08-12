@@ -63,6 +63,11 @@ public:
     void setPlainContent(const QString& text);
     void markClean();
 
+    // Re-clears the dirty flag across the open-time relayout, so merely opening
+    // a document never leaves it looking modified (and so autosave never
+    // rewrites a file the user has not edited).
+    void markCleanAfterLoad();
+
     // Free-plan view-only mode: editor becomes read-only and the ribbon's
     // editing controls are disabled. Viewing/scrolling stays available.
     void setReadOnly(bool on);

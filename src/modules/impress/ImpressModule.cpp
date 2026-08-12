@@ -2421,6 +2421,21 @@ void ImpressModule::markClean() {
     m_dirty = false;
 }
 
+// Opening a deck must not leave it marked as modified. Building the scenes
+// emits change signals after m_ignoreChange is cleared, which set the dirty
+// flag on a file nobody had edited; autosave then rewrote it through the
+// exporter. On an imported .pptx that was destructive: a 2.4MB deck came back
+// out at 1.8MB, losing embedded media, purely from being opened.
+void ImpressModule::markCleanAfterLoad() {
+    for (int delay : { 0, 250, 700 }) {
+        QTimer::singleShot(delay, this, [this] {
+            if (!m_dirty) return;
+            m_dirty = false;
+            emit documentModified();
+        });
+    }
+}
+
 void ImpressModule::clearDeck() {
     m_view->setScene(nullptr);
     for (auto* s : m_scenes)
@@ -2858,6 +2873,7 @@ bool ImpressModule::loadFromPath(const QString& path) {
                 emit filePathChanged(path);
                 captureUndoBaseline();
                 m_undoStack->clear();
+                markCleanAfterLoad();
                 return true;
             }
         }
