@@ -17,6 +17,13 @@
 #include <QMenu>
 #include <QAction>
 #include <QCursor>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QMessageBox>
+#include <QProcess>
+#include <QDesktopServices>
+#include <QUrl>
 
 namespace NativeOffice {
 
@@ -29,9 +36,15 @@ public:
     explicit ClickableRow(QWidget* parent = nullptr) : QWidget(parent) {
         setMouseTracking(true);
     }
+    // Drives the menu wording. The row is rebuilt whenever the list changes,
+    // so this is read fresh each time the menu opens.
+    bool isFavorite { false };
 signals:
     void clicked();
     void removeRequested();
+    void favoriteToggled();
+    void revealRequested();
+    void deleteRequested();
 protected:
     void mousePressEvent(QMouseEvent* e) override {
         if (e->button() == Qt::LeftButton)  emit clicked();
@@ -49,8 +62,21 @@ protected:
 private:
     void showContextMenu(const QPoint& pos) {
         QMenu menu(this);
+        auto* favAct = menu.addAction(isFavorite ? "Remove from Favorites"
+                                                 : "Add to Favorites");
+        connect(favAct, &QAction::triggered, this, &ClickableRow::favoriteToggled);
+
+        auto* revealAct = menu.addAction("Open file location");
+        connect(revealAct, &QAction::triggered, this, &ClickableRow::revealRequested);
+
+        menu.addSeparator();
         auto* rmAct = menu.addAction("Remove from list");
         connect(rmAct, &QAction::triggered, this, &ClickableRow::removeRequested);
+
+        // The list offered no way to delete the file itself, only to forget it.
+        auto* delAct = menu.addAction("Delete file…");
+        connect(delAct, &QAction::triggered, this, &ClickableRow::deleteRequested);
+
         menu.exec(pos);
     }
 };
@@ -73,13 +99,22 @@ RecentFilesWidget::RecentFilesWidget(QWidget* parent)
 }
 
 void RecentFilesWidget::refreshFromManager() {
-    const auto entries = RecentFilesManager::instance().recentFiles();
+    auto& mgr = RecentFilesManager::instance();
+    const auto entries = mgr.recentFiles();
     std::vector<RecentFile> files;
     files.reserve(entries.size());
     for (const auto& e : entries) {
+        if (m_favoritesOnly && !mgr.isFavorite(e.path)) continue;
         files.push_back({e.path, e.name, e.type, e.lastOpened});
     }
     setRecentFiles(files);
+}
+
+void RecentFilesWidget::setFavoritesOnly(bool on) {
+    if (m_favoritesOnly == on) return;
+    m_favoritesOnly = on;
+    if (m_heading) m_heading->setText(on ? "Favorites" : "Recent");
+    refreshFromManager();
 }
 
 void RecentFilesWidget::buildUi() {
@@ -91,6 +126,7 @@ void RecentFilesWidget::buildUi() {
     auto* headerRow  = new QHBoxLayout();
     auto* heading    = new QLabel("Recent", this);
     heading->setObjectName("recentHeading");
+    m_heading = heading;
 
     auto* showAllBtn = new QPushButton("Clear all", this);
     showAllBtn->setObjectName("seeAllBtn");
@@ -202,7 +238,11 @@ void RecentFilesWidget::populateList() {
         icon->setStyleSheet("font-size: 48px; background: transparent;");
 
         auto* msg  = new QLabel(
-            "No recent files yet.\nOpen or create a document to get started.", ph);
+            m_favoritesOnly
+                ? "No favourites yet.\nRight-click any recent file and choose "
+                  "Add to Favorites."
+                : "No recent files yet.\nOpen or create a document to get started.",
+            ph);
         msg->setAlignment(Qt::AlignCenter);
         msg->setWordWrap(true);
         msg->setStyleSheet(R"(
@@ -282,6 +322,12 @@ QWidget* RecentFilesWidget::makeFileRow(const RecentFile& file) {
     textLayout->addWidget(nameLabel);
     textLayout->addWidget(metaLabel);
 
+    // ── Favourite star ────────────────────────────────────────────────────
+    auto* star = new QLabel(QStringLiteral("★"), row);
+    star->setAttribute(Qt::WA_TransparentForMouseEvents);
+    star->setStyleSheet("color: #F59E0B; font-size: 15px; background: transparent;");
+    star->setVisible(RecentFilesManager::instance().isFavorite(file.path));
+
     // ── Open-arrow indicator ───────────────────────────────────────────────
     auto* arrow = new QLabel("›", row);
     arrow->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -289,14 +335,49 @@ QWidget* RecentFilesWidget::makeFileRow(const RecentFile& file) {
 
     layout->addWidget(badge);
     layout->addWidget(textCol, 1);
+    layout->addWidget(star);
     layout->addWidget(arrow);
 
     // ── Signals ───────────────────────────────────────────────────────────
     const QString path = file.path;
+    row->isFavorite = RecentFilesManager::instance().isFavorite(path);
+
     connect(row, &ClickableRow::clicked, this, [this, path]() {
         emit fileSelected(path);
     });
     connect(row, &ClickableRow::removeRequested, this, [path]() {
+        RecentFilesManager::instance().removeFile(path);
+    });
+    connect(row, &ClickableRow::favoriteToggled, this, [row, path]() {
+        RecentFilesManager::instance().setFavorite(path, !row->isFavorite);
+    });
+    connect(row, &ClickableRow::revealRequested, this, [path]() {
+        // Select the file in Explorer rather than just opening the folder.
+        const QString native = QDir::toNativeSeparators(path);
+        if (!QProcess::startDetached("explorer.exe", { "/select,", native }))
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+    });
+    connect(row, &ClickableRow::deleteRequested, this, [this, path]() {
+        const QString name = QFileInfo(path).fileName();
+        const auto answer = QMessageBox::question(
+            this, "Delete File",
+            QString("Move \"%1\" to the Recycle Bin?").arg(name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) return;
+
+        QFile f(path);
+        if (!f.exists()) {
+            // Already gone from disk; just drop the stale entry.
+            RecentFilesManager::instance().removeFile(path);
+            return;
+        }
+        if (!f.moveToTrash()) {
+            QMessageBox::warning(this, "Delete Failed",
+                QString("Could not delete \"%1\".\n\n%2").arg(name, f.errorString()));
+            return;
+        }
+        RecentFilesManager::instance().setFavorite(path, false);
         RecentFilesManager::instance().removeFile(path);
     });
 

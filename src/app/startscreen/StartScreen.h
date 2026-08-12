@@ -17,6 +17,7 @@
 #include <QWidget>
 
 class QVBoxLayout;
+class QHBoxLayout;
 class QLabel;
 class QPushButton;
 class QTimer;
@@ -63,6 +64,13 @@ private:
     void showShortcutsDialog();                         // real supported shortcuts
     void showWhatsNewDialog();                          // release highlights
 
+    // Recent-file row actions: star, reveal in Explorer, forget, delete.
+    void showRecentFileMenu(const QString& path, const QPoint& at);
+    // Swaps the Recent panel for a freshly built one (favourites filter, or
+    // after a star / delete changed what should be listed).
+    void refreshRecentPanel();
+    void openRecycleBin();
+
     AppController* m_controller { nullptr };
     SettingsTray*  m_settingsTray { nullptr };   // right-side slide-in settings
 
@@ -77,6 +85,12 @@ private:
     // dismiss-then-reopen flicker is suppressed.
     QPointer<QWidget> m_notifPopup;
     qint64            m_notifClosedMs { 0 };
+
+    // Recent panel, kept so the Favorites sidebar entry can re-filter it in
+    // place instead of only working on a fresh Home tab.
+    QHBoxLayout* m_recentRowLayout { nullptr };
+    QWidget*     m_recentPanel     { nullptr };
+    bool         m_favoritesOnly   { false };
 };
 
 } // namespace NativeOffice

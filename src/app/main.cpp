@@ -27,6 +27,8 @@
 #include "core/auth/AuthManager.h"
 #include "core/watermark/WatermarkPdf.h"
 #include "core/settings/ExportPrefs.h"
+#include "core/settings/UsageStats.h"
+#include <QScopedValueRollback>
 
 #include "WriterModule.h"
 #include "CalcModule.h"
@@ -238,6 +240,11 @@ public:
     virtual bool saveQuietlyTo(const QString& path) { Q_UNUSED(path); return false; }
     virtual bool autoSaveEnabled() const { return true; }
 
+    // True only while an autosave tick is writing. Subclasses check it in
+    // performSave() so an automatic write is not counted as the user editing
+    // and saving a file.
+    bool m_autoSaving { false };
+
     // Writes at most once every kAutoSaveGapMs, so holding a key down cannot
     // turn into a save per keystroke on a large file.
     static constexpr qint64 kAutoSaveGapMs = 2500;
@@ -277,6 +284,9 @@ public:
         QString path = currentDocPath();
         if (path.isEmpty()) path = reserveAutoSavePath();
         if (path.isEmpty()) return false;
+        // Marks this write as automatic so the "Files edited" counter does not
+        // tick every few seconds while someone is simply typing.
+        QScopedValueRollback<bool> autoGuard(m_autoSaving, true);
         if (!saveQuietlyTo(path)) return false;
         m_lastAutoSaveMs = QDateTime::currentMSecsSinceEpoch();
         syncNameFromPath();          // tab + rename field adopt the new name
@@ -440,6 +450,7 @@ private:
         }
         // Register in recent files
         NativeOffice::RecentFilesManager::instance().addFile(path, "Writer");
+        if (!m_autoSaving) NativeOffice::UsageStats::instance().noteFileEdited();
         updateTitle();
         return true;
     }
@@ -548,6 +559,7 @@ private:
             return false;
         }
         NativeOffice::RecentFilesManager::instance().addFile(path, "Calc");
+        if (!m_autoSaving) NativeOffice::UsageStats::instance().noteFileEdited();
         updateTitle();
         return true;
     }
@@ -654,6 +666,7 @@ private:
             return false;
         }
         NativeOffice::RecentFilesManager::instance().addFile(path, "Impress");
+        if (!m_autoSaving) NativeOffice::UsageStats::instance().noteFileEdited();
         updateTitle();
         return true;
     }
@@ -1725,6 +1738,7 @@ static WriterWindow* createWriterWindow(const QString& filePath) {
         } else {
             // Bump to top of recent list
             NativeOffice::RecentFilesManager::instance().addFile(filePath, "Writer");
+            NativeOffice::UsageStats::instance().noteDocumentOpened();
         }
     }
 
@@ -1830,6 +1844,7 @@ static CalcWindow* createCalcWindow(const QString& filePath) {
                 "Could not read:\n" + filePath);
         } else {
             NativeOffice::RecentFilesManager::instance().addFile(filePath, "Calc");
+            NativeOffice::UsageStats::instance().noteDocumentOpened();
         }
     }
 
@@ -1913,6 +1928,7 @@ static ImpressWindow* createImpressWindow(const QString& filePath) {
                 "Could not read:\n" + filePath);
         } else {
             NativeOffice::RecentFilesManager::instance().addFile(filePath, "Impress");
+            NativeOffice::UsageStats::instance().noteDocumentOpened();
         }
     }
 
@@ -2447,6 +2463,20 @@ int main(int argc, char* argv[]) {
     // ── Global theme ───────────────────────────────────────────────────────
     auto& theme = NativeOffice::ThemeManager::instance();
     app.setStyleSheet(theme.applicationStyleSheet());
+    // Ad-hoc dialogs across all four modules carried no stylesheet, so they
+    // inherited the platform palette and rendered dark text on dark inputs for
+    // anyone running Windows in dark mode. This gives every one of them a
+    // readable surface without touching each call site.
+    NativeOffice::ThemeManager::installDialogStyleGuard(&app);
+
+    // ── Usage stats ────────────────────────────────────────────────────────
+    // Backs Home's "Your Activity" panel, whose time-spent row was a literal
+    // dash. Folded into settings every minute and again on quit, so a crash
+    // loses at most a minute rather than the whole session.
+    NativeOffice::UsageStats::instance().startSession();
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [] {
+        NativeOffice::UsageStats::instance().flush();
+    });
 
     // ── App controller ─────────────────────────────────────────────────────
     NativeOffice::AppController controller;

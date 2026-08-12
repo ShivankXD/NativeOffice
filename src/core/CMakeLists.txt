@@ -15,6 +15,8 @@ add_library(NativeOfficeCore STATIC
     auth/SecureStore.h
     common/BrandBar.cpp
     common/BrandBar.h
+    settings/UsageStats.cpp
+    settings/UsageStats.h
     watermark/Watermark.cpp
     watermark/Watermark.h
     watermark/WatermarkPdf.cpp

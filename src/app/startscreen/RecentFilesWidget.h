@@ -40,6 +40,11 @@ public:
     // Reload from RecentFilesManager directly
     void refreshFromManager();
 
+    // Show only starred files. Backs the Home sidebar's "Favorites" entry,
+    // which previously did nothing at all.
+    void setFavoritesOnly(bool on);
+    [[nodiscard]] bool favoritesOnly() const { return m_favoritesOnly; }
+
 signals:
     void fileSelected(const QString& path);
 
@@ -55,6 +60,8 @@ private:
     QWidget*                m_listWidget { nullptr };
     QVBoxLayout*            m_listLayout { nullptr };
     std::vector<RecentFile> m_files;
+    QLabel*                 m_heading      { nullptr };
+    bool                    m_favoritesOnly { false };
 };
 
 } // namespace NativeOffice

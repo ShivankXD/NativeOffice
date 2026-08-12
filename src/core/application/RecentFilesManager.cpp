@@ -26,6 +26,30 @@ std::vector<RecentFileEntry> RecentFilesManager::recentFiles() const {
     return m_entries;
 }
 
+// ── Favourites ───────────────────────────────────────────────────────────────
+namespace {
+constexpr auto kFavoritesKey = "Favorites/paths";
+}
+
+QStringList RecentFilesManager::favorites() const {
+    return QSettings().value(kFavoritesKey).toStringList();
+}
+
+bool RecentFilesManager::isFavorite(const QString& path) const {
+    return favorites().contains(path, Qt::CaseInsensitive);
+}
+
+void RecentFilesManager::setFavorite(const QString& path, bool on) {
+    if (path.isEmpty()) return;
+    QStringList list = favorites();
+    const bool had = list.removeAll(path) > 0;
+    if (on) list.prepend(path);
+    if (had == on) return;                     // already in the requested state
+    QSettings().setValue(kFavoritesKey, list);
+    emit favoritesChanged();
+    emit listChanged();                        // rows redraw their star
+}
+
 void RecentFilesManager::addFile(const QString& path, const QString& type) {
     // Remove any existing entry for the same path (we'll re-insert at front)
     m_entries.erase(

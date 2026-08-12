@@ -20,6 +20,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QDateTime>
 #include <vector>
 
@@ -54,9 +55,19 @@ public:
     // Clear the entire list
     void clearAll();
 
+    // ── Favourites ─────────────────────────────────────────────────────────
+    // The Home sidebar had a "Favorites" entry with nothing behind it and no
+    // way to star anything. Favourites are kept separately from the recent
+    // list so a starred file survives being pruned out of the recent 20.
+    // Stored under "Favorites/paths".
+    [[nodiscard]] bool isFavorite(const QString& path) const;
+    void setFavorite(const QString& path, bool on);
+    [[nodiscard]] QStringList favorites() const;
+
 signals:
     // Emitted whenever the list changes so any connected widget can refresh
     void listChanged();
+    void favoritesChanged();
 
 private:
     explicit RecentFilesManager(QObject* parent = nullptr);

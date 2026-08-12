@@ -6,6 +6,7 @@
 #include "core/application/UpdateChecker.h"
 #include "core/auth/AuthManager.h"
 #include "core/theme/ThemeManager.h"
+#include "core/settings/UsageStats.h"
 #include "common/Avatars.h"
 #include "settings/SettingsTray.h"
 #include "LucideIcons.h"
@@ -44,6 +45,10 @@
 #include <QDialogButtonBox>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QMenu>
+#include <QAction>
+#include <QProcess>
+#include <QFile>
 #include <functional>
 #include <utility>
 
@@ -56,9 +61,18 @@ class ClickableFrame : public QFrame {
 public:
     using QFrame::QFrame;
     std::function<void()> onClick;
+    // Right-click hook, given the click point in global coordinates. Recent
+    // rows use it for favourite / reveal / delete, which the list previously
+    // offered no way to reach.
+    std::function<void(const QPoint&)> onContextMenu;
 protected:
     void enterEvent(QEnterEvent*) override { if (onClick) setCursor(Qt::PointingHandCursor); }
     void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::RightButton && onContextMenu) {
+            onContextMenu(e->globalPosition().toPoint());
+            e->accept();
+            return;
+        }
         // Consume the click when handled, so it doesn't bubble to a clickable
         // ancestor (e.g. a template card inside the clickable templates panel).
         if (e->button() == Qt::LeftButton && onClick) { onClick(); e->accept(); return; }
@@ -388,8 +402,8 @@ QWidget* StartScreen::buildSidebar() {
         {Lucide::kPresentation, "Slides",    3},
         {Lucide::kDownload,     "PDF",       5},
         {Lucide::kFolderOpen,   "Templates", 4},
-        {Lucide::kStar,         "Favorites", -1},
-        {Lucide::kTrash,        "Recycle Bin", -1},
+        {Lucide::kStar,         "Favorites", 6},
+        {Lucide::kTrash,        "Recycle Bin", 7},
     };
     for (const Nav& n : items) {
         auto* item = new ClickableFrame(bar);
@@ -404,13 +418,18 @@ QWidget* StartScreen::buildSidebar() {
         il->addWidget(ic); il->addWidget(tx); il->addStretch();
         const int action = n.action;
         item->onClick = [this, action]{
-            if (launchLocked()) return;
+            // Home and the two list views are navigation, not launches, so the
+            // update-scan lock must not swallow them.
+            if (action != 0 && action != 6 && action != 7 && launchLocked()) return;
             switch (action) {
             case 1: emit newDocumentRequested(DocumentType::Writer);  break;
             case 2: emit newDocumentRequested(DocumentType::Calc);    break;
             case 3: emit newDocumentRequested(DocumentType::Impress); break;
             case 4: showTemplatesDialog(0); break;
             case 5: emit newDocumentRequested(DocumentType::Pdf);     break;
+            case 0: m_favoritesOnly = false; refreshRecentPanel();    break;
+            case 6: m_favoritesOnly = true;  refreshRecentPanel();    break;
+            case 7: openRecycleBin();                                 break;
             default: break;
             }
         };
@@ -617,7 +636,9 @@ QWidget* StartScreen::buildCenterColumn() {
     auto* row = new QWidget(col);
     auto* rl = new QHBoxLayout(row);
     rl->setContentsMargins(0, 0, 0, 0); rl->setSpacing(20);
-    rl->addWidget(buildRecentPanel(), 1);
+    m_recentRowLayout = rl;
+    m_recentPanel = buildRecentPanel();
+    rl->addWidget(m_recentPanel, 1);
     rl->addWidget(buildTemplatesPanel(), 1);
     v->addWidget(row);
     v->addStretch();
@@ -705,10 +726,19 @@ QWidget* StartScreen::buildRecentPanel() {
     head->addWidget(browse);
     v->addLayout(head);
 
-    // Real recent files from the manager.
-    const auto entries = RecentFilesManager::instance().recentFiles();
+    // Real recent files from the manager, filtered to starred ones when the
+    // sidebar's Favorites entry is active.
+    auto& mgr = RecentFilesManager::instance();
+    std::vector<RecentFileEntry> entries;
+    for (const auto& e : mgr.recentFiles()) {
+        if (m_favoritesOnly && !mgr.isFavorite(e.path)) continue;
+        entries.push_back(e);
+    }
     if (entries.empty()) {
-        v->addWidget(heading("No recent files yet — create or open one to get started.",
+        v->addWidget(heading(m_favoritesOnly
+                                 ? "No favourites yet — right-click a recent file and "
+                                   "choose Add to Favorites."
+                                 : "No recent files yet — create or open one to get started.",
                              12, "#6B7280", false, panel));
     }
     int shown = 0;
@@ -726,9 +756,14 @@ QWidget* StartScreen::buildRecentPanel() {
         meta->addWidget(heading(e.name, 13, "#DCE1EA", false, rowf));
         meta->addWidget(heading(e.type, 11, "#7B8494", false, rowf));
         rh->addLayout(meta); rh->addStretch();
+        if (mgr.isFavorite(e.path)) {
+            auto* star = heading(QStringLiteral("★"), 13, "#F59E0B", false, rowf);
+            rh->addWidget(star);
+        }
         rh->addWidget(heading(e.lastOpened.toString("MMM d, hh:mm"), 11, "#7B8494", false, rowf));
         const QString path = e.path;
         rowf->onClick = [this, path]{ if (launchLocked()) return; emit fileOpenRequested(path); };
+        rowf->onContextMenu = [this, path](const QPoint& at) { showRecentFileMenu(path, at); };
         v->addWidget(rowf);
     }
     v->addStretch();
@@ -739,6 +774,74 @@ QWidget* StartScreen::buildRecentPanel() {
         #recentRow:hover { background:#1A2230; }
     )");
     return panel;
+}
+
+void StartScreen::refreshRecentPanel() {
+    if (!m_recentRowLayout) return;
+    QWidget* fresh = buildRecentPanel();
+    if (m_recentPanel) {
+        // replaceWidget keeps the item's stretch factor, so the two panels stay
+        // evenly split.
+        delete m_recentRowLayout->replaceWidget(m_recentPanel, fresh);
+        m_recentPanel->deleteLater();
+    } else {
+        m_recentRowLayout->insertWidget(0, fresh, 1);
+    }
+    m_recentPanel = fresh;
+}
+
+void StartScreen::openRecycleBin() {
+    // The sidebar entry existed with nothing behind it. Deleting a document
+    // from the recent list puts it in the Windows Recycle Bin, so this opens
+    // exactly where those files went.
+    if (!QProcess::startDetached("explorer.exe", { "shell:RecycleBinFolder" })) {
+        QMessageBox::information(this, "Recycle Bin",
+            "Could not open the Recycle Bin.");
+    }
+}
+
+void StartScreen::showRecentFileMenu(const QString& path, const QPoint& at) {
+    auto& mgr = RecentFilesManager::instance();
+    const bool fav = mgr.isFavorite(path);
+    const QString name = QFileInfo(path).fileName();
+
+    QMenu menu(this);
+    menu.setStyleSheet(ThemeManager::inputDialogStyleSheet());
+
+    QAction* favAct    = menu.addAction(fav ? "Remove from Favorites" : "Add to Favorites");
+    QAction* revealAct = menu.addAction("Open file location");
+    menu.addSeparator();
+    QAction* forgetAct = menu.addAction("Remove from list");
+    QAction* deleteAct = menu.addAction("Delete file…");
+
+    QAction* chosen = menu.exec(at);
+    if (!chosen) return;
+
+    if (chosen == favAct) {
+        mgr.setFavorite(path, !fav);
+        refreshRecentPanel();
+    } else if (chosen == revealAct) {
+        const QString native = QDir::toNativeSeparators(path);
+        if (!QProcess::startDetached("explorer.exe", { "/select,", native }))
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+    } else if (chosen == forgetAct) {
+        mgr.removeFile(path);
+        refreshRecentPanel();
+    } else if (chosen == deleteAct) {
+        if (QMessageBox::question(this, "Delete File",
+                QString("Move \"%1\" to the Recycle Bin?").arg(name),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        QFile f(path);
+        if (f.exists() && !f.moveToTrash()) {
+            QMessageBox::warning(this, "Delete Failed",
+                QString("Could not delete \"%1\".\n\n%2").arg(name, f.errorString()));
+            return;
+        }
+        mgr.setFavorite(path, false);
+        mgr.removeFile(path);
+        refreshRecentPanel();
+    }
 }
 
 QWidget* StartScreen::buildTemplatesPanel() {
@@ -825,9 +928,12 @@ QWidget* StartScreen::buildRightColumn() {
         if (!title.isEmpty()) pv->addWidget(heading(title, 14, "#E6E9F0", true, p));
         return std::make_pair(p, pv);
     };
+    // valueOut hands back the right-hand label so a caller can update the value
+    // in place later, instead of having to rebuild the whole panel.
     auto twoCol = [&](QWidget* parent, const char* icon, const QString& left,
                       const QString& right, const QString& rightColor,
-                      std::function<void()> onClick = nullptr) -> QWidget* {
+                      std::function<void()> onClick = nullptr,
+                      QLabel** valueOut = nullptr) -> QWidget* {
         auto* row = new ClickableFrame(parent);
         row->setObjectName(onClick ? "sideRowLink" : "sideRow");
         if (onClick) {
@@ -838,7 +944,9 @@ QWidget* StartScreen::buildRightColumn() {
         h->addWidget(Lucide::label(icon, "#9AA4B8", 14, row));
         h->addWidget(heading(left, 12, "#C3CAD8", false, row));
         h->addStretch();
-        h->addWidget(heading(right, 12, rightColor, false, row));
+        auto* value = heading(right, 12, rightColor, false, row);
+        if (valueOut) *valueOut = value;
+        h->addWidget(value);
         return row;
     };
 
@@ -852,11 +960,27 @@ QWidget* StartScreen::buildRightColumn() {
       v->addWidget(p); }
 
     // Your Activity
+    // Real counters. These three rows used to be two copies of the recent-files
+    // count plus a hardcoded dash for time spent, so the numbers never differed
+    // and the timer never moved.
     { auto [p, pv] = makePanel("Your Activity");
-      const int recent = int(RecentFilesManager::instance().recentFiles().size());
-      pv->addWidget(twoCol(p, Lucide::kFileText, "Documents opened", QString::number(recent), "#E6E9F0"));
-      pv->addWidget(twoCol(p, Lucide::kPencil, "Files edited", QString::number(recent), "#E6E9F0"));
-      pv->addWidget(twoCol(p, Lucide::kTimer, "Time spent", "—", "#E6E9F0"));
+      auto& usage = UsageStats::instance();
+      QLabel* opened = nullptr;
+      QLabel* edited = nullptr;
+      QLabel* spent  = nullptr;
+      pv->addWidget(twoCol(p, Lucide::kFileText, "Documents opened",
+                           QString::number(usage.documentsOpened()), "#E6E9F0", {}, &opened));
+      pv->addWidget(twoCol(p, Lucide::kPencil, "Files edited",
+                           QString::number(usage.filesEdited()), "#E6E9F0", {}, &edited));
+      pv->addWidget(twoCol(p, Lucide::kTimer, "Time spent",
+                           usage.formattedTotal(), "#E6E9F0", {}, &spent));
+      // The panel is long-lived, so refresh in place on the one-minute tick
+      // rather than only when Home is rebuilt.
+      connect(&usage, &UsageStats::changed, p, [&usage, opened, edited, spent] {
+          if (opened) opened->setText(QString::number(usage.documentsOpened()));
+          if (edited) edited->setText(QString::number(usage.filesEdited()));
+          if (spent)  spent->setText(usage.formattedTotal());
+      });
       v->addWidget(p); }
 
     // Tools
