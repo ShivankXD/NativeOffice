@@ -19,7 +19,11 @@ BrandBar::BrandBar(QWidget* parent)
     : QWidget(parent)
 {
     setObjectName("brandBar");
-    setFixedHeight(44);
+    // 34 rather than the original 44. Every editor stacks this bar above its
+    // ribbon, so ten pixels here is ten pixels of document area recovered in
+    // every mode. Everything painted below is measured from height(), so the
+    // bar stays composed at either size.
+    setFixedHeight(34);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     // The logo artwork is a full lockup (mark + wordmark + strapline); the
@@ -87,9 +91,9 @@ void BrandBar::styleNameField() {
 
 void BrandBar::layoutNameField() {
     if (m_nameEdit->isHidden()) return;
-    const int h = 26;
+    const int h = 22;
     const int y = (height() - h) / 2;
-    const int x = 172;               // just past the "NativeOffice" wordmark
+    const int x = 152;               // just past the "NativeOffice" wordmark
     const int fw = 190;
     m_nameEdit->setGeometry(x, y, fw, h);
     const int ew = m_extLabel->sizeHint().width();
@@ -116,9 +120,9 @@ void BrandBar::paintEvent(QPaintEvent*) {
     const QString planText = m_premium ? QStringLiteral("PREMIUM")
                                        : QStringLiteral("FREE");
     const QFontMetrics pfm(pillFont);
-    const qreal pillW = pfm.horizontalAdvance(planText) + 26;
-    const qreal pillH = 22;
-    const QRectF pill(w - 14 - pillW, (h - pillH) / 2.0, pillW, pillH);
+    const qreal pillW = pfm.horizontalAdvance(planText) + 24;
+    const qreal pillH = 19;
+    const QRectF pill(w - 12 - pillW, (h - pillH) / 2.0, pillW, pillH);
 
     // ── Right-side decorations (soft clouds, dot grid, accents) ────────────
     p.setPen(Qt::NoPen);
@@ -161,12 +165,12 @@ void BrandBar::paintEvent(QPaintEvent*) {
     p.drawText(pill, Qt::AlignCenter, planText);
 
     // ── Left: brand mark in a rounded white card ────────────────────────────
-    const QRectF card(12, (h - 30) / 2.0, 30, 30);
+    const QRectF card(10, (h - 26) / 2.0, 26, 26);
     p.setPen(QPen(QColor(dark ? "#2A3140" : "#DADDE4"), 1));
     p.setBrush(Qt::white);
-    p.drawRoundedRect(card, 8, 8);
+    p.drawRoundedRect(card, 7, 7);
     if (!m_mark.isNull()) {
-        QRectF img = card.adjusted(3, 3, -3, -3);
+        QRectF img = card.adjusted(2.5, 2.5, -2.5, -2.5);
         const qreal aspect = qreal(m_mark.width()) / qreal(m_mark.height());
         if (aspect > 1.0) {          // wider than tall: pin width, centre height
             const qreal ih = img.width() / aspect;
@@ -180,15 +184,15 @@ void BrandBar::paintEvent(QPaintEvent*) {
 
     // Divider between the mark and the wordmark.
     p.setPen(QPen(QColor(dark ? "#1B212C" : "#E6E8ED"), 1));
-    p.drawLine(QPointF(54, 10), QPointF(54, h - 10));
+    p.drawLine(QPointF(46, 8), QPointF(46, h - 8));
 
     // Two-tone wordmark, echoing the logo art: "Native" ink + "Office" violet.
     QFont wf("Segoe UI");
     wf.setBold(true);
-    wf.setPixelSize(15);
+    wf.setPixelSize(14);
     p.setFont(wf);
     const QFontMetrics wfm(wf);
-    const int tx = 66;
+    const int tx = 56;
     p.setPen(QColor(dark ? "#E6E9F0" : "#1C2333"));
     p.drawText(QRectF(tx, 0, wfm.horizontalAdvance("Native") + 2, h),
                Qt::AlignVCenter | Qt::AlignLeft, "Native");
