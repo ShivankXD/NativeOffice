@@ -1089,6 +1089,9 @@ QComboBox#ribbonCombo QAbstractItemView {
     background: %5; color: %3; border: 1px solid %2;
     selection-background-color: %4;
 }
+QComboBox#ribbonCombo QAbstractItemView::item { color: %3; padding: 3px 6px; }
+QComboBox#ribbonCombo QAbstractItemView::item:selected,
+QComboBox#ribbonCombo QAbstractItemView::item:hover { background: %4; color: %3; }
 )")
         .arg(tm.chromeBg(), tm.chromeBorder(), tm.chromeText(), tm.chromeHoverBg(),
              tm.chromePanelBg(), tm.chromeActiveBg(), tm.chromeTextMuted()));

@@ -11,6 +11,8 @@
 #include <QToolButton>
 #include <QButtonGroup>
 #include <QComboBox>
+#include <QLineEdit>
+#include <QAbstractItemView>
 #include <QStackedWidget>
 #include <QMenu>
 #include <QWidgetAction>
@@ -626,6 +628,8 @@ QWidget* ImpressRibbon::buildHomeTab() {
     for (const QString& f : fdb.families()) m_fontCombo->addItem(f);
     const int segoeIdx = m_fontCombo->findText("Segoe UI");
     m_fontCombo->setCurrentIndex(segoeIdx >= 0 ? segoeIdx : 0);
+    // Font names outrun the 140px combo; let the popup be readable.
+    if (auto* v = m_fontCombo->view()) v->setMinimumWidth(300);
     connect(m_fontCombo, &QComboBox::currentTextChanged, this, [this](const QString& f) {
         if (!m_syncing) emit fontFamilyChanged(f);
     });
@@ -638,11 +642,18 @@ QWidget* ImpressRibbon::buildHomeTab() {
     for (int s : {8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 60, 72})
         m_sizeCombo->addItem(QString::number(s));
     m_sizeCombo->setCurrentText("18");
-    connect(m_sizeCombo, &QComboBox::currentTextChanged, this, [this](const QString& s) {
+    // Commit-only. On currentTextChanged this fired per keystroke, so typing
+    // "18" briefly applied size 1 to the selection.
+    auto applyFontSize = [this] {
         if (m_syncing) return;
-        bool ok = false; const int pt = s.toInt(&ok);
-        if (ok && pt > 0) emit fontSizeChanged(pt);
-    });
+        bool ok = false;
+        const int pt = m_sizeCombo->currentText().trimmed().toInt(&ok);
+        if (ok && pt > 0 && pt <= 409) emit fontSizeChanged(pt);
+    };
+    connect(m_sizeCombo, &QComboBox::activated, this,
+            [applyFontSize](int) { applyFontSize(); });
+    if (auto* le = m_sizeCombo->lineEdit())
+        connect(le, &QLineEdit::returnPressed, this, applyFontSize);
 
     m_btnBold      = makeToolBtn("B", "Bold  (Ctrl+B)", true);
     m_btnItalic    = makeToolBtn("I", "Italic  (Ctrl+I)", true);
@@ -1512,6 +1523,14 @@ QComboBox QAbstractItemView::item {
     padding-left: 6px;
     border-radius: 4px;
 }
+/* Styling ::item at all makes Qt paint the row and ignore
+   selection-background-color, while selection-color still tints the text, so
+   the highlighted entry rendered white-on-white and looked deleted. */
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background-color: #6D5BE8;
+    color: #FFFFFF;
+}
 QFrame#ribbonSep {
     background-color: #2A3344;
     border: none;
@@ -1681,6 +1700,14 @@ QComboBox QAbstractItemView::item {
     height: 26px;
     padding-left: 6px;
     border-radius: 4px;
+}
+/* Styling ::item at all makes Qt paint the row and ignore
+   selection-background-color, while selection-color still tints the text, so
+   the highlighted entry rendered white-on-white and looked deleted. */
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background-color: #6D5BE8;
+    color: #FFFFFF;
 }
 QFrame#ribbonSep {
     background-color: #E2E4E9;

@@ -1195,8 +1195,21 @@ void ImpressModule::duplicateCurrentSlide() {
 
     SlideData copy = m_slideData[m_currentIdx];
     copy.title     = copy.title + " (copy)";
-    createSlide(copy);
-    switchToSlide(static_cast<int>(m_scenes.size()) - 1);
+
+    const int target = m_currentIdx + 1;
+    createSlide(copy);                          // always appends
+    const int appended = static_cast<int>(m_scenes.size()) - 1;
+
+    // PowerPoint puts the duplicate directly after the original. Leaving it at
+    // the end of the deck is why this read as doing nothing: on anything longer
+    // than a couple of slides the copy landed off-screen, far from the slide
+    // the user was looking at.
+    if (target < appended) {
+        moveSlide(appended, target);            // also rebuilds the panel,
+        return;                                 // renumbers and commits undo
+    }
+
+    switchToSlide(appended);
     commitUndoStep();
 }
 
