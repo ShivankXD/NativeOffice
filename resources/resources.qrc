@@ -20,5 +20,11 @@
             resources/make_check_icon.py. -->
        <file alias="check-white.png">check-white.png</file>
        <file alias="check-white@2x.png">check-white@2x.png</file>
+       <!-- Spin-box chevrons. A styled ::up-arrow needs a real image; the CSS
+            zero-size-plus-borders triangle trick paints an empty block in Qt. -->
+       <file alias="spin-up.png">spin-up.png</file>
+       <file alias="spin-up@2x.png">spin-up@2x.png</file>
+       <file alias="spin-down.png">spin-down.png</file>
+       <file alias="spin-down@2x.png">spin-down@2x.png</file>
     </qresource>
 </RCC>

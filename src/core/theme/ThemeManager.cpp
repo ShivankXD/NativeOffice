@@ -283,21 +283,20 @@ QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
 QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
     background-color: #ECEEF2;
 }
+/* Real images, not the CSS zero-size-plus-borders triangle: Qt does not
+   compose those into a triangle, it paints an empty block, which left the
+   spin buttons looking like two dark smudges beside the field. */
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
 QDateEdit::up-arrow, QTimeEdit::up-arrow, QDateTimeEdit::up-arrow {
-    image: none;
-    width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-bottom: 5px solid #4A5060;
+    image: url(:/assets/spin-up.png);
+    width: 9px;
+    height: 6px;
 }
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow,
 QDateEdit::down-arrow, QTimeEdit::down-arrow, QDateTimeEdit::down-arrow {
-    image: none;
-    width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #4A5060;
+    image: url(:/assets/spin-down.png);
+    width: 9px;
+    height: 6px;
 }
 QComboBox::drop-down {
     subcontrol-origin: padding;
@@ -307,11 +306,9 @@ QComboBox::drop-down {
     background: transparent;
 }
 QComboBox::down-arrow {
-    image: none;
-    width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #4A5060;
+    image: url(:/assets/spin-down.png);
+    width: 9px;
+    height: 6px;
     margin-right: 7px;
 }
 /* The popup is a separate top-level window and does NOT inherit the rules
