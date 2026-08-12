@@ -1877,7 +1877,7 @@ QMenuBar::item:pressed {
         QMessageBox::about(win, "About NativeOffice",
             "<h3>NativeOffice Impress</h3>"
             "<p>A high-performance, cross-platform presentation tool.</p>"
-            "<p>Version 1.6.3</p>"
+            "<p>Version 1.6.4</p>"
             "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
@@ -2188,7 +2188,7 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("1.6.3");
+    app.setApplicationVersion("1.6.4");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
