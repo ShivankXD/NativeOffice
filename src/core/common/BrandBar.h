@@ -26,6 +26,12 @@ public:
     // field. An empty ext hides the whole rename control (used by tools).
     void setDocName(const QString& base, const QString& ext);
 
+    // Autosave state, e.g. "Autosaved 7s ago". Shown just left of the plan pill.
+    // The brand bar is the one strip every editor already carries, which makes
+    // it the single place the indicator can live without each module growing its
+    // own copy in a different corner.
+    void setAutoSaveStatus(const QString& text);
+
 signals:
     // Emitted as the user edits the name field (live).
     void docNameEdited(const QString& base);
@@ -42,6 +48,7 @@ private:
     bool       m_premium { false };
     QLineEdit* m_nameEdit { nullptr };
     QLabel*    m_extLabel { nullptr };
+    QString    m_autoSave;        // autosave status text, empty when idle
 };
 
 } // namespace NativeOffice

@@ -76,6 +76,12 @@ void BrandBar::setDocName(const QString& base, const QString& ext) {
     layoutNameField();
 }
 
+void BrandBar::setAutoSaveStatus(const QString& text) {
+    if (text == m_autoSave) return;      // repaint only when the wording changes
+    m_autoSave = text;
+    update();
+}
+
 void BrandBar::styleNameField() {
     const bool dark = ThemeManager::instance().isDark();
     m_nameEdit->setStyleSheet(QString(
@@ -124,9 +130,22 @@ void BrandBar::paintEvent(QPaintEvent*) {
     const qreal pillH = 19;
     const QRectF pill(w - 12 - pillW, (h - pillH) / 2.0, pillW, pillH);
 
+    // ── Autosave status: measured here, painted after the art ───────────────
+    // Only the geometry is worked out at this point. The clouds below are wide
+    // ellipses drawn from `dx`, so they reach well past it and would cover the
+    // text if it went down first; it is drawn last instead.
+    QFont statusFont("Segoe UI");
+    statusFont.setPixelSize(11);
+    qreal statusLeft = pill.left();
+    qreal statusW = 0;
+    if (!m_autoSave.isEmpty()) {
+        statusW = QFontMetrics(statusFont).horizontalAdvance(m_autoSave);
+        statusLeft = pill.left() - 12 - statusW;
+    }
+
     // ── Right-side decorations (soft clouds, dot grid, accents) ────────────
     p.setPen(Qt::NoPen);
-    const qreal dx = pill.left() - 12;   // decorations end here
+    const qreal dx = statusLeft - 12;   // decorations end here
     p.setBrush(QColor(dark ? "#141C2E" : "#E2EAF8"));
     p.drawEllipse(QPointF(dx - 44, h + 8), 40, 26);
     p.drawEllipse(QPointF(dx, h + 10), 50, 32);
@@ -163,6 +182,14 @@ void BrandBar::paintEvent(QPaintEvent*) {
         p.setPen(QColor(dark ? "#9AA4B8" : "#6B7280"));
     }
     p.drawText(pill, Qt::AlignCenter, planText);
+
+    // Autosave status last, so it sits above the decorative art.
+    if (!m_autoSave.isEmpty()) {
+        p.setFont(statusFont);
+        p.setPen(QColor(dark ? "#8A93A6" : "#7C8496"));
+        p.drawText(QRectF(statusLeft, 0, statusW + 2, h),
+                   Qt::AlignVCenter | Qt::AlignLeft, m_autoSave);
+    }
 
     // ── Left: brand mark in a rounded white card ────────────────────────────
     const QRectF card(10, (h - 26) / 2.0, 26, 26);
