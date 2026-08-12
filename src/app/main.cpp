@@ -62,6 +62,13 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFontDatabase>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QGraphicsOpacityEffect>
+#include <QPropertyAnimation>
+#include <QLinearGradient>
 #include <functional>
 #include <thread>
 // Sprint 6: PDF export
@@ -69,6 +76,19 @@
 #include <QPainter>
 #include <QPageSize>
 #include <QPageLayout>
+
+// Deliberately last: windows.h defines min/max macros and a pile of generic
+// names that collide with Qt if it is pulled in ahead of the Qt headers.
+#ifdef Q_OS_WIN
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <windowsx.h>
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Window sizing
@@ -688,6 +708,11 @@ static MarkdownEditorWindow* createMarkdownEditorWindow() {
 class ShellTabBar : public QTabBar {
     Q_OBJECT
 public:
+    // The strip is the topmost thing in the window now, so its height is the
+    // app's title bar height. 30 keeps a comfortable click target while looking
+    // like a tab strip rather than a toolbar.
+    static constexpr int kTabHeight = 30;
+
     explicit ShellTabBar(QWidget* parent = nullptr) : QTabBar(parent) {
         setExpanding(false);
         setDrawBase(false);
@@ -698,8 +723,10 @@ public:
         setElideMode(Qt::ElideRight);
         setMovable(false);
         setMouseTracking(true);
-        // Overflow scroll arrows: keep them on the dark strip.
-        setStyleSheet("QTabBar QToolButton { background:#0D1117; border:none; }");
+        // The bar lives inside a QScrollArea now, so its own overflow arrows
+        // would be a second, competing scroll mechanism.
+        setUsesScrollButtons(false);
+        setFixedHeight(kTabHeight);
     }
 
 protected:
@@ -714,8 +741,8 @@ protected:
     }
     QSize tabSizeHint(int index) const override {
         QSize s = QTabBar::tabSizeHint(index);
-        s.setHeight(qMax(s.height(), 36));
-        s.setWidth(qMax(s.width() + 24, 110));   // padding + room for close button
+        s.setHeight(kTabHeight);
+        s.setWidth(qMax(s.width() + 20, 104));   // padding + room for close button
         return s;
     }
 
@@ -748,7 +775,7 @@ protected:
             p.setFont(f);
             p.setPen(fg);
             // Leave room on the right for the close button on non-Home tabs.
-            const QRect tr = r.adjusted(14, 0, home ? -14 : -30, 0);
+            const QRect tr = r.adjusted(12, 0, home ? -12 : -26, 0);
             p.drawText(tr, Qt::AlignVCenter | Qt::AlignLeft,
                        fontMetrics().elidedText(tabText(i), Qt::ElideRight, tr.width()));
         }
@@ -760,6 +787,138 @@ protected:
 
 private:
     int m_hover { -1 };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TabFade — the soft darkening at the edges of the tab strip when it scrolls,
+// the same cue chat sidebars use to say "there is more this way". Purely
+// decorative: it sits over the scroll viewport and passes every click through.
+// ─────────────────────────────────────────────────────────────────────────────
+class TabFade : public QWidget {
+    Q_OBJECT
+public:
+    explicit TabFade(QWidget* parent = nullptr) : QWidget(parent) {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+    }
+    // How much room is left to scroll in each direction, so a fade is only
+    // drawn on a side that actually has hidden tabs.
+    void setOverflow(bool left, bool right) {
+        if (left == m_left && right == m_right) return;
+        m_left = left; m_right = right;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        static constexpr int kW = 26;
+        QPainter p(this);
+        const QColor solid("#0D1117");
+        QColor clear = solid; clear.setAlpha(0);
+
+        if (m_left) {
+            QLinearGradient g(0, 0, kW, 0);
+            g.setColorAt(0.0, solid);
+            g.setColorAt(1.0, clear);
+            p.fillRect(QRect(0, 0, kW, height()), g);
+        }
+        if (m_right) {
+            QLinearGradient g(width() - kW, 0, width(), 0);
+            g.setColorAt(0.0, clear);
+            g.setColorAt(1.0, solid);
+            p.fillRect(QRect(width() - kW, 0, kW, height()), g);
+        }
+    }
+
+private:
+    bool m_left { false };
+    bool m_right { false };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WindowControls — minimise, maximise/restore and close.
+//
+// The native title bar is gone (see MainShell::nativeEvent), so these are ours
+// to draw. They stay invisible until the pointer reaches the top strip, which
+// keeps the chrome quiet while working; the space is reserved permanently so
+// nothing shifts when they fade in, and it is the one region of the strip that
+// never holds tabs.
+// ─────────────────────────────────────────────────────────────────────────────
+class WindowControls : public QWidget {
+    Q_OBJECT
+public:
+    explicit WindowControls(QWidget* target, QWidget* parent = nullptr)
+        : QWidget(parent), m_target(target)
+    {
+        auto* h = new QHBoxLayout(this);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+
+        m_min  = makeButton(QStringLiteral("─"), QStringLiteral("Minimise"), false);
+        m_max  = makeButton(QStringLiteral("□"), QStringLiteral("Maximise"), false);
+        m_close = makeButton(QStringLiteral("✕"), QStringLiteral("Close"), true);
+        h->addWidget(m_min);
+        h->addWidget(m_max);
+        h->addWidget(m_close);
+
+        connect(m_min, &QToolButton::clicked, this, [this] { m_target->showMinimized(); });
+        connect(m_max, &QToolButton::clicked, this, [this] {
+            if (m_target->isMaximized()) m_target->showNormal();
+            else                         m_target->showMaximized();
+            refreshMaxIcon();
+        });
+        connect(m_close, &QToolButton::clicked, this, [this] { m_target->close(); });
+
+        // Faded rather than hidden so the strip's layout never moves.
+        m_fade = new QGraphicsOpacityEffect(this);
+        m_fade->setOpacity(0.0);
+        setGraphicsEffect(m_fade);
+        m_anim = new QPropertyAnimation(m_fade, "opacity", this);
+        m_anim->setDuration(130);
+    }
+
+    void setRevealed(bool on) {
+        if (on == m_revealed) return;
+        m_revealed = on;
+        m_anim->stop();
+        m_anim->setStartValue(m_fade->opacity());
+        m_anim->setEndValue(on ? 1.0 : 0.0);
+        m_anim->start();
+    }
+
+    void refreshMaxIcon() {
+        const bool zoomed = m_target->isMaximized();
+        m_max->setText(zoomed ? QStringLiteral("❐") : QStringLiteral("□"));
+        m_max->setToolTip(zoomed ? QStringLiteral("Restore") : QStringLiteral("Maximise"));
+    }
+
+private:
+    QToolButton* makeButton(const QString& glyph, const QString& tip, bool danger) {
+        auto* b = new QToolButton(this);
+        b->setText(glyph);
+        b->setToolTip(tip);
+        b->setCursor(Qt::ArrowCursor);
+        b->setFixedSize(44, ShellTabBar::kTabHeight);
+        b->setFocusPolicy(Qt::NoFocus);
+        // White glyphs on the dark strip; only close goes red, and only on hover.
+        b->setStyleSheet(QString(
+            "QToolButton { border:none; background:transparent; color:#FFFFFF;"
+            "  font-size:12px; }"
+            "QToolButton:hover { background:%1; color:#FFFFFF; }"
+            "QToolButton:pressed { background:%2; }")
+            .arg(danger ? "#E81123" : "rgba(255,255,255,0.14)",
+                 danger ? "#C50F1F" : "rgba(255,255,255,0.22)"));
+        return b;
+    }
+
+    QWidget*                m_target { nullptr };
+    QToolButton*            m_min    { nullptr };
+    QToolButton*            m_max    { nullptr };
+    QToolButton*            m_close  { nullptr };
+    QGraphicsOpacityEffect* m_fade   { nullptr };
+    QPropertyAnimation*     m_anim   { nullptr };
+    bool                    m_revealed { false };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -793,42 +952,147 @@ public:
         v->setContentsMargins(0, 0, 0, 0);
         v->setSpacing(0);
 
-        // Dark top strip: tab bar on the left, "+" right after the last tab.
-        auto* topBar = new QWidget(central);
-        topBar->setObjectName("shellTopBar");
-        topBar->setStyleSheet("#shellTopBar { background:#0D1117; }");
-        auto* hb = new QHBoxLayout(topBar);
+        // ── Top strip ────────────────────────────────────────────────────────
+        // This is now the very first row of the window: the OS title bar is
+        // suppressed in nativeEvent, so the tab strip IS the title bar. It holds
+        // the scrollable tab region, the "+" button, a draggable gap, and the
+        // window buttons pinned right.
+        m_topBar = new QWidget(central);
+        m_topBar->setObjectName("shellTopBar");
+        m_topBar->setStyleSheet("#shellTopBar { background:#0D1117; }");
+        m_topBar->setAttribute(Qt::WA_Hover, true);
+        m_topBar->installEventFilter(this);
+        auto* hb = new QHBoxLayout(m_topBar);
         hb->setContentsMargins(0, 0, 0, 0);
         hb->setSpacing(0);
 
-        m_bar = new ShellTabBar(topBar);
+        // Tabs live inside a scroll area rather than using QTabBar's own arrow
+        // buttons, so overflow reads as a scrollable list with a slim bar under
+        // it instead of two little chevrons.
+        m_scroll = new QScrollArea(m_topBar);
+        m_scroll->setFrameShape(QFrame::NoFrame);
+        m_scroll->setWidgetResizable(false);
+        m_scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        m_scroll->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+        m_scroll->viewport()->setStyleSheet("background:#0D1117;");
+        m_scroll->setStyleSheet(
+            "QScrollArea { background:#0D1117; border:none; }"
+            "QScrollBar:horizontal { height:5px; background:#0D1117; margin:0; border:none; }"
+            "QScrollBar::handle:horizontal { background:#39414F; border-radius:2px; min-width:36px; }"
+            "QScrollBar::handle:horizontal:hover { background:#525C6E; }"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; height:0; }"
+            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }");
 
-        auto* plus = new QToolButton(topBar);
+        // Fixed height reserves the scrollbar's 5px permanently, so the strip
+        // does not grow and shove the whole document down the moment a tab
+        // overflows. With no overflow the reserved band is just background.
+        m_scroll->setFixedHeight(ShellTabBar::kTabHeight + 5);
+
+        m_bar = new ShellTabBar(m_scroll);
+        m_scroll->setWidget(m_bar);
+
+        m_fade = new TabFade(m_scroll->viewport());
+        m_scroll->viewport()->installEventFilter(this);
+        connect(m_scroll->horizontalScrollBar(), &QScrollBar::valueChanged,
+                this, [this](int) { refreshFade(); });
+        connect(m_scroll->horizontalScrollBar(), &QScrollBar::rangeChanged,
+                this, [this](int, int) { refreshFade(); });
+
+        auto* plus = new QToolButton(m_topBar);
         plus->setText("+");
         plus->setAutoRaise(true);
-        plus->setToolTip("New tab — open Home");
+        plus->setToolTip("New tab (Ctrl+T)");
         plus->setCursor(Qt::PointingHandCursor);
-        plus->setFixedHeight(36);
+        plus->setFixedHeight(ShellTabBar::kTabHeight);
+        plus->setFocusPolicy(Qt::NoFocus);
         plus->setStyleSheet(
-            "QToolButton { font-size:20px; font-weight:600; color:#A78BFA;"
-            "  background:#0D1117; padding:0 16px; border:none; }"
+            "QToolButton { font-size:17px; font-weight:600; color:#A78BFA;"
+            "  background:#0D1117; padding:0 13px; border:none; }"
             "QToolButton:hover { color:#C4B5FD; background:#17233B; }");
         connect(plus, &QToolButton::clicked, this, [this]() { openHomeTab(); });
+        m_plus = plus;
 
-        hb->addWidget(m_bar, 0);
-        hb->addWidget(plus, 0);
-        hb->addStretch(1);             // white fill to the right of the "+"
+        m_controls = new WindowControls(this, m_topBar);
+
+        // Top row of the strip; the scrollbar the QScrollArea adds appears
+        // directly beneath the tabs, inside m_scroll itself.
+        hb->addWidget(m_scroll, 0, Qt::AlignTop);
+        hb->addWidget(plus, 0, Qt::AlignTop);
+        hb->addStretch(1);             // draggable gap
+        hb->addWidget(m_controls, 0, Qt::AlignTop);
 
         m_stack = new QStackedWidget(central);
 
-        v->addWidget(topBar, 0);
+        v->addWidget(m_topBar, 0);
         v->addWidget(m_stack, 1);
         setCentralWidget(central);
 
-        connect(m_bar, &QTabBar::currentChanged,
-                m_stack, &QStackedWidget::setCurrentIndex);
+        connect(m_bar, &QTabBar::currentChanged, this, [this](int i) {
+            m_stack->setCurrentIndex(i);
+            ensureTabVisible(i);
+        });
         connect(m_bar, &QTabBar::tabCloseRequested,
                 this, &MainShell::handleTabClose);
+
+        installShortcuts();
+        startHoverWatch();
+    }
+
+    // ── Tab keyboard commands ───────────────────────────────────────────────
+    // ApplicationShortcut because focus is almost always deep inside an editor
+    // widget when these are pressed. None of them collide with an editor
+    // binding; plain Tab and Shift+Tab stay with the document (Writer uses them
+    // for list indenting) and are untouched here.
+    void installShortcuts() {
+        auto add = [this](QKeySequence seq, void (MainShell::*slot)()) {
+            auto* sc = new QShortcut(seq, this);
+            sc->setContext(Qt::ApplicationShortcut);
+            connect(sc, &QShortcut::activated, this, slot);
+        };
+        add(QKeySequence(Qt::CTRL | Qt::Key_W),                  &MainShell::closeCurrentTab);
+        add(QKeySequence(Qt::CTRL | Qt::Key_F4),                 &MainShell::closeCurrentTab);
+        add(QKeySequence(Qt::CTRL | Qt::Key_T),                  &MainShell::openHomeTab);
+        add(QKeySequence(Qt::CTRL | Qt::Key_Tab),                &MainShell::nextTab);
+        add(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Tab),    &MainShell::prevTab);
+        add(QKeySequence(Qt::CTRL | Qt::Key_PageDown),           &MainShell::nextTab);
+        add(QKeySequence(Qt::CTRL | Qt::Key_PageUp),             &MainShell::prevTab);
+        add(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T),      &MainShell::reopenClosedTab);
+
+        // Ctrl+1..8 jump to that tab, Ctrl+9 to the last one, matching browsers.
+        for (int n = 1; n <= 9; ++n) {
+            auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key(Qt::Key_0 + n)), this);
+            sc->setContext(Qt::ApplicationShortcut);
+            connect(sc, &QShortcut::activated, this, [this, n] {
+                const int idx = (n == 9) ? m_bar->count() - 1 : n - 1;
+                if (idx >= 0 && idx < m_bar->count()) m_bar->setCurrentIndex(idx);
+            });
+        }
+    }
+
+public slots:
+    void closeCurrentTab() { handleTabClose(m_bar->currentIndex()); }
+
+    void nextTab() {
+        if (m_bar->count() < 2) return;
+        m_bar->setCurrentIndex((m_bar->currentIndex() + 1) % m_bar->count());
+    }
+    void prevTab() {
+        if (m_bar->count() < 2) return;
+        m_bar->setCurrentIndex((m_bar->currentIndex() - 1 + m_bar->count()) % m_bar->count());
+    }
+
+    // Reopens the most recently closed tab. Only documents that had been saved
+    // to disk can come back, because that path is the whole of what we kept; an
+    // untitled buffer has nothing to reopen from and is skipped rather than
+    // resurrected empty, which would be worse than doing nothing.
+    void reopenClosedTab() {
+        while (!m_closed.isEmpty()) {
+            const QString path = m_closed.takeLast();
+            if (path.isEmpty() || !QFileInfo::exists(path)) continue;
+            openPathInNewTab(path);
+            return;
+        }
     }
 
     // Factory used to spin up additional Home pages (wired to the controller).
@@ -923,8 +1187,10 @@ private:
         });
         m_bar->setTabButton(idx, QTabBar::RightSide, close);
 
+        syncTabWidth();
         m_bar->setCurrentIndex(idx);
         m_stack->setCurrentIndex(idx);
+        ensureTabVisible(idx);
         return idx;
     }
 
@@ -932,7 +1198,9 @@ private:
     void watchTitle(EditorWindow* win) {
         auto refresh = [this, win] {
             const int i = m_stack->indexOf(win);
-            if (i >= 0) m_bar->setTabText(i, labelFor(win));
+            // A renamed tab is a differently sized tab, so the scroll range has
+            // to be recomputed or the last tab drifts out of reach.
+            if (i >= 0) { m_bar->setTabText(i, labelFor(win)); syncTabWidth(); }
         };
         connect(win, &QWidget::windowTitleChanged, this,
                 [win, refresh](const QString&) { win->syncNameFromPath(); refresh(); });
@@ -957,19 +1225,235 @@ private:
     }
 
     void handleTabClose(int idx) {
-        if (idx == 0) return;                      // Home is pinned
+        if (idx <= 0) return;                      // Home is pinned
         QWidget* w = m_stack->widget(idx);
         if (!w) return;
         auto* win = qobject_cast<EditorWindow*>(w);
+        // requestClose() is what raises the "save your changes?" prompt, so
+        // Ctrl+W and the close button both go through it and neither can drop
+        // unsaved work.
         if (win && !win->requestClose()) return;   // user cancelled
+
+        // Remember where it came from so Ctrl+Shift+T can bring it back.
+        if (win) {
+            const QString path = win->currentDocPath();
+            if (!path.isEmpty()) {
+                m_closed.removeAll(path);
+                m_closed.append(path);
+                if (m_closed.size() > 20) m_closed.removeFirst();
+            }
+        }
+
         m_bar->removeTab(idx);
         m_stack->removeWidget(w);
         w->deleteLater();
+        syncTabWidth();
     }
 
+    // The tab bar sits inside a scroll area that does not resize its widget, so
+    // the bar has to be told to match its own content width whenever the set of
+    // tabs changes. Without this the scroll range never grows and later tabs
+    // simply cannot be reached.
+    void syncTabWidth() {
+        if (!m_bar || !m_scroll || !m_plus) return;
+        const int contentW = m_bar->sizeHint().width();
+        m_bar->resize(contentW, ShellTabBar::kTabHeight);
+
+        // The viewport has to be told how wide to be. A QScrollArea whose widget
+        // is not resizable falls back to a generic sizeHint of a couple of
+        // hundred pixels, which made two tabs overflow instantly and scrolled
+        // the pinned Home tab out of sight. Track the content instead, up to the
+        // 80% cap, so the bar is only ever scrollable when it genuinely is.
+        const int cap = qMax(200, int(width() * 0.80) - m_plus->sizeHint().width());
+        m_scroll->setFixedWidth(qMin(contentW, cap));
+        refreshFade();
+    }
+
+    void refreshFade() {
+        if (!m_fade || !m_scroll) return;
+        auto* sb = m_scroll->horizontalScrollBar();
+        m_fade->setGeometry(m_scroll->viewport()->rect());
+        m_fade->setOverflow(sb->value() > sb->minimum(), sb->value() < sb->maximum());
+        m_fade->raise();
+    }
+
+    // Keep the selected tab on screen when it is reached by keyboard.
+    //
+    // Deferred by a turn of the event loop on purpose: called straight out of
+    // addPage the viewport has not been laid out yet and reports a width of
+    // zero, so every tab looks off-screen and the bar scrolls itself to the end.
+    void ensureTabVisible(int idx) {
+        QTimer::singleShot(0, this, [this, idx] {
+            if (!m_scroll || idx < 0 || idx >= m_bar->count()) return;
+            const int vw = m_scroll->viewport()->width();
+            if (vw <= 0) return;
+            const QRect r = m_bar->tabRect(idx);
+            auto* sb = m_scroll->horizontalScrollBar();
+            if (r.left() < sb->value())            sb->setValue(r.left());
+            else if (r.right() > sb->value() + vw) sb->setValue(r.right() - vw);
+        });
+    }
+
+    // Tabs are capped at 80% of the window. The rest is deliberately left free:
+    // it is the drag handle for the window and the home of the window buttons,
+    // and tabs running the full width would leave nowhere to grab.
+    void updateTabRegionWidth() { syncTabWidth(); }
+
+    // Drives the show/hide of the window buttons purely from where the cursor
+    // is.
+    //
+    // Enter/Leave events are not usable for this. The draggable part of the
+    // strip hit-tests as HTCAPTION, so Windows delivers movement over it as
+    // non-client messages that Qt never turns into an Enter, and the buttons
+    // stayed hidden over exactly the area meant to reveal them. Sampling the
+    // cursor four times a second sidesteps the client/non-client split entirely
+    // and costs a point comparison.
+    void startHoverWatch() {
+        m_hoverPoll = new QTimer(this);
+        m_hoverPoll->setInterval(250);
+        connect(m_hoverPoll, &QTimer::timeout, this, [this] {
+            if (!m_controls || !m_topBar || !isVisible()) return;
+            const bool inside = m_topBar->rect().contains(
+                m_topBar->mapFromGlobal(QCursor::pos()));
+            m_controls->setRevealed(inside);
+        });
+        m_hoverPoll->start();
+    }
+
+    void revealControls() { if (m_controls) m_controls->setRevealed(true); }
+
+protected:
+    void resizeEvent(QResizeEvent* e) override {
+        QMainWindow::resizeEvent(e);
+        updateTabRegionWidth();
+    }
+
+    void changeEvent(QEvent* e) override {
+        QMainWindow::changeEvent(e);
+        if (e->type() == QEvent::WindowStateChange && m_controls)
+            m_controls->refreshMaxIcon();
+    }
+
+    bool eventFilter(QObject* o, QEvent* e) override {
+        if (o == m_topBar) {
+            // Reveal the window buttons for the whole strip rather than only
+            // their own 132px. They are invisible until hovered, so requiring
+            // the pointer to find them exactly would make them undiscoverable.
+            if (e->type() == QEvent::Enter || e->type() == QEvent::HoverEnter ||
+                e->type() == QEvent::HoverMove)
+                revealControls();
+        } else if (m_scroll && o == m_scroll->viewport() && e->type() == QEvent::Resize) {
+            refreshFade();
+        }
+        return QMainWindow::eventFilter(o, e);
+    }
+
+#ifdef Q_OS_WIN
+    // Removes the OS title bar while keeping everything Windows gives a normal
+    // window: resize borders, Aero snap, Snap Layouts and double-click to
+    // maximise. That is the reason this is done by answering WM_NCCALCSIZE
+    // rather than with Qt::FramelessWindowHint, which strips WS_THICKFRAME and
+    // takes all of those away with it.
+    bool nativeEvent(const QByteArray& type, void* message, qintptr* result) override {
+        MSG* msg = static_cast<MSG*>(message);
+        if (!msg || !msg->hwnd) return QMainWindow::nativeEvent(type, message, result);
+        // The handle comes from the message, never from winId(): WM_NCCALCSIZE
+        // arrives while the native window is still being created, and winId()
+        // forces creation, so calling it here re-enters that construction and
+        // tears the window down before it is ever shown.
+        HWND hwnd = msg->hwnd;
+
+        switch (msg->message) {
+        case WM_NCCALCSIZE: {
+            if (msg->wParam == TRUE) {
+                auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam);
+                // A maximised window is intentionally sized larger than the work
+                // area by the frame thickness. Without putting that back, the top
+                // of the tab strip would sit off the top of the screen.
+                if (::IsZoomed(hwnd)) {
+                    const int fx = ::GetSystemMetrics(SM_CXSIZEFRAME)
+                                 + ::GetSystemMetrics(SM_CXPADDEDBORDER);
+                    const int fy = ::GetSystemMetrics(SM_CYSIZEFRAME)
+                                 + ::GetSystemMetrics(SM_CXPADDEDBORDER);
+                    p->rgrc[0].left   += fx;
+                    p->rgrc[0].right  -= fx;
+                    p->rgrc[0].top    += fy;
+                    p->rgrc[0].bottom -= fy;
+                }
+                *result = 0;
+                return true;      // client area now covers the whole window
+            }
+            break;
+        }
+        // The draggable part of the strip hit-tests as HTCAPTION, which makes
+        // Windows deliver movement there as NON-client mouse messages. Qt never
+        // turns those into an Enter event, so the hover reveal below would never
+        // fire over the very area it exists for. Catching it here covers the
+        // caption; the Qt hover in eventFilter covers the client parts.
+        case WM_NCMOUSEMOVE: {
+            revealControls();
+            break;                 // let Qt and DefWindowProc still see it
+        }
+        case WM_NCHITTEST: {
+            // Qt keeps QCursor::pos() in logical pixels, which mapFromGlobal
+            // expects; taking the coordinates out of lParam instead would be
+            // wrong on any display that is not at 100% scaling.
+            const QPoint local = mapFromGlobal(QCursor::pos());
+            const int bw = 6;     // resize border thickness
+            const bool zoomed = isMaximized();
+
+            if (!zoomed) {
+                const bool L = local.x() >= 0 && local.x() < bw;
+                const bool R = local.x() < width()  && local.x() >= width()  - bw;
+                const bool T = local.y() >= 0 && local.y() < bw;
+                const bool B = local.y() < height() && local.y() >= height() - bw;
+                if (T && L) { *result = HTTOPLEFT;     return true; }
+                if (T && R) { *result = HTTOPRIGHT;    return true; }
+                if (B && L) { *result = HTBOTTOMLEFT;  return true; }
+                if (B && R) { *result = HTBOTTOMRIGHT; return true; }
+                if (L)      { *result = HTLEFT;        return true; }
+                if (R)      { *result = HTRIGHT;       return true; }
+                if (T)      { *result = HTTOP;         return true; }
+                if (B)      { *result = HTBOTTOM;      return true; }
+            }
+
+            // Anything in the strip that is not itself clickable drags the
+            // window. childAt() returns the deepest interactive child, so tabs,
+            // the "+" and the window buttons keep their own behaviour.
+            if (m_topBar && local.y() < m_topBar->height()) {
+                QWidget* child = m_topBar->childAt(m_topBar->mapFrom(this, local));
+                if (!child || child == m_topBar) { *result = HTCAPTION; return true; }
+            }
+            break;
+        }
+        default: break;
+        }
+        return QMainWindow::nativeEvent(type, message, result);
+    }
+#endif
+
+private:
     ShellTabBar*               m_bar   { nullptr };
     QStackedWidget*            m_stack { nullptr };
+    QWidget*                   m_topBar { nullptr };
+    QScrollArea*               m_scroll { nullptr };
+    TabFade*                   m_fade   { nullptr };
+    QToolButton*               m_plus   { nullptr };
+    WindowControls*            m_controls { nullptr };
+    QTimer*                    m_hoverPoll { nullptr };
+    QStringList                m_closed;          // recently closed file paths
     std::function<QWidget*()>  m_homeFactory;
+
+public:
+    // Set by main(): reopening a closed tab has to go back through the same
+    // file router the rest of the app uses, and that lives further down.
+    void setOpenPathHook(std::function<void(const QString&)> f) {
+        m_openPath = std::move(f);
+    }
+
+private:
+    void openPathInNewTab(const QString& path) { if (m_openPath) m_openPath(path); }
+    std::function<void(const QString&)> m_openPath;
 };
 
 // The single shell instance; document windows route their tabs through it.
@@ -1839,6 +2323,9 @@ int main(int argc, char* argv[]) {
     };
 
     shell.setHomeFactory(makeEphemeralHome);
+    // Ctrl+Shift+T reopens through the same router as every other file open,
+    // so a restored tab is identical to one opened from Home or the shell.
+    shell.setOpenPathHook([](const QString& path) { openDocumentByPath(path); });
     shell.setHomePage(makePinnedHome());   // pinned first tab
 
     // ── AppController → open new documents / files as tabs ────────────────
