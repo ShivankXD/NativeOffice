@@ -405,15 +405,29 @@ public:
             p->fillRect(opt.rect, QColor(16, 124, 65, 28));   // green selection tint
 
         // ── Borders ──────────────────────────────────────────────────────────
-        if (fmt.borderEdges) {
-            QPen bp(fmt.borderColor.isValid() ? fmt.borderColor : QColor("#000000"));
-            bp.setWidth(1);
-            p->setPen(bp);
-            const QRect rr = opt.rect.adjusted(0, 0, -1, -1);
-            if (fmt.borderEdges & CellFormat::BTop)    p->drawLine(rr.topLeft(),    rr.topRight());
-            if (fmt.borderEdges & CellFormat::BBottom) p->drawLine(rr.bottomLeft(), rr.bottomRight());
-            if (fmt.borderEdges & CellFormat::BLeft)   p->drawLine(rr.topLeft(),    rr.bottomLeft());
-            if (fmt.borderEdges & CellFormat::BRight)  p->drawLine(rr.topRight(),   rr.bottomRight());
+        {
+            const int l = opt.rect.left();
+            const int t = opt.rect.top();
+            const int r = opt.rect.right();
+            const int b = opt.rect.bottom();
+
+            // Default grid, drawn on the cell's own right and bottom edges so
+            // neighbouring cells share the line rather than leaving a seam.
+            p->setPen(QColor("#E2E2E2"));
+            p->drawLine(r, t, r, b);
+            p->drawLine(l, b, r, b);
+
+            // User borders paint over the grid on the same coordinates, so an
+            // all-borders block reads as one table instead of loose boxes.
+            if (fmt.borderEdges) {
+                QPen bp(fmt.borderColor.isValid() ? fmt.borderColor : QColor("#000000"));
+                bp.setWidth(1);
+                p->setPen(bp);
+                if (fmt.borderEdges & CellFormat::BTop)    p->drawLine(l, t, r, t);
+                if (fmt.borderEdges & CellFormat::BBottom) p->drawLine(l, b, r, b);
+                if (fmt.borderEdges & CellFormat::BLeft)   p->drawLine(l, t, l, b);
+                if (fmt.borderEdges & CellFormat::BRight)  p->drawLine(r, t, r, b);
+            }
         }
 
         // ── Text ─────────────────────────────────────────────────────────────
@@ -1020,7 +1034,10 @@ void CalcModule::buildUi() {
         const int nextRow = std::min(cur.row() + 1, SpreadsheetModel::NUM_ROWS - 1);
         const int col = cur.column();
         // Queued: the view is still finishing its own close-editor handling.
-        QTimer::singleShot(0, this, [this, nextRow, col] {
+        // Only advance if nothing else moved the cursor in the meantime, so a
+        // click landing right after the commit is not undone by this.
+        QTimer::singleShot(0, this, [this, nextRow, col, cur] {
+            if (m_tableView->currentIndex() != cur) return;
             m_tableView->setCurrentIndex(m_model->index(nextRow, col));
         });
     });
@@ -1051,7 +1068,12 @@ void CalcModule::buildUi() {
     m_tableView->setEditTriggers(QAbstractItemView::DoubleClicked
                                  | QAbstractItemView::AnyKeyPressed
                                  | QAbstractItemView::EditKeyPressed);
-    m_tableView->setShowGrid(true);
+    // The delegate paints the grid, not the view. With the view drawing it,
+    // every item rect was inset by the grid pixel and Qt clips each cell to its
+    // own rect, so a cell's border could never meet its neighbour's: All Borders
+    // came out as detached blocks with a light seam between them. Owning every
+    // pixel of the cell makes adjacent cells contiguous.
+    m_tableView->setShowGrid(false);
 
     // ── Header + grid context menus (row/column operations) ──────────────────
     m_rowHeader->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2538,7 +2560,7 @@ QTableView* CalcModule::makeFrozenView() {
     v->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     v->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     v->setFrameShape(QFrame::NoFrame);
-    v->setShowGrid(true);
+    v->setShowGrid(false);          // the delegate draws the grid, as in the main view
     v->setStyleSheet(
         "QTableView#frozenView{border:none;gridline-color:#E2E2E2;background:#FFFFFF;"
         "border-right:2px solid #B6BBC2;border-bottom:2px solid #B6BBC2;}");
