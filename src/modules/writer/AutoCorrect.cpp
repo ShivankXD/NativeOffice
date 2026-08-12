@@ -3,7 +3,50 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "AutoCorrect.h"
 
+#include <QSet>
+
 namespace NativeOffice {
+
+namespace {
+
+// Words that routinely end in a period without ending a sentence. Stored
+// lower-case and without interior dots, so "i.e" is looked up as "ie".
+const QSet<QString>& abbreviations() {
+    static const QSet<QString> s = {
+        "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc",
+        "approx", "inc", "ltd", "co", "corp", "dept", "est", "fig", "no",
+        "al", "ca", "cf", "eg", "ie", "pp", "vol", "ed", "eds", "min", "max",
+        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+        "oct", "nov", "dec",
+        "mon", "tue", "tues", "wed", "thu", "thurs", "fri", "sat", "sun"
+    };
+    return s;
+}
+
+} // namespace
+
+bool AutoCorrect::endsSentence(const QString& textBefore) {
+    const QString t = textBefore.trimmed();
+    if (t.isEmpty()) return true;              // start of a block
+
+    const QChar last = t.back();
+    if (last == '!' || last == '?') return true;
+    if (last != '.') return false;
+
+    // Walk back over the token the period belongs to, keeping interior dots so
+    // "e.g" and "U.S.A" are each seen as one token rather than a bare letter.
+    QString token;
+    for (int i = t.size() - 2; i >= 0; --i) {
+        const QChar ch = t.at(i);
+        if (!ch.isLetter() && ch != '.') break;
+        token.prepend(ch);
+    }
+    token.remove('.');
+
+    if (token.isEmpty()) return true;
+    if (token.size() == 1) return false;       // "e.", "i." and other initials
+    return !abbreviations().contains(token.toLower());
+}
 
 const QHash<QString, QString>& AutoCorrect::typoMap() {
     static const QHash<QString, QString> m = {

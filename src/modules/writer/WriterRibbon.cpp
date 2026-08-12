@@ -72,6 +72,8 @@
 #include <functional>
 #include <QListWidget>
 #include <QDateTime>
+#include <QMouseEvent>
+#include <QSignalBlocker>
 #include <QImage>
 #include <QBuffer>
 #include <QByteArray>
@@ -108,6 +110,10 @@ const QColor kIconColor("#3A3F4B");
 // Block property tagging a caption paragraph with its kind ("Figure"/"Table"/…),
 // so "Update Fields" can renumber them in document order.
 constexpr int kCaptionKindProp = QTextFormat::UserProperty + 20;
+// Index entries are stored as a character-format property on the marked run.
+// They used to be written into the document as literal "{index:...}" text,
+// which meant marking a selection pasted the whole selection back in.
+constexpr int kIndexTermProp   = QTextFormat::UserProperty + 21;
 
 // Collect the bookmark (anchor) names present in a document.
 QStringList collectBookmarks(QTextDocument* doc) {
@@ -1226,16 +1232,14 @@ void WriterRibbon::attachEditor(QTextEdit* editor) {
     connect(m_editor, &QTextEdit::currentCharFormatChanged,
             this, [this](const QTextCharFormat&) { syncToCurrentFormat(); });
 
-    // Format painter: apply once the user makes a selection while it's armed.
-    connect(m_editor, &QTextEdit::selectionChanged, this, [this] {
-        if (!m_painterActive || !m_painterFmt) return;
-        QTextCursor cur = m_editor->textCursor();
-        if (!cur.hasSelection()) return;
-        cur.mergeCharFormat(*m_painterFmt);
-        m_painterActive = false;
-        if (m_btnPainter) m_btnPainter->setChecked(false);
-        m_editor->viewport()->unsetCursor();
-    });
+    // Format painter: the paint happens on mouse release, handled in
+    // eventFilter(). It used to hang off selectionChanged, which fires on
+    // every mouse-move of a drag — so it painted half-finished selections,
+    // and mergeCharFormat() re-emitted selectionChanged while the flag was
+    // still armed, recursing until the stack ran out.
+    // Mouse events land on the viewport, key events on the editor itself.
+    m_editor->viewport()->installEventFilter(this);
+    m_editor->installEventFilter(this);
 
     // ── Word/WPS-standard keyboard shortcuts ────────────────────────────────
     // Scoped to the editor (WidgetWithChildrenShortcut) so multiple Writer tabs
@@ -1361,11 +1365,25 @@ QWidget* WriterRibbon::buildHomeTab() {
     }
     if (m_fontCombo->completer())
         m_fontCombo->completer()->setCompletionMode(QCompleter::PopupCompletion);
-    connect(m_fontCombo, &QComboBox::currentTextChanged, this, [this](const QString& fam) {
-        if (m_syncing || fam.isEmpty()) return;
+    // The popup is not bound to the 150px combo: font names are long, and at
+    // combo width they were unreadable.
+    if (auto* v = m_fontCombo->view()) v->setMinimumWidth(300);
+
+    // Apply on commit, never mid-typing. This was wired to currentTextChanged,
+    // which fires on every keystroke, and mergeFormatOnSelection() hands focus
+    // back to the document — so typing a font name put the first letter in the
+    // box and every letter after it into the document.
+    auto applyFontFamily = [this] {
+        if (m_syncing) return;
+        const QString fam = m_fontCombo->currentText().trimmed();
+        if (fam.isEmpty()) return;
         QTextCharFormat fmt; fmt.setFontFamilies({fam});
         mergeFormatOnSelection(fmt);
-    });
+    };
+    connect(m_fontCombo, &QComboBox::activated, this,
+            [applyFontFamily](int) { applyFontFamily(); });
+    if (auto* le = m_fontCombo->lineEdit())
+        connect(le, &QLineEdit::returnPressed, this, applyFontFamily);
 
     m_sizeCombo = new QComboBox(tab);
     m_sizeCombo->setObjectName("ribbonCombo");
@@ -1375,13 +1393,20 @@ QWidget* WriterRibbon::buildHomeTab() {
     for (int s : {8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 48, 60, 72})
         m_sizeCombo->addItem(QString::number(s));
     m_sizeCombo->setCurrentText("12");
-    connect(m_sizeCombo, &QComboBox::currentTextChanged, this, [this](const QString& s) {
+    // Commit-only, same reasoning as the font box. Per-keystroke application
+    // also meant typing "14" briefly applied size 1 to the selection.
+    auto applyFontSize = [this] {
         if (m_syncing) return;
-        bool ok = false; const int pt = s.toInt(&ok);
-        if (!ok || pt <= 0) return;
+        bool ok = false;
+        const int pt = m_sizeCombo->currentText().trimmed().toInt(&ok);
+        if (!ok || pt <= 0 || pt > 409) return;   // 409pt is Word's ceiling
         QTextCharFormat fmt; fmt.setFontPointSize(pt);
         mergeFormatOnSelection(fmt);
-    });
+    };
+    connect(m_sizeCombo, &QComboBox::activated, this,
+            [applyFontSize](int) { applyFontSize(); });
+    if (auto* le = m_sizeCombo->lineEdit())
+        connect(le, &QLineEdit::returnPressed, this, applyFontSize);
 
     auto* btnGrow   = makeIconBtn(growIcon(true),  "Increase font size");
     auto* btnShrink = makeIconBtn(growIcon(false), "Decrease font size");
@@ -3849,10 +3874,55 @@ void WriterRibbon::setTextDirection(bool rtl) {
 
 void WriterRibbon::applyColumns(int n) {
     if (!m_editor || n < 1) return;
+
     if (n == 1) {
-        QMessageBox::information(window(), "Columns",
-            "Single-column is the default layout. Use Two/Three to create a "
-            "column region, then type into each column.");
+        // Return the column region to normal flow. This used to only show an
+        // information box, so once you made two or three columns there was no
+        // way back to one from the menu.
+        QTextCursor cur = m_editor->textCursor();
+        QTextTable* t = cur.currentTable();
+        if (!t) {
+            QMessageBox::information(window(), "Columns",
+                "The cursor is not inside a column region. Put it in one, then "
+                "choose One to merge the columns back into a single flow.");
+            return;
+        }
+
+        // Read the columns out in reading order before dropping the table.
+        QStringList parts;
+        for (int r = 0; r < t->rows(); ++r) {
+            for (int c = 0; c < t->columns(); ++c) {
+                const QTextTableCell cell = t->cellAt(r, c);
+                if (!cell.isValid()) continue;
+                QTextCursor cc = cell.firstCursorPosition();
+                cc.setPosition(cell.lastCursorPosition().position(), QTextCursor::KeepAnchor);
+                const QString s = cc.selectedText();
+                if (!s.trimmed().isEmpty()) parts << s;
+            }
+        }
+
+        QTextCursor tc(m_editor->document());
+        tc.beginEditBlock();
+        // The table frame spans firstPosition()-1 .. lastPosition()+1; taking
+        // that whole span out removes the table itself, not just its contents.
+        tc.setPosition(t->firstPosition() - 1);
+        tc.setPosition(t->lastPosition() + 1, QTextCursor::KeepAnchor);
+        tc.removeSelectedText();
+
+        bool first = true;
+        for (const QString& part : parts) {
+            // Cell text uses U+2029 between paragraphs.
+            const QStringList paras = part.split(QChar(0x2029), Qt::SkipEmptyParts);
+            for (const QString& p : paras) {
+                if (!first) tc.insertBlock();
+                tc.insertText(p);
+                first = false;
+            }
+        }
+        tc.endEditBlock();
+
+        m_editor->setTextCursor(tc);
+        m_editor->setFocus();
         return;
     }
     // Columns are implemented as a borderless full-width table — a real, usable
@@ -3984,26 +4054,55 @@ void WriterRibbon::insertCrossReference() {
 void WriterRibbon::markIndexEntry() {
     if (!m_editor) return;
     QTextCursor cur = m_editor->textCursor();
-    const QString term = cur.hasSelection() ? cur.selectedText()
-        : QInputDialog::getText(window(), "Mark Index Entry", "Term:");
-    if (term.isEmpty()) return;
-    QTextCharFormat cf; cf.setBackground(QColor("#E0E7FF")); cf.setForeground(QColor("#3730A3"));
-    // store an invisible-ish marker that insertIndex() can scan
-    QTextCursor at = m_editor->textCursor();
-    at.movePosition(QTextCursor::EndOfWord);
-    at.insertText(QString("{index:%1}").arg(term), cf);
-    QTextCharFormat reset; reset.setBackground(Qt::transparent); reset.setForeground(QColor("#1C1E26"));
-    m_editor->mergeCurrentCharFormat(reset);
+
+    // Tag the run itself rather than injecting marker text. The old version
+    // inserted a literal "{index:<selected text>}" next to the selection, so
+    // marking a paragraph duplicated that whole paragraph into the document,
+    // and marking twice nested the markers.
+    if (!cur.hasSelection()) cur.select(QTextCursor::WordUnderCursor);
+
+    QString term = cur.selectedText().simplified();
+    if (term.isEmpty()) {
+        bool ok = false;
+        term = QInputDialog::getText(window(), "Mark Index Entry", "Term:",
+                                     QLineEdit::Normal, QString(), &ok).simplified();
+        if (!ok || term.isEmpty()) return;
+        // Nothing selected to tag, so anchor the entry at the caret.
+        cur = m_editor->textCursor();
+        cur.select(QTextCursor::WordUnderCursor);
+        if (!cur.hasSelection()) {
+            QMessageBox::information(window(), "Mark Entry",
+                "Place the cursor in a word, or select some text, then mark it.");
+            return;
+        }
+    }
+
+    QTextCharFormat cf;
+    cf.setProperty(kIndexTermProp, term);
+    cf.setBackground(QColor("#E0E7FF"));      // visible cue that it is marked
+    cur.mergeCharFormat(cf);
+
     m_editor->setFocus();
 }
 
 void WriterRibbon::insertIndex() {
     if (!m_editor) return;
     QTextDocument* doc = m_editor->document();
-    static const QRegularExpression re("\\{index:([^}]+)\\}");
     QStringList terms;
+    // Entries live on the character format of the marked run.
     for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
-        auto it = re.globalMatch(b.text());
+        for (auto it = b.begin(); it != b.end(); ++it) {
+            const QTextFragment f = it.fragment();
+            if (!f.isValid()) continue;
+            const QString t = f.charFormat().stringProperty(kIndexTermProp);
+            if (!t.isEmpty()) terms << t;
+        }
+    }
+    // Documents marked by an earlier build carry literal "{index:term}" text.
+    // Keep reading those so an already-marked document still yields an index.
+    static const QRegularExpression legacy("\\{index:([^}]+)\\}");
+    for (QTextBlock b = doc->begin(); b != doc->end(); b = b.next()) {
+        auto it = legacy.globalMatch(b.text());
         while (it.hasNext()) terms << it.next().captured(1);
     }
     terms.removeDuplicates();
@@ -5469,15 +5568,66 @@ void WriterRibbon::pasteAsPlainText() {
 }
 
 void WriterRibbon::toggleFormatPainter(bool on) {
-    if (!m_editor) return;
-    if (on) {
-        if (!m_painterFmt) m_painterFmt = new QTextCharFormat();
-        *m_painterFmt = m_editor->currentCharFormat();
-        m_painterActive = true;
-        m_editor->viewport()->setCursor(Qt::IBeamCursor);
-    } else {
-        m_painterActive = false;
-        m_editor->viewport()->unsetCursor();
+    if (!m_editor) {
+        if (m_btnPainter && m_btnPainter->isChecked()) {
+            QSignalBlocker block(m_btnPainter);
+            m_btnPainter->setChecked(false);
+        }
+        return;
+    }
+    if (!on) { disarmFormatPainter(); return; }
+
+    m_painterFmt = m_editor->currentCharFormat();
+
+    // Copy only the paragraph properties a user expects the painter to carry.
+    // Merging a whole QTextBlockFormat would also drag along page-break flags
+    // and frame state, which produces surprises far from the click.
+    const QTextBlockFormat src = m_editor->textCursor().blockFormat();
+    QTextBlockFormat bf;
+    bf.setAlignment(src.alignment());
+    bf.setIndent(src.indent());
+    bf.setTextIndent(src.textIndent());
+    bf.setLeftMargin(src.leftMargin());
+    bf.setRightMargin(src.rightMargin());
+    bf.setTopMargin(src.topMargin());
+    bf.setBottomMargin(src.bottomMargin());
+    bf.setLineHeight(src.lineHeight(), src.lineHeightType());
+    m_painterBlockFmt = bf;
+
+    m_painterActive = true;
+    m_editor->viewport()->setCursor(Qt::IBeamCursor);
+}
+
+// Paint the captured format onto whatever the user just clicked or selected.
+// Re-entrancy is blocked by m_painterApplying: the document edits below emit
+// selection and format signals that can route back here.
+void WriterRibbon::applyPainterFormat() {
+    if (!m_editor || !m_painterActive || m_painterApplying) return;
+
+    QTextCursor cur = m_editor->textCursor();
+    if (!cur.hasSelection()) {
+        // A bare click paints the word under the caret, the way Word does.
+        cur.select(QTextCursor::WordUnderCursor);
+        if (!cur.hasSelection()) { disarmFormatPainter(); return; }
+    }
+
+    m_painterApplying = true;
+    cur.beginEditBlock();
+    cur.mergeCharFormat(m_painterFmt);
+    cur.mergeBlockFormat(m_painterBlockFmt);
+    cur.endEditBlock();
+    m_painterApplying = false;
+
+    disarmFormatPainter();
+    syncToCurrentFormat();
+}
+
+void WriterRibbon::disarmFormatPainter() {
+    m_painterActive = false;
+    if (m_editor) m_editor->viewport()->unsetCursor();
+    if (m_btnPainter && m_btnPainter->isChecked()) {
+        QSignalBlocker block(m_btnPainter);   // must not re-enter toggleFormatPainter
+        m_btnPainter->setChecked(false);
     }
 }
 
@@ -5680,15 +5830,23 @@ void WriterRibbon::syncToCurrentFormat() {
     m_btnSuper->setChecked(fmt.verticalAlignment() == QTextCharFormat::AlignSuperScript);
     m_btnSub->setChecked(fmt.verticalAlignment() == QTextCharFormat::AlignSubScript);
 
-    const QString family = fmt.fontFamilies().toStringList().value(0);
+    // Fall back to the document default. A run that never had an explicit
+    // family or size reports an empty family and a point size of 0, and
+    // skipping the update left the boxes showing whatever was set last rather
+    // than what is actually under the cursor.
+    const QFont base = m_editor->document()->defaultFont();
+
+    QString family = fmt.fontFamilies().toStringList().value(0);
+    if (family.isEmpty()) family = base.family();
     if (!family.isEmpty()) {
         const int idx = m_fontCombo->findText(family);
         if (idx >= 0) m_fontCombo->setCurrentIndex(idx);
         else m_fontCombo->setCurrentText(family);
     }
 
-    const qreal pt = fmt.fontPointSize();
-    if (pt > 0) m_sizeCombo->setCurrentText(QString::number(static_cast<int>(pt)));
+    qreal pt = fmt.fontPointSize();
+    if (pt <= 0) pt = base.pointSizeF();
+    if (pt > 0) m_sizeCombo->setCurrentText(QString::number(qRound(pt)));
 
     const Qt::Alignment a = m_editor->alignment();
     m_btnAlignLeft->setChecked(a.testFlag(Qt::AlignLeft));
@@ -5724,6 +5882,23 @@ bool WriterRibbon::eventFilter(QObject* obj, QEvent* ev) {
             }
         }
     }
+
+    // ── Format painter ──────────────────────────────────────────────────────
+    // Release, not selectionChanged: by the time the button comes up the
+    // selection is final, so we paint once instead of on every drag step.
+    if (m_painterActive && m_editor) {
+        if (obj == m_editor->viewport()
+            && ev->type() == QEvent::MouseButtonRelease
+            && static_cast<QMouseEvent*>(ev)->button() == Qt::LeftButton) {
+            applyPainterFormat();
+        } else if (obj == m_editor
+                   && ev->type() == QEvent::KeyPress
+                   && static_cast<QKeyEvent*>(ev)->key() == Qt::Key_Escape) {
+            disarmFormatPainter();
+            return true;
+        }
+    }
+
     return QWidget::eventFilter(obj, ev);
 }
 
@@ -5986,6 +6161,15 @@ QComboBox QAbstractItemView {
     padding: 4px;
 }
 QComboBox QAbstractItemView::item { min-height: 24px; padding-left: 6px; border-radius: 4px; }
+/* Once ::item carries any rule, Qt paints the row itself and stops honouring
+   selection-background-color, while selection-color still tints the text —
+   which left the highlighted row white-on-white and looked like the entry had
+   gone missing from the list. Both halves must be stated together. */
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background-color: #6D5BE8;
+    color: #FFFFFF;
+}
 QToolButton#ribbonRowBtn {
     color: #E6E9F0;
     background: transparent;
@@ -6148,6 +6332,15 @@ QComboBox QAbstractItemView {
     padding: 4px;
 }
 QComboBox QAbstractItemView::item { min-height: 24px; padding-left: 6px; border-radius: 4px; }
+/* Once ::item carries any rule, Qt paints the row itself and stops honouring
+   selection-background-color, while selection-color still tints the text —
+   which left the highlighted row white-on-white and looked like the entry had
+   gone missing from the list. Both halves must be stated together. */
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background-color: #6D5BE8;
+    color: #FFFFFF;
+}
 QToolButton#ribbonRowBtn {
     color: #3A3F4B;
     background: transparent;

@@ -679,10 +679,21 @@ bool PagedTextEdit::insertMimeImage(const QMimeData* source) {
 }
 
 void PagedTextEdit::embedImage(QImage img) {
+    if (img.isNull()) return;
+
     // Fit within the content area between the margins.
     const int maxWidth = qMax(100, int(m_pageW - 2 * m_margin));
-    if (img.width() > maxWidth)
-        img = img.scaledToWidth(maxWidth, Qt::SmoothTransformation);
+    const int drawW = qMin(img.width(), maxWidth);
+    const int drawH = qMax(1, qRound(double(img.height()) * drawW / double(img.width())));
+
+    // Store at up to twice the drawn width and constrain the *displayed* size
+    // separately. Resampling down to the drawn width, as this used to do, threw
+    // the extra pixels away for good, so a pasted screenshot looked sharp at
+    // 100% and pixelated the moment it was zoomed, printed or exported. The 2x
+    // cap keeps that detail without letting a large screenshot bloat the file.
+    const int storeW = qMin(img.width(), drawW * 2);
+    if (img.width() > storeW)
+        img = img.scaledToWidth(storeW, Qt::SmoothTransformation);
 
     QByteArray data;
     {
@@ -690,8 +701,11 @@ void PagedTextEdit::embedImage(QImage img) {
         buffer.open(QIODevice::WriteOnly);
         img.save(&buffer, "PNG");
     }
-    textCursor().insertHtml(QStringLiteral("<img src=\"data:image/png;base64,%1\"/>")
-                                .arg(QString::fromLatin1(data.toBase64())));
+    textCursor().insertHtml(
+        QStringLiteral("<img src=\"data:image/png;base64,%1\" width=\"%2\" height=\"%3\"/>")
+            .arg(QString::fromLatin1(data.toBase64()))
+            .arg(drawW)
+            .arg(drawH));
 }
 
 void PagedTextEdit::keyPressEvent(QKeyEvent* e) {
@@ -970,8 +984,8 @@ void PagedTextEdit::applyAutoCorrectAtCursor() {
     if (m_autoCorrect.capitalizeSentences) {
         const QString block = c.block().text();
         const int wordStart = w.selectionStart() - c.block().position();
-        const QString before = block.left(qMax(0, wordStart)).trimmed();
-        sentenceStart = before.isEmpty() || AutoCorrect::isSentenceEnd(before.back());
+        const QString before = block.left(qMax(0, wordStart));
+        sentenceStart = AutoCorrect::endsSentence(before);
     }
 
     QString fixed = AutoCorrect::correctWord(word, m_autoCorrect);

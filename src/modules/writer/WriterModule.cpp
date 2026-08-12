@@ -699,8 +699,17 @@ void WriterModule::applyZoom(int percent) {
     m_editor->setFont(f);
     m_editor->document()->setDefaultFont(f);
 
-    // Scale explicitly-sized runs (headings, imported/ribbon-sized text) so they
-    // stay proportional to the scaled page instead of overflowing at low zoom.
+    // KNOWN LIMITATION (reported by beta testers as zoom "stretching" content).
+    // setZoom() only re-scales the spell-check underlines. Zoom therefore
+    // scales the page geometry and the document's DEFAULT font, but leaves
+    // explicitly-sized runs (headings, ribbon-sized text, anything imported
+    // from .docx) and embedded images at their original size. On a document
+    // with headings or images the page grows while that content does not, so
+    // the layout visibly distorts.
+    //
+    // Fixing it properly means rendering the page at 100% and scaling the
+    // VIEW (a paint-time transform), rather than rewriting sizes in the
+    // document — rewriting them here would scale what then gets saved.
     if (m_paper) m_paper->setZoom(z);
 
     if (!m_webLayout && m_paper) {

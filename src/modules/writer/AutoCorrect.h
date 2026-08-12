@@ -37,6 +37,14 @@ public:
     static QChar smartQuote(QChar quote, QChar prevChar);
 
     static bool isSentenceEnd(QChar c) { return c == '.' || c == '!' || c == '?'; }
+
+    // Whether the text preceding a word really ends a sentence, so the next
+    // word should be capitalised. Testing the last character alone is not
+    // enough: it capitalises the g in "e.g" and the s in "Mr. smith".
+    // Single-letter initials and a list of common abbreviations are excluded,
+    // the way Word's exception list works. An empty (block-start) string
+    // counts as a sentence start.
+    static bool endsSentence(const QString& textBefore);
 };
 
 } // namespace NativeOffice

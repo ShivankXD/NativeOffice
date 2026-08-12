@@ -25,6 +25,10 @@
 #include <QHash>
 #include <QString>
 #include <QPointer>
+// Full definitions, not forward declarations: the format-painter state below
+// holds these by value.
+#include <QTextCharFormat>
+#include <QTextBlockFormat>
 
 class QIcon;
 class QPrinter;
@@ -33,7 +37,6 @@ class QToolButton;
 class QComboBox;
 class QButtonGroup;
 class QStackedWidget;
-class QTextCharFormat;
 class QDialog;
 class QLineEdit;
 class QCheckBox;
@@ -161,6 +164,8 @@ private:
 
     // format painter
     void toggleFormatPainter(bool on);
+    void applyPainterFormat();
+    void disarmFormatPainter();
 
     // ── Insert-tab actions (operate directly on the editor) ─────────────────
     void insertImageData(const QImage& img);   // embed a QImage as base64 PNG
@@ -297,9 +302,14 @@ private:
     // Contextual "Table" tab (shown only when the cursor is in a table)
     QToolButton* m_tableTabBtn { nullptr };
 
-    // Format painter state
-    bool             m_painterActive { false };
-    QTextCharFormat* m_painterFmt    { nullptr };
+    // Format painter state. The captured format is a value, not a heap
+    // pointer: the pointer was never freed, and every use site had to
+    // null-check it. m_painterApplying guards re-entrancy, which is what
+    // turned one click into a stack overflow.
+    bool             m_painterActive   { false };
+    bool             m_painterApplying { false };
+    QTextCharFormat  m_painterFmt;
+    QTextBlockFormat m_painterBlockFmt;
 
     // Find & replace (modeless, lazily created)
     QPointer<QDialog> m_findDlg;
