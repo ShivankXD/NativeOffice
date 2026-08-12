@@ -441,6 +441,10 @@ private:
     // anywhere that changes cell content without moving the selection.
     void syncFormulaBarToCurrent();
 
+    // Range a newly picked function should default to (selection, else the run
+    // of values above the active cell, else the run to its left).
+    [[nodiscard]] QString suggestedFunctionRange() const;
+
     // ── Charts (live widgets for the active sheet) ─────────────────────────────
     QVector<ChartObject*> m_chartObjs;
 
