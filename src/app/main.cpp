@@ -220,12 +220,65 @@ public:
                 [this, bb] { bb->setDocName(m_baseName, nameExt()); });
     }
 
+    // ── Autosave ─────────────────────────────────────────────────────────────
+    // Deliberately built out of what every window already exposes: docDirty()
+    // to know there is work to store and currentDocPath() to know where. There
+    // is no change signal to subscribe to and no per-window timer; the shell
+    // ticks every open tab from one timer (MainShell::startAutoSave), so the
+    // cost is one bool check per tab per few seconds whether or not anything
+    // is being edited.
+    //
+    // saveToCurrentPath() must never open a dialog. Writing to a path the
+    // document already has cannot need one, and an autosave that could pop a
+    // file chooser while someone types would be worse than no autosave.
+    virtual bool saveToCurrentPath() { return false; }
+    virtual bool autoSaveEnabled() const { return true; }
+
+    // Writes at most once every kAutoSaveGapMs, so holding a key down cannot
+    // turn into a save per keystroke on a large file.
+    static constexpr qint64 kAutoSaveGapMs = 2500;
+
+    bool autoSaveTick() {
+        if (!autoSaveEnabled() || !docDirty() || currentDocPath().isEmpty())
+            return false;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (m_lastAutoSaveMs && now - m_lastAutoSaveMs < kAutoSaveGapMs) return false;
+        if (!saveToCurrentPath()) return false;
+        m_lastAutoSaveMs = now;
+        return true;
+    }
+
+    // "Autosaved 7s ago". Empty until the document has actually been stored, so
+    // it never claims a save that did not happen.
+    QString autoSaveStatusText() const {
+        if (!autoSaveEnabled() || currentDocPath().isEmpty())
+            return docDirty() ? QStringLiteral("Not saved yet") : QString();
+        if (!m_lastAutoSaveMs) return QStringLiteral("Autosave on");
+        const qint64 s = (QDateTime::currentMSecsSinceEpoch() - m_lastAutoSaveMs) / 1000;
+        if (s < 5)    return QStringLiteral("Autosaved just now");
+        if (s < 60)   return QStringLiteral("Autosaved %1s ago").arg(s);
+        if (s < 3600) return QStringLiteral("Autosaved %1m ago").arg(s / 60);
+        return QStringLiteral("Autosaved %1h ago").arg(s / 3600);
+    }
+
+    // Closing path. A document with a file behind it is simply stored and the
+    // tab goes, with nothing to ask about. The prompt survives for exactly one
+    // case: an untitled document with unsaved content, where there is no path
+    // to autosave into and dropping the question would silently destroy work.
+    bool closedCleanlyByAutoSave() {
+        if (!docDirty()) return true;
+        if (autoSaveEnabled() && !currentDocPath().isEmpty())
+            return saveToCurrentPath();
+        return false;
+    }
+
 signals:
     void displayNameChanged();
 
 protected:
     QString m_baseName { QStringLiteral("untitled") };
     bool    m_named    { false };
+    qint64  m_lastAutoSaveMs { 0 };
 };
 
 // Forward declarations for free-function helpers
@@ -309,8 +362,12 @@ public:
     QString nameExt()        const override { return QStringLiteral(".docx"); }
     QString currentDocPath() const override { return m_writer ? m_writer->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_writer && m_writer->isDirty(); }
+    bool saveToCurrentPath() override {
+        return currentDocPath().isEmpty() ? false : save();
+    }
 
     bool requestClose() override {
+        if (closedCleanlyByAutoSave()) return true;
         if (m_writer && m_writer->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
@@ -416,8 +473,12 @@ public:
     QString nameExt()        const override { return QStringLiteral(".xlsx"); }
     QString currentDocPath() const override { return m_calc ? m_calc->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_calc && m_calc->isDirty(); }
+    bool saveToCurrentPath() override {
+        return currentDocPath().isEmpty() ? false : save();
+    }
 
     bool requestClose() override {
+        if (closedCleanlyByAutoSave()) return true;
         if (m_calc && m_calc->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
@@ -515,7 +576,12 @@ public:
     QString currentDocPath() const override { return m_impress ? m_impress->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_impress && m_impress->isDirty(); }
 
+    bool saveToCurrentPath() override {
+        return currentDocPath().isEmpty() ? false : save();
+    }
+
     bool requestClose() override {
+        if (closedCleanlyByAutoSave()) return true;
         if (m_impress && m_impress->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
@@ -607,8 +673,12 @@ public:
     QString nameExt()        const override { return QStringLiteral(".pdf"); }
     QString currentDocPath() const override { return m_pdf ? m_pdf->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_pdf && m_pdf->isDirty(); }
+    bool saveToCurrentPath() override {
+        return currentDocPath().isEmpty() ? false : save();
+    }
 
     bool requestClose() override {
+        if (closedCleanlyByAutoSave()) return true;
         if (m_pdf && m_pdf->isDirty()) {
             const auto btn = QMessageBox::question(
                 this, "Unsaved Changes",
@@ -653,6 +723,9 @@ public:
     QString docKindName()     const override { return QStringLiteral("Image Resizer"); }
     QString currentDocPath()  const override { return {}; }
     bool    docDirty()        const override { return false; }
+    // Explicitly excluded: it edits an image you then export, not a document it
+    // owns, so there is nothing for an autosave to write back to.
+    bool    autoSaveEnabled() const override { return false; }
 };
 
 static ImageResizerWindow* createImageResizerWindow() {
@@ -711,7 +784,7 @@ public:
     // The strip is the topmost thing in the window now, so its height is the
     // app's title bar height. 30 keeps a comfortable click target while looking
     // like a tab strip rather than a toolbar.
-    static constexpr int kTabHeight = 30;
+    static constexpr int kTabHeight = 26;
 
     explicit ShellTabBar(QWidget* parent = nullptr) : QTabBar(parent) {
         setExpanding(false);
@@ -765,8 +838,11 @@ protected:
             if (!home) {
                 p.setPen(QColor("#1B212C"));
                 p.drawLine(r.topRight(), r.bottomRight());
+                // Flush with the very bottom row. Sitting it two pixels up left
+                // a dark band underneath the violet, which read as a stray line
+                // below the selected tab.
                 if (sel)
-                    p.fillRect(QRect(r.left(), r.bottom() - 2, r.width(), 2),
+                    p.fillRect(QRect(r.left(), r.bottom() - 1, r.width(), 2),
                                QColor("#7C3AED"));
             }
 
@@ -780,9 +856,9 @@ protected:
                        fontMetrics().elidedText(tabText(i), Qt::ElideRight, tr.width()));
         }
 
-        // Bottom hairline so the dark strip reads as a proper bar.
-        p.setPen(QColor("#1B212C"));
-        p.drawLine(0, height() - 1, width(), height() - 1);
+        // No bottom hairline. It used to separate the strip from the page below,
+        // but the strip is the title bar now and the line drew straight across
+        // the selected tab's violet underline, leaving a dark seam under it.
     }
 
 private:
@@ -848,6 +924,17 @@ private:
 class WindowControls : public QWidget {
     Q_OBJECT
 public:
+    // Windows' own title bar glyphs, from the shell icon font. Typed characters
+    // like "─", "□" and "✕" were being drawn by whatever text font happened to
+    // contain them, at a size they were never hinted for, which is why they
+    // looked ragged next to every other window on the desktop. These are the
+    // exact codepoints Explorer uses. Segoe Fluent Icons ships with Windows 11
+    // and Segoe MDL2 Assets with Windows 10, so both are named.
+    static constexpr char16_t kGlyphMin[]     = u"";   // ChromeMinimize
+    static constexpr char16_t kGlyphMax[]     = u"";   // ChromeMaximize
+    static constexpr char16_t kGlyphRestore[] = u"";   // ChromeRestore
+    static constexpr char16_t kGlyphClose[]   = u"";   // ChromeClose
+
     explicit WindowControls(QWidget* target, QWidget* parent = nullptr)
         : QWidget(parent), m_target(target)
     {
@@ -855,9 +942,9 @@ public:
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
 
-        m_min  = makeButton(QStringLiteral("─"), QStringLiteral("Minimise"), false);
-        m_max  = makeButton(QStringLiteral("□"), QStringLiteral("Maximise"), false);
-        m_close = makeButton(QStringLiteral("✕"), QStringLiteral("Close"), true);
+        m_min   = makeButton(kGlyphMin,   QStringLiteral("Minimise"), false);
+        m_max   = makeButton(kGlyphMax,   QStringLiteral("Maximise"), false);
+        m_close = makeButton(kGlyphClose, QStringLiteral("Close"),    true);
         h->addWidget(m_min);
         h->addWidget(m_max);
         h->addWidget(m_close);
@@ -889,22 +976,24 @@ public:
 
     void refreshMaxIcon() {
         const bool zoomed = m_target->isMaximized();
-        m_max->setText(zoomed ? QStringLiteral("❐") : QStringLiteral("□"));
+        m_max->setText(QString::fromUtf16(zoomed ? kGlyphRestore : kGlyphMax));
         m_max->setToolTip(zoomed ? QStringLiteral("Restore") : QStringLiteral("Maximise"));
     }
 
 private:
-    QToolButton* makeButton(const QString& glyph, const QString& tip, bool danger) {
+    QToolButton* makeButton(const char16_t* glyph, const QString& tip, bool danger) {
         auto* b = new QToolButton(this);
-        b->setText(glyph);
+        b->setText(QString::fromUtf16(glyph));
         b->setToolTip(tip);
         b->setCursor(Qt::ArrowCursor);
         b->setFixedSize(44, ShellTabBar::kTabHeight);
         b->setFocusPolicy(Qt::NoFocus);
-        // White glyphs on the dark strip; only close goes red, and only on hover.
+        // 10px is the size Windows draws these at; the font is hinted for it, so
+        // the strokes land on whole pixels instead of being resampled.
         b->setStyleSheet(QString(
             "QToolButton { border:none; background:transparent; color:#FFFFFF;"
-            "  font-size:12px; }"
+            "  font-family:'Segoe Fluent Icons','Segoe MDL2 Assets';"
+            "  font-size:10px; }"
             "QToolButton:hover { background:%1; color:#FFFFFF; }"
             "QToolButton:pressed { background:%2; }")
             .arg(danger ? "#E81123" : "rgba(255,255,255,0.14)",
@@ -978,7 +1067,7 @@ public:
         m_scroll->viewport()->setStyleSheet("background:#0D1117;");
         m_scroll->setStyleSheet(
             "QScrollArea { background:#0D1117; border:none; }"
-            "QScrollBar:horizontal { height:5px; background:#0D1117; margin:0; border:none; }"
+            "QScrollBar:horizontal { height:4px; background:#0D1117; margin:0; border:none; }"
             "QScrollBar::handle:horizontal { background:#39414F; border-radius:2px; min-width:36px; }"
             "QScrollBar::handle:horizontal:hover { background:#525C6E; }"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; height:0; }"
@@ -987,7 +1076,7 @@ public:
         // Fixed height reserves the scrollbar's 5px permanently, so the strip
         // does not grow and shove the whole document down the moment a tab
         // overflows. With no overflow the reserved band is just background.
-        m_scroll->setFixedHeight(ShellTabBar::kTabHeight + 5);
+        m_scroll->setFixedHeight(ShellTabBar::kTabHeight + 4);
 
         m_bar = new ShellTabBar(m_scroll);
         m_scroll->setWidget(m_bar);
@@ -1037,6 +1126,30 @@ public:
 
         installShortcuts();
         startHoverWatch();
+        startAutoSave();
+    }
+
+    // One timer for the whole application rather than one per document.
+    // Each tick is a docDirty() check per open tab, which costs nothing when
+    // nothing is being edited, and the writes themselves are rate limited
+    // inside EditorWindow::autoSaveTick. The same tick refreshes the "Autosaved
+    // 7s ago" text so the wording keeps counting up between saves.
+    void startAutoSave() {
+        auto* t = new QTimer(this);
+        t->setInterval(1000);
+        connect(t, &QTimer::timeout, this, [this] {
+            for (int i = 0; i < m_stack->count(); ++i) {
+                auto* win = qobject_cast<EditorWindow*>(m_stack->widget(i));
+                if (!win) continue;
+                win->autoSaveTick();
+                // Only the visible tab's bar can be seen, so only it is updated.
+                if (i == m_stack->currentIndex()) {
+                    if (auto* bb = win->findChild<NativeOffice::BrandBar*>())
+                        bb->setAutoSaveStatus(win->autoSaveStatusText());
+                }
+            }
+        });
+        t->start();
     }
 
     // ── Tab keyboard commands ───────────────────────────────────────────────
@@ -1877,7 +1990,7 @@ QMenuBar::item:pressed {
         QMessageBox::about(win, "About NativeOffice",
             "<h3>NativeOffice Impress</h3>"
             "<p>A high-performance, cross-platform presentation tool.</p>"
-            "<p>Version 1.6.4</p>"
+            "<p>Version 1.6.5</p>"
             "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
@@ -2188,7 +2301,7 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("1.6.4");
+    app.setApplicationVersion("1.6.5");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
