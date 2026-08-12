@@ -1005,6 +1005,40 @@ void CalcModule::buildUi() {
     // Custom delegate paints cell fills / fonts / colours from the model.
     m_tableView->setItemDelegate(new CalcItemDelegate(m_tableView));
 
+    // Enter moves down, the way every spreadsheet behaves. Qt commits the
+    // in-cell editor and leaves the current index exactly where it was, so
+    // typing a column of numbers overwrote the same cell every time. The
+    // stale formula bar was the same bug: it refreshes from onSelectionChanged,
+    // which never fired because the selection never moved.
+    // SubmitModelCache is the hint QStyledItemDelegate uses for Enter
+    // specifically; focus-loss commits use NoHint, so this stays out of their way.
+    connect(m_tableView->itemDelegate(), &QAbstractItemDelegate::closeEditor, this,
+            [this](QWidget*, QAbstractItemDelegate::EndEditHint hint) {
+        if (hint != QAbstractItemDelegate::SubmitModelCache) return;
+        const QModelIndex cur = m_tableView->currentIndex();
+        if (!cur.isValid()) return;
+        const int nextRow = std::min(cur.row() + 1, SpreadsheetModel::NUM_ROWS - 1);
+        const int col = cur.column();
+        // Queued: the view is still finishing its own close-editor handling.
+        QTimer::singleShot(0, this, [this, nextRow, col] {
+            m_tableView->setCurrentIndex(m_model->index(nextRow, col));
+        });
+    });
+
+    // Belt and braces for the formula bar: if the active cell's content changes
+    // without the selection moving, resync it rather than showing the old text.
+    connect(m_model, &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex& tl, const QModelIndex& br) {
+        if (m_updatingFormulaBar) return;
+        const QModelIndex cur = m_tableView->currentIndex();
+        if (!cur.isValid()) return;
+        if (cur.row() < tl.row() || cur.row() > br.row()
+            || cur.column() < tl.column() || cur.column() > br.column()) return;
+        m_updatingFormulaBar = true;
+        m_formulaBar->setText(m_model->rawContent(cur.column(), cur.row()));
+        m_updatingFormulaBar = false;
+    });
+
     // Column widths: default 64px, row heights: default 20px (compact WPS look)
     m_colHeader->setDefaultSectionSize(64);
     m_rowHeader->setDefaultSectionSize(20);
@@ -1190,6 +1224,12 @@ void CalcModule::connectActiveView() {
     connect(m_tableView->selectionModel(),
             &QItemSelectionModel::selectionChanged,
             this, &CalcModule::onSelectionChanged);
+    // currentChanged as well: dragging a selection moves the active cell
+    // without always emitting selectionChanged, which left the name box and
+    // the formula bar disagreeing about which cell you were on.
+    connect(m_tableView->selectionModel(),
+            &QItemSelectionModel::currentChanged, this,
+            [this](const QModelIndex&, const QModelIndex&) { onSelectionChanged(); });
 }
 
 void CalcModule::switchToSheet(int index) {
@@ -3327,17 +3367,77 @@ void CalcModule::sortByColumn(bool ascending) {
 // cells outside the source. A single source cell therefore just copies down/across.
 void CalcModule::fillRange(const QRect& source, const QRect& dest) {
     if (!source.isValid() || source.width() == 0 || source.height() == 0) return;
+
+    const bool vertical = dest.height() > source.height();
+
+    // A single row or column of evenly spaced plain numbers continues as a
+    // series, the way Excel does: dragging 10, 20, 30 should give 40, 50, 60,
+    // not repeat 10, 20, 30. Everything else (text, formulas, mixed content,
+    // multi-column blocks) repeats the source block, which is the old
+    // behaviour and still the right answer for those.
+    bool   series = false;
+    double step   = 0.0;
+    double last   = 0.0;
+    {
+        const int n     = vertical ? source.height() : source.width();
+        const int thick = vertical ? source.width()  : source.height();
+        if (n >= 2 && thick == 1) {
+            QVector<double> vals;
+            bool allNumeric = true;
+            for (int i = 0; i < n && allNumeric; ++i) {
+                const int c = vertical ? source.left()     : source.left() + i;
+                const int r = vertical ? source.top() + i  : source.top();
+                const QString raw = m_model->rawContent(c, r).trimmed();
+                bool ok = false;
+                const double v = raw.toDouble(&ok);
+                if (raw.isEmpty() || raw.startsWith('=') || !ok) allNumeric = false;
+                else vals << v;
+            }
+            if (allNumeric && vals.size() == n) {
+                step   = vals[1] - vals[0];
+                series = true;
+                for (int i = 2; i < vals.size(); ++i)
+                    if (qAbs((vals[i] - vals[i - 1]) - step) > 1e-9) { series = false; break; }
+                last = vals.last();
+            }
+        }
+    }
+
     std::vector<std::pair<QPoint, Cell>> edits;
     for (int row = dest.top(); row <= dest.bottom(); ++row)
         for (int col = dest.left(); col <= dest.right(); ++col) {
             if (source.contains(col, row)) continue;        // leave the source intact
             if (col < 0 || col >= SpreadsheetModel::NUM_COLS
                 || row < 0 || row >= SpreadsheetModel::NUM_ROWS) continue;
+
             const int sc = source.left() + ((col - source.left()) % source.width());
             const int sr = source.top()  + ((row - source.top())  % source.height());
-            edits.push_back({QPoint(col, row), m_model->cellAt(sc, sr)});
+            Cell c = m_model->cellAt(sc, sr);
+
+            if (series) {
+                // Carry the formatting of the last source cell, replace the value.
+                const int k = vertical ? (row - source.bottom()) : (col - source.right());
+                c = m_model->cellAt(vertical ? source.left() : source.right(),
+                                    vertical ? source.bottom() : source.top());
+                c.content = QString::number(last + step * k, 'g', 15);
+            }
+            edits.push_back({QPoint(col, row), c});
         }
     if (!edits.empty()) m_model->applyCellEdits(edits, "Fill");
+
+    // The fill does not move the selection, so nothing else refreshes the
+    // formula bar for the active cell.
+    syncFormulaBarToCurrent();
+}
+
+// Single place that pushes the active cell's raw content into the formula bar.
+void CalcModule::syncFormulaBarToCurrent() {
+    if (!m_formulaBar || !m_tableView) return;
+    const QModelIndex cur = m_tableView->currentIndex();
+    if (!cur.isValid()) return;
+    m_updatingFormulaBar = true;
+    m_formulaBar->setText(m_model->rawContent(cur.column(), cur.row()));
+    m_updatingFormulaBar = false;
 }
 
 void CalcModule::fillDown() {
@@ -4869,6 +4969,14 @@ void CalcModule::resizeEvent(QResizeEvent* event) {
     placeFloatingPanels();
 }
 
+// Grab area for the fill handle, given the visual rect of the bottom-right
+// selected cell. Deliberately larger than the 6px square that gets painted:
+// the drawn handle is a visual cue, the grab area is what has to be hittable.
+QRect CalcModule::fillHandleGrabRect(const QRect& bottomRightCell) {
+    if (!bottomRightCell.isValid()) return {};
+    return QRect(bottomRightCell.right() - 5, bottomRightCell.bottom() - 5, 12, 12);
+}
+
 bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
     if (watched == m_tableView->viewport()) {
         switch (event->type()) {
@@ -4887,8 +4995,11 @@ bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
                 const QRect sel = selectedRect();
                 const QRect br = m_tableView->visualRect(
                     m_model->index(sel.bottom(), sel.right()));
-                const QPoint handle = br.bottomRight();
-                if ((me->position().toPoint() - handle).manhattanLength() <= 6) {
+                // Excel's fill handle is drawn small but its grab area is not.
+                // A 6px manhattan radius meant most attempts to drag it landed
+                // on the cell instead, so the drag just extended the selection
+                // and autofill looked like it did nothing at all.
+                if (fillHandleGrabRect(br).contains(me->position().toPoint())) {
                     m_filling = true;
                     m_fillSource = sel;
                     return true;                       // begin fill drag
@@ -4896,9 +5007,22 @@ bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
             }
             break;
         }
-        case QEvent::MouseMove:
+        case QEvent::MouseMove: {
             if (m_filling) return true;                // swallow during drag
+            // Crosshair over the handle, so it is discoverable as a grab point
+            // rather than looking like decoration.
+            auto* me = static_cast<QMouseEvent*>(event);
+            const QRect sel = selectedRect();
+            const QRect br  = m_tableView->visualRect(
+                m_model->index(sel.bottom(), sel.right()));
+            const bool onHandle = fillHandleGrabRect(br).contains(me->position().toPoint());
+            if (onHandle != m_overFillHandle) {
+                m_overFillHandle = onHandle;
+                if (onHandle) m_tableView->viewport()->setCursor(Qt::CrossCursor);
+                else          m_tableView->viewport()->unsetCursor();
+            }
             break;
+        }
         case QEvent::MouseButtonRelease:
             if (m_filling) {
                 auto* me = static_cast<QMouseEvent*>(event);

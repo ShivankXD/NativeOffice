@@ -428,8 +428,18 @@ private:
     bool m_applyingSizes      { false };     // guard programmatic col/row resizes
 
     // ── Drag-to-fill state ────────────────────────────────────────────────────
-    bool  m_filling     { false };
+    bool  m_filling        { false };
+    bool  m_overFillHandle { false };        // cursor is on the handle right now
     QRect m_fillSource;                      // selection rect when the drag began
+
+    // Hit area for the fill handle, given the visual rect of the bottom-right
+    // selected cell. Larger than the square that gets painted, so the handle
+    // can actually be grabbed.
+    [[nodiscard]] static QRect fillHandleGrabRect(const QRect& bottomRightCell);
+
+    // Pushes the active cell's raw content into the formula bar. Called from
+    // anywhere that changes cell content without moving the selection.
+    void syncFormulaBarToCurrent();
 
     // ── Charts (live widgets for the active sheet) ─────────────────────────────
     QVector<ChartObject*> m_chartObjs;

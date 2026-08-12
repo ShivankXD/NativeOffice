@@ -1176,6 +1176,21 @@ WriterRibbon::WriterRibbon(QWidget* parent)
         tabLayout->addWidget(btn);
     }
     tabLayout->addStretch();
+
+    // Collapse control. Double-clicking a tab already collapsed the ribbon, but
+    // nothing on screen said so, and testers asked for the ribbon to stop taking
+    // a quarter of the window. This is the Word-style chevron at the right end.
+    m_collapseBtn = new QToolButton(tabRow);
+    m_collapseBtn->setObjectName("ribbonCollapseBtn");
+    m_collapseBtn->setCursor(Qt::PointingHandCursor);
+    m_collapseBtn->setAutoRaise(true);
+    m_collapseBtn->setText(QStringLiteral("⌃"));   // up chevron
+    m_collapseBtn->setToolTip("Collapse the ribbon  (or double-click a tab)");
+    connect(m_collapseBtn, &QToolButton::clicked, this, [this] {
+        setRibbonCollapsed(!m_collapsed);
+    });
+    tabLayout->addWidget(m_collapseBtn);
+
     m_tabGroup->button(0)->setChecked(true);
 
     // The "Table" tab is contextual — hidden until the cursor is inside a table.
@@ -1188,7 +1203,10 @@ WriterRibbon::WriterRibbon(QWidget* parent)
     // ── Stacked content ─────────────────────────────────────────────────────
     m_stack = new QStackedWidget(this);
     m_stack->setObjectName("ribbonStack");
-    m_stack->setFixedHeight(100);
+    // 100px left two-line button captions ("Text/Direction", "Page/Color")
+    // colliding with the group caption underneath, which is what testers saw as
+    // labels bleeding and cut off along the bottom of the ribbon.
+    m_stack->setFixedHeight(110);
     // Only the Home tab is built eagerly; the other seven build on first click.
     // This cuts document-open time sharply — the full ribbon is by far the most
     // expensive part of constructing a Writer window.
@@ -5876,8 +5894,7 @@ bool WriterRibbon::eventFilter(QObject* obj, QEvent* ev) {
     if (ev->type() == QEvent::MouseButtonDblClick) {
         if (auto* btn = qobject_cast<QToolButton*>(obj)) {
             if (m_tabGroup->buttons().contains(btn)) {
-                m_collapsed = !m_collapsed;
-                m_stack->setVisible(!m_collapsed);
+                setRibbonCollapsed(!m_collapsed);
                 return true;
             }
         }
@@ -5981,6 +5998,16 @@ QWidget* WriterRibbon::makeSeparator() {
     return sep;
 }
 
+void WriterRibbon::setRibbonCollapsed(bool on) {
+    m_collapsed = on;
+    if (m_stack) m_stack->setVisible(!on);
+    if (m_collapseBtn) {
+        m_collapseBtn->setText(on ? QStringLiteral("⌄") : QStringLiteral("⌃"));
+        m_collapseBtn->setToolTip(on ? "Show the ribbon  (or double-click a tab)"
+                                     : "Collapse the ribbon  (or double-click a tab)");
+    }
+}
+
 QWidget* WriterRibbon::makeGroup(const QString& name, const QList<QWidget*>& widgets) {
     auto* group = new QWidget(this);
     auto* v = new QVBoxLayout(group);
@@ -5997,9 +6024,13 @@ QWidget* WriterRibbon::makeGroup(const QString& name, const QList<QWidget*>& wid
     auto* label = new QLabel(name, group);
     label->setObjectName("ribbonGroupLabel");
     label->setAlignment(Qt::AlignHCenter);
+    // Reserve the caption's line box explicitly. Left to share leftover space
+    // it was the first thing squeezed when a group grew tall, so it rendered
+    // clipped rather than simply sitting lower.
+    label->setFixedHeight(13);
 
     v->addWidget(row, 1);
-    v->addWidget(label);
+    v->addWidget(label, 0);
     return group;
 }
 

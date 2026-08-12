@@ -302,6 +302,11 @@ private:
     // Contextual "Table" tab (shown only when the cursor is in a table)
     QToolButton* m_tableTabBtn { nullptr };
 
+    // Ribbon collapse (chevron at the right of the tab strip, plus the older
+    // double-click-a-tab gesture, which nothing on screen advertised).
+    QToolButton* m_collapseBtn { nullptr };
+    void setRibbonCollapsed(bool on);
+
     // Format painter state. The captured format is a value, not a heap
     // pointer: the pointer was never freed, and every use site had to
     // null-check it. m_painterApplying guards re-entrancy, which is what
