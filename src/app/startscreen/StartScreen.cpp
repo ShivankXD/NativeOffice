@@ -940,6 +940,22 @@ void StartScreen::showNotificationsPopup(QWidget* anchor) {
         v->addWidget(row);
     };
 
+    // Newest first. These are the two releases that changed how the app looks
+    // and behaves rather than what it can do, so they are worth explaining
+    // here: someone who updates and finds their title bar missing should be
+    // able to read why without leaving the app.
+    item(Lucide::kRepeat, "1.6.5: Your work saves itself",
+         "Autosave is on in Writer, Sheets, Slides, PDF and Markdown. Every "
+         "change is written back on its own, so closing a saved document no "
+         "longer asks whether to keep it. Save and Save As are still in the "
+         "File menu, and the brand bar shows when the last autosave happened.",
+         QString());
+    item(Lucide::kPresentation, "1.6.4: A taller workspace",
+         "The Windows title bar is gone and the tab strip has taken its place "
+         "at the top, so the ribbon and page start higher in every mode. Tabs "
+         "scroll when there are many, and Ctrl+W, Ctrl+T, Ctrl+Tab and "
+         "Ctrl+Shift+T all work.",
+         QString());
     item(Lucide::kSparkles, "Editing is now free for everyone",
          "No more read-only mode. Free exports carry a small "
          "\"Made with NativeOffice\" mark; Premium removes it and unlocks the new "
