@@ -5,6 +5,9 @@
 
 #include <QStringBuilder>
 #include <QSettings>
+#include <QCoreApplication>
+#include <QDialog>
+#include <QEvent>
 
 namespace NativeOffice {
 
@@ -92,33 +95,58 @@ QDialog QPushButton:default:hover {
 }
 
 /* ── Scrollbars ──────────────────────────────────────────────── */
+/* 8px wide with a 24px minimum handle was reported as too thin to grab
+   accurately, especially over a spreadsheet. 13px is still slim next to the
+   17px Windows default but is a real hit target, and the handle minimum is
+   large enough to stay grabbable in a long sheet. */
 QScrollBar:vertical {
     background: %3;
-    width: 8px;
-    border-radius: 4px;
+    width: 13px;
+    border-radius: 6px;
+    margin: 0;
 }
 QScrollBar::handle:vertical {
     background: %4;
-    border-radius: 4px;
-    min-height: 24px;
+    border: 3px solid %3;          /* inset, so the bar reads slim at rest */
+    border-radius: 6px;
+    min-height: 40px;
 }
 QScrollBar::handle:vertical:hover {
     background: %5;
+    border-width: 2px;             /* thickens under the cursor */
 }
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical {
     height: 0;
 }
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: transparent;
+}
 
 QScrollBar:horizontal {
     background: %3;
-    height: 8px;
-    border-radius: 4px;
+    height: 13px;
+    border-radius: 6px;
+    margin: 0;
 }
 QScrollBar::handle:horizontal {
     background: %4;
-    border-radius: 4px;
-    min-width: 24px;
+    border: 3px solid %3;
+    border-radius: 6px;
+    min-width: 40px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: %5;
+    border-width: 2px;
+}
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: transparent;
 }
 
 /* ── Tooltips ────────────────────────────────────────────────── */
@@ -178,16 +206,41 @@ QMenu::icon {
 }
 
 QString ThemeManager::inputDialogStyleSheet() {
+    // Every colour here is stated explicitly, including the ones that look
+    // redundant. Beta testers on Windows dark mode reported input fields whose
+    // text matched their background across all four modules: any property left
+    // unstated falls through to the platform palette, which is dark on those
+    // machines while these surfaces are white.
     return QStringLiteral(R"(
-QInputDialog, QDialog {
+QInputDialog, QDialog, QMessageBox {
     background-color: #FFFFFF;
+}
+QDialog > QWidget, QMessageBox > QWidget {
+    background-color: transparent;
 }
 QLabel {
     background: transparent;
     color: #1C1E26;
     font-size: 13px;
 }
-QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {
+QGroupBox {
+    background: transparent;
+    color: #1C1E26;
+    border: 1px solid #E2E4E9;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    font-size: 13px;
+    font-weight: 600;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    color: #1C1E26;
+}
+QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser,
+QSpinBox, QDoubleSpinBox, QComboBox, QDateEdit, QTimeEdit, QDateTimeEdit {
     background-color: #FFFFFF;
     color: #1C1E26;
     border: 1px solid #D5D8DF;
@@ -197,8 +250,174 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox {
     selection-background-color: #E8372A;
     selection-color: #FFFFFF;
 }
-QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {
+QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+    background-color: #F2F3F6;
+    color: #9CA3AF;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
+QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
     border: 1px solid #E8372A;
+}
+/* Spin buttons inherit the platform palette unless painted here, which is
+   how the Custom Page Size arrows ended up dark-on-dark. */
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QDateEdit::up-button, QTimeEdit::up-button, QDateTimeEdit::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    background-color: #F5F6FA;
+    border-left: 1px solid #D5D8DF;
+    border-top-right-radius: 6px;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button,
+QDateEdit::down-button, QTimeEdit::down-button, QDateTimeEdit::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    background-color: #F5F6FA;
+    border-left: 1px solid #D5D8DF;
+    border-bottom-right-radius: 6px;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #ECEEF2;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
+QDateEdit::up-arrow, QTimeEdit::up-arrow, QDateTimeEdit::up-arrow {
+    image: none;
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid #4A5060;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow,
+QDateEdit::down-arrow, QTimeEdit::down-arrow, QDateTimeEdit::down-arrow {
+    image: none;
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #4A5060;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 20px;
+    border: none;
+    background: transparent;
+}
+QComboBox::down-arrow {
+    image: none;
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #4A5060;
+    margin-right: 7px;
+}
+/* The popup is a separate top-level window and does NOT inherit the rules
+   above, so it needs its own full set. */
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF;
+    color: #1C1E26;
+    border: 1px solid #D5D8DF;
+    border-radius: 6px;
+    padding: 4px;
+    outline: none;
+    selection-background-color: #FCE4E2;
+    selection-color: #C0271C;
+}
+QComboBox QAbstractItemView::item {
+    background: transparent;
+    color: #1C1E26;
+    min-height: 22px;
+    padding: 3px 8px;
+    border-radius: 4px;
+}
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:hover {
+    background-color: #FCE4E2;
+    color: #C0271C;
+}
+QListView, QListWidget, QTreeView, QTreeWidget, QTableView, QTableWidget {
+    background-color: #FFFFFF;
+    alternate-background-color: #FAFBFD;
+    color: #1C1E26;
+    border: 1px solid #D5D8DF;
+    border-radius: 6px;
+    outline: none;
+    font-size: 13px;
+}
+QListView::item, QListWidget::item, QTreeView::item, QTreeWidget::item {
+    color: #1C1E26;
+    padding: 4px 6px;
+}
+QListView::item:selected, QListWidget::item:selected,
+QTreeView::item:selected, QTreeWidget::item:selected,
+QTableView::item:selected {
+    background-color: #FCE4E2;
+    color: #C0271C;
+}
+QHeaderView::section {
+    background-color: #F5F6FA;
+    color: #1C1E26;
+    border: none;
+    border-right: 1px solid #E2E4E9;
+    border-bottom: 1px solid #E2E4E9;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QCheckBox, QRadioButton {
+    background: transparent;
+    color: #1C1E26;
+    font-size: 13px;
+    spacing: 8px;
+}
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    background-color: #FFFFFF;
+    border: 1px solid #B9BEC9;
+}
+QCheckBox::indicator { border-radius: 4px; }
+QRadioButton::indicator { border-radius: 9px; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #E8372A;
+}
+QCheckBox::indicator:checked {
+    background-color: #E8372A;
+    border-color: #E8372A;
+    image: url(:/assets/check-white.png);
+}
+QRadioButton::indicator:checked {
+    background-color: #FFFFFF;
+    border: 5px solid #E8372A;
+}
+QTabWidget::pane {
+    border: 1px solid #E2E4E9;
+    border-radius: 8px;
+    background: #FFFFFF;
+}
+QTabBar::tab {
+    background: transparent;
+    color: #5A6071;
+    padding: 7px 14px;
+    font-size: 13px;
+}
+QTabBar::tab:selected {
+    color: #1C1E26;
+    border-bottom: 2px solid #E8372A;
+}
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #E2E4E9;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    width: 14px;
+    margin: -6px 0;
+    background: #E8372A;
+    border-radius: 7px;
 }
 QPushButton {
     background-color: #FFFFFF;
@@ -214,6 +433,11 @@ QPushButton:hover {
     background-color: #F5F6FA;
     border-color: #E8372A;
 }
+QPushButton:disabled {
+    background-color: #F2F3F6;
+    color: #A8ADB8;
+    border-color: #E2E4E9;
+}
 QPushButton:default {
     background-color: #E8372A;
     color: #FFFFFF;
@@ -225,6 +449,42 @@ QPushButton:default:hover {
     border-color: #FF5247;
 }
 )");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dialog style guard
+// ─────────────────────────────────────────────────────────────────────────────
+// Ad-hoc dialogs (QInputDialog::getDouble, QMessageBox, one-off QDialogs) are
+// scattered across all four modules and none of them carried a stylesheet, so
+// they fell through to the platform palette. On a machine running Windows in
+// dark mode that produced dark text on dark input fields, which testers hit in
+// Writer, Calc, Impress and the PDF editor alike.
+//
+// Rather than patch 150-odd call sites, stamp the dialog sheet on at show time.
+// Dialogs that style themselves are left alone, so bespoke panels keep their look.
+namespace {
+
+class DialogStyleGuard final : public QObject {
+public:
+    explicit DialogStyleGuard(QObject* parent) : QObject(parent) {}
+
+protected:
+    bool eventFilter(QObject* obj, QEvent* ev) override {
+        if (ev->type() == QEvent::Show) {
+            if (auto* dlg = qobject_cast<QDialog*>(obj)) {
+                if (dlg->styleSheet().isEmpty())
+                    dlg->setStyleSheet(ThemeManager::inputDialogStyleSheet());
+            }
+        }
+        return QObject::eventFilter(obj, ev);
+    }
+};
+
+} // namespace
+
+void ThemeManager::installDialogStyleGuard(QCoreApplication* app) {
+    if (!app) return;
+    app->installEventFilter(new DialogStyleGuard(app));
 }
 
 } // namespace NativeOffice

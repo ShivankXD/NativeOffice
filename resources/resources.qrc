@@ -14,5 +14,11 @@
             the right size, instead of Windows falling back to squashing one
             frame of the .exe icon. -->
        <file alias="app.ico">nativeoffice.ico</file>
+       <!-- Tick glyph for QCheckBox::indicator:checked. A stylesheet-styled
+            indicator draws no mark of its own, so without this a checked box
+            is an indistinguishable filled square. Regenerate with
+            resources/make_check_icon.py. -->
+       <file alias="check-white.png">check-white.png</file>
+       <file alias="check-white@2x.png">check-white@2x.png</file>
     </qresource>
 </RCC>

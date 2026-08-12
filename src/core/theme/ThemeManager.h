@@ -15,6 +15,8 @@
 #include <QObject>
 #include <QString>
 
+class QCoreApplication;
+
 namespace NativeOffice {
 
 struct Theme {
@@ -76,6 +78,15 @@ public:
     // inherited app/module stylesheet — guarantees a light surface with
     // high-contrast, visible text in the input field.
     [[nodiscard]] static QString inputDialogStyleSheet();
+
+    // Installs an application-wide filter that stamps inputDialogStyleSheet()
+    // onto every QDialog that does not already carry a stylesheet of its own,
+    // at the moment it is shown. Without it, ad-hoc dialogs (QInputDialog,
+    // QMessageBox, one-off QDialogs) fall through to the platform palette,
+    // which on a machine running Windows in dark mode renders their input
+    // text the same colour as their background. Dialogs that style themselves
+    // are left untouched. Call once, right after the app stylesheet is set.
+    static void installDialogStyleGuard(QCoreApplication* app);
 
     // Helper: build a CSS color string from a QColor
     [[nodiscard]] static QString cssColor(const QColor& c);

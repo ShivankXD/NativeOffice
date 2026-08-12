@@ -96,7 +96,8 @@ QWidget* SettingsTray::buildPanel() {
         QCheckBox::indicator { width:17px; height:17px; border-radius:5px;
             border:1px solid #2A3242; background:#12161F; }
         QCheckBox::indicator:checked { background:#6D5BE8; border:1px solid #6D5BE8;
-            image:url(none); }
+            image:url(:/assets/check-white.png); }
+        QCheckBox::indicator:hover { border:1px solid #6D5BE8; }
         QSpinBox { background:#12161F; border:1px solid #232A38; border-radius:8px;
             color:#E2E6EE; padding:5px 8px; font:13px 'Segoe UI'; min-width:78px; }
         QPushButton { background:#141A24; border:1px solid #212A38; border-radius:11px;
