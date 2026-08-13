@@ -90,6 +90,62 @@ bool AiDocumentAgent::busy() const { return m_tick->isActive(); }
 
 void AiDocumentAgent::stop() { m_tick->stop(); }
 
+void AiDocumentAgent::beginLive(QTextEdit* target) {
+    if (!target) return;
+    m_tick->stop();
+    m_settle->stop();
+    m_target   = target;
+    m_markdown.clear();
+    m_pending.clear();
+    m_lines.clear();
+    m_line     = 0;
+    m_written  = 0;
+    m_blocks   = 0;
+    m_live     = true;
+
+    QTextCursor c = target->textCursor();
+    c.movePosition(QTextCursor::End);
+    // A blank line between what was already there and what is about to be
+    // written, so the addition never runs into the user's own last sentence.
+    if (!c.atStart()) c.insertBlock();
+    m_start = c.position();
+    target->setTextCursor(c);
+    m_state = State::Applied;
+}
+
+void AiDocumentAgent::feed(const QString& chunk) {
+    if (!m_live || !m_target) return;
+    m_markdown += chunk;
+    m_pending  += chunk;
+
+    // Only whole lines are rendered. Holding the tail back is what stops a
+    // half-arrived "## Hea" being drawn as a paragraph and then rewritten as a
+    // heading once the rest of the line lands.
+    int nl;
+    while ((nl = m_pending.indexOf(QLatin1Char('\n'))) >= 0) {
+        QString line = m_pending.left(nl);
+        m_pending.remove(0, nl + 1);
+        if (line.endsWith(QLatin1Char('\r'))) line.chop(1);
+        m_written += renderLine(line);
+        ++m_blocks;
+    }
+    m_target->ensureCursorVisible();
+    emit progress(m_written);
+}
+
+void AiDocumentAgent::endLive() {
+    if (!m_live) return;
+    if (!m_pending.trimmed().isEmpty()) {
+        m_written += renderLine(m_pending);
+        ++m_blocks;
+    }
+    m_pending.clear();
+    m_live = false;
+    m_target->ensureCursorVisible();
+    m_settle->start();
+    emit finished(m_written);
+}
+
 void AiDocumentAgent::write(QTextEdit* target, const QString& markdown) {
     if (!target || markdown.isEmpty()) return;
     m_tick->stop();
@@ -98,12 +154,12 @@ void AiDocumentAgent::write(QTextEdit* target, const QString& markdown) {
     m_lines    = markdown.split(QLatin1Char('\n'));
     m_line     = 0;
     m_written  = 0;
+    m_blocks   = 0;
+    m_live     = false;
 
     QTextCursor c = target->textCursor();
     c.movePosition(QTextCursor::End);
-    // A blank line between what was already there and what is about to be
-    // written, so the addition never runs into the user's own last sentence.
-    if (!c.atStart()) { c.insertBlock(); }
+    if (!c.atStart()) c.insertBlock();
     m_start = c.position();
     target->setTextCursor(c);
 
@@ -193,8 +249,10 @@ void AiDocumentAgent::step() {
         emit finished(m_written);
         return;
     }
-    for (int n = 0; n < kLinesPerTick && m_line < m_lines.size(); ++n, ++m_line)
+    for (int n = 0; n < kLinesPerTick && m_line < m_lines.size(); ++n, ++m_line) {
         m_written += renderLine(m_lines.at(m_line));
+        ++m_blocks;
+    }
 
     // Keeps the newly written line on screen, which is what makes the writing
     // readable while it happens instead of scrolling away below the fold.
@@ -209,7 +267,7 @@ void AiDocumentAgent::settleTint() {
     // document's own colour is, including in a dark theme.
     QTextCursor c(m_target->document());
     c.setPosition(m_start);
-    c.setPosition(qMin(m_start + m_written + m_lines.size(),
+    c.setPosition(qMin(m_start + m_written + m_blocks,
                        m_target->document()->characterCount() - 1),
                   QTextCursor::KeepAnchor);
     QTextCharFormat clear;
@@ -224,7 +282,7 @@ void AiDocumentAgent::rollback() {
     QTextCursor c(m_target->document());
     c.setPosition(qMax(0, m_start - 1));      // also takes the separating block
     c.setPosition(qMin(m_target->document()->characterCount() - 1,
-                       m_start + m_written + m_lines.size()),
+                       m_start + m_written + m_blocks),
                   QTextCursor::KeepAnchor);
     c.removeSelectedText();
     m_state = State::RolledBack;

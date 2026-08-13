@@ -121,6 +121,9 @@ private:
     QVector<AiAttachment> m_pending;
     QWidget*              m_attachStrip { nullptr };
     QLabel*               m_streamTarget { nullptr };   // bubble being streamed into
+    QString               m_streamAccum;                // raw reply, marker included
+    bool                  m_streamDecided { false };    // chat or document, settled
+    bool                  m_streamToDoc   { false };    // feeding the page live
 };
 
 } // namespace NativeOffice

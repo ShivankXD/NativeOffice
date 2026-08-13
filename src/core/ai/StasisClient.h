@@ -60,8 +60,13 @@ public:
 
     // Sends the conversation and streams the reply. Only one request runs at a
     // time; starting another cancels the one in flight.
+    // documentExcerpt is what the user currently has open. It is sent as data
+    // and wrapped in a system turn by the backend, so a document can never talk
+    // its way past the guardrails.
     void send(const QString& systemPrompt, const QVector<AiMessage>& history,
-              Intent intent = Intent::Answer);
+              Intent intent = Intent::Answer,
+              const QString& modeName = QString(),
+              const QString& documentExcerpt = QString());
 
     void cancel();
     bool busy() const { return m_reply != nullptr; }

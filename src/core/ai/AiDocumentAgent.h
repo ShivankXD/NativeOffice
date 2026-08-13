@@ -2,13 +2,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // AiDocumentAgent.h — writes Stasis's answer into the open document, visibly.
 //
-// The reply is buffered while it streams and only then written out, which is
-// the opposite of what "live" suggests but produces a better result for both
-// reasons that matter. Markdown cannot be parsed incrementally without
-// guessing (a line starting "#" is only a heading once you have seen the rest
-// of the line, and "**" is only bold once it closes), and playing the finished
-// text back at a readable speed is what makes the writing legible as it
-// happens rather than a flicker of reflowing paragraphs.
+// Writing happens as the reply arrives, straight into the page. The unit is a
+// line, not a character: a markdown line is a complete block (a heading is only
+// a heading once its line has arrived, and **bold** only closes within one), so
+// rendering on each newline is both correct and immediate. Text lands in the
+// document in real time, and nothing is staged in the chat first.
+//
+// A trailing partial line is held until it completes or the stream ends, which
+// is what stops a half-written "## Hea" appearing as a paragraph and then
+// being rewritten as a heading a moment later.
 //
 // Newly written text carries a violet tint that settles to the document's own
 // colour a moment later, so you can see exactly what was added without a panel
@@ -36,8 +38,18 @@ public:
     // True when this mode has a document the agent can write into.
     static bool canWriteTo(QTextEdit* target) { return target != nullptr; }
 
-    // Writes markdown into the editor, animated. Replaces any previous edit's
-    // rollback record: one pending edit at a time is all the sidebar offers.
+    // ── live writing, as the reply streams ──────────────────────────────────
+    // beginLive marks the insertion point and starts a new rollback record,
+    // replacing any previous one: one pending edit at a time is all the sidebar
+    // offers. feed renders every complete line it now has. endLive flushes the
+    // last partial line and settles the tint.
+    void beginLive(QTextEdit* target);
+    void feed(const QString& chunk);
+    void endLive();
+    bool live() const { return m_live; }
+
+    // Writes a finished string in one pass. Used by rollforward, where the text
+    // is already known and there is nothing to wait for.
     void write(QTextEdit* target, const QString& markdown);
 
     bool busy() const;
@@ -69,6 +81,9 @@ private:
     QTextEdit* m_target { nullptr };
     QStringList m_lines;
     int      m_line    { 0 };
+    bool     m_live    { false };
+    QString  m_pending;      // partial trailing line, waiting for its newline
+    int      m_blocks  { 0 };  // blocks inserted, so rollback spans them all
     int      m_start   { 0 };     // document position the edit began at
     int      m_written { 0 };     // visible characters written
     QString  m_markdown;          // kept so rollforward can replay it

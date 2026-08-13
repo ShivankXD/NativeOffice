@@ -79,6 +79,27 @@ private:
     bool    m_user  { false };
 };
 
+// The model marks a reply that is meant for the file with this on its own
+// first line. Everything after it is placed into the document verbatim, so a
+// reply without it is conversation and stays in the chat. The marker is never
+// shown: it is stripped here on the way in.
+const QLatin1String kDocMarker("[[DOCUMENT]]");
+
+// Is this reply destined for the document? When it is, *content receives the
+// reply with the marker line removed.
+bool isDocumentReply(const QString& reply, QString* content) {
+    const QString t = reply.trimmed();
+    if (!t.startsWith(kDocMarker)) return false;
+    if (content) {
+        QString rest = t.mid(kDocMarker.size());
+        // Drop the rest of the marker line, whatever line ending it used.
+        const int nl = rest.indexOf(QLatin1Char('\n'));
+        rest = nl >= 0 ? rest.mid(nl + 1) : QString();
+        *content = rest.trimmed();
+    }
+    return true;
+}
+
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,8 +141,43 @@ AiSidebar::AiSidebar(QWidget* parent)
     installEventFilter(this);
 
     connect(m_client, &StasisClient::delta, this, [this](const QString& chunk) {
-        if (!m_streamTarget) return;
-        m_streamTarget->setText(m_streamTarget->text() + chunk);
+        m_streamAccum += chunk;
+
+        // Once the reply is already going into the page, every further chunk
+        // goes straight there. Nothing is staged in the chat on the way.
+        if (m_streamToDoc) { m_agent->feed(chunk); return; }
+        if (m_streamDecided) {
+            if (m_streamTarget) { m_streamTarget->setText(m_streamAccum); scrollToBottom(); }
+            return;
+        }
+
+        // Undecided: the marker, if there is one, is the first line. Wait for
+        // that line rather than guessing from a few characters.
+        const QString t = m_streamAccum.trimmed();
+        const int n = qMin(t.size(), kDocMarker.size());
+        const bool couldBeMarker = t.left(n) == kDocMarker.left(n);
+
+        if (couldBeMarker && t.size() < kDocMarker.size()) return;   // still arriving
+
+        if (t.startsWith(kDocMarker)) {
+            const int nl = m_streamAccum.indexOf(QLatin1Char('\n'));
+            if (nl < 0) return;                       // marker line not finished
+            m_streamDecided = true;
+            if (capabilityFor(m_mode) == AiCapability::Edit && m_docTarget) {
+                m_streamToDoc = true;
+                m_agent->beginLive(m_docTarget);
+                m_agent->feed(m_streamAccum.mid(nl + 1));
+                if (m_streamTarget)
+                    m_streamTarget->setText(QStringLiteral("Writing into your %1 document...")
+                                                .arg(modeName(m_mode)));
+            } else if (m_streamTarget) {
+                // Marked as content somewhere it cannot be written; show it.
+                m_streamTarget->setText(m_streamAccum.mid(nl + 1));
+            }
+        } else {
+            m_streamDecided = true;                   // ordinary conversation
+            if (m_streamTarget) m_streamTarget->setText(m_streamAccum);
+        }
         scrollToBottom();
     });
     connect(m_client, &StasisClient::finished, this,
@@ -141,15 +197,18 @@ AiSidebar::AiSidebar(QWidget* parent)
             a.at   = QDateTime::currentDateTime();
             m_history.append(a);
 
-            // Where the assistant may edit, the answer belongs in the document
-            // rather than only in the chat. The bubble keeps a short note of
-            // what happened so the transcript still reads as a conversation.
-            if (capabilityFor(m_mode) == AiCapability::Edit && m_docTarget
-                && !full.trimmed().isEmpty()) {
+            // The stream already decided where this reply was going and put it
+            // there as it arrived. All that is left is to close it off.
+            if (m_streamToDoc) {
+                m_agent->endLive();
                 if (m_streamTarget)
                     m_streamTarget->setText(QStringLiteral("Written into your %1 document.")
                                                 .arg(modeName(m_mode)));
-                m_agent->write(m_docTarget, full);
+            } else if (m_streamTarget) {
+                QString docContent;
+                // A reply so short it finished before the marker line could be
+                // judged still needs the marker taken off.
+                m_streamTarget->setText(isDocumentReply(full, &docContent) ? docContent : full);
             }
         }
         m_streamTarget = nullptr;
@@ -589,12 +648,32 @@ void AiSidebar::submit() {
     AiMessage placeholder;
     placeholder.role = AiMessage::Role::Assistant;
     placeholder.text = QString();
+    m_streamAccum.clear();
+    m_streamDecided = false;
+    m_streamToDoc   = false;
     appendMessage(placeholder);
+
+    // What the user has open travels with the prompt, so "add a conclusion" or
+    // "make it shorter" can act on the real text instead of being answered with
+    // a question about a document sitting on the other half of the screen.
+    QString excerpt;
+    if (m_docTarget) {
+        excerpt = m_docTarget->toPlainText();
+        constexpr int kMaxContext = 12000;
+        if (excerpt.size() > kMaxContext) {
+            // Keep both ends: the opening establishes what the document is, and
+            // the tail is what a "continue from here" has to follow on from.
+            excerpt = excerpt.left(kMaxContext / 3)
+                    + QStringLiteral("\n\n[...]\n\n")
+                    + excerpt.right(kMaxContext * 2 / 3);
+        }
+    }
 
     setWorking(true);
     m_client->send(QString(), m_history,
                    willEdit ? StasisClient::Intent::Generate
-                            : StasisClient::Intent::Answer);
+                            : StasisClient::Intent::Answer,
+                   modeName(m_mode), excerpt);
 }
 
 void AiSidebar::pickAttachments() {

@@ -87,7 +87,8 @@ void StasisClient::cancel() {
 }
 
 void StasisClient::send(const QString& systemPrompt, const QVector<AiMessage>& history,
-                        Intent intent) {
+                        Intent intent, const QString& modeName,
+                        const QString& documentExcerpt) {
     cancel();
     m_buffer.clear();
     m_accumulated.clear();
@@ -126,6 +127,12 @@ void StasisClient::send(const QString& systemPrompt, const QVector<AiMessage>& h
     body.insert(QStringLiteral("intent"),
                 m_intent == Intent::Generate ? QStringLiteral("generate")
                                              : QStringLiteral("answer"));
+    if (!modeName.isEmpty() || !documentExcerpt.isEmpty()) {
+        body.insert(QStringLiteral("context"), QJsonObject{
+            {QStringLiteral("mode"),    modeName},
+            {QStringLiteral("excerpt"), documentExcerpt},
+        });
+    }
 
     const bool direct = !endpoint().isEmpty();
     QNetworkRequest req{QUrl(direct ? endpoint() : backendChatUrl())};
