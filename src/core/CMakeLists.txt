@@ -27,6 +27,21 @@ add_library(NativeOfficeCore STATIC
     # Writer can both use it; only Calc is wired up so far.
     history/DocHistory.cpp
     history/DocHistory.h
+    # Stasis assistant. Lives in core rather than in a module because the panel
+    # is owned by the shell and outlives any one document tab.
+    ai/AiTypes.h
+    ai/AiConsent.cpp
+    ai/AiConsent.h
+    ai/AiQuota.cpp
+    ai/AiQuota.h
+    ai/StasisClient.cpp
+    ai/StasisClient.h
+    ai/ui/AiSidebar.cpp
+    ai/ui/AiSidebar.h
+    ai/ui/AiConsentDialog.cpp
+    ai/ui/AiConsentDialog.h
+    ai/ui/AiToast.cpp
+    ai/ui/AiToast.h
 )
 
 target_include_directories(NativeOfficeCore PUBLIC
