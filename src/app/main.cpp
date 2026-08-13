@@ -1364,13 +1364,21 @@ public slots:
         QWidget* w = m_stack->currentWidget();
         using NativeOffice::AiMode;
         AiMode m = AiMode::Home;
-        if      (qobject_cast<WriterWindow*>(w))         m = AiMode::Writer;
+        QTextEdit* target = nullptr;
+        if (auto* ww = qobject_cast<WriterWindow*>(w)) {
+            m = AiMode::Writer;
+            // The one surface the agent can write into today. Handed over
+            // explicitly rather than found with findChild, which would just as
+            // happily return the comments pane.
+            if (ww->writer()) target = ww->writer()->editor();
+        }
         else if (qobject_cast<CalcWindow*>(w))           m = AiMode::Calc;
         else if (qobject_cast<ImpressWindow*>(w))        m = AiMode::Impress;
         else if (qobject_cast<PdfWindow*>(w))            m = AiMode::Pdf;
         else if (qobject_cast<ImageResizerWindow*>(w))   m = AiMode::ImageResizer;
         else if (qobject_cast<MarkdownEditorWindow*>(w)) m = AiMode::MarkdownEditor;
         m_ai->setMode(m);
+        m_ai->setDocumentTarget(target);
     }
 
     void closeCurrentTab() { handleTabClose(m_bar->currentIndex()); }

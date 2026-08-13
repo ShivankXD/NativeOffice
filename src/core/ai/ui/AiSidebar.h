@@ -33,6 +33,7 @@ class QPropertyAnimation;
 namespace NativeOffice {
 
 class AiChatStore;
+class AiDocumentAgent;
 class AiToast;
 class StasisClient;
 
@@ -51,6 +52,10 @@ public:
 
     // Puts the caret in the composer.
     void focusComposer();
+
+    // The text surface the agent may write into for the current tab, or null
+    // where there is nothing writable. Set by the shell alongside setMode.
+    void setDocumentTarget(QTextEdit* target);
 
 signals:
     void closeRequested();
@@ -101,8 +106,16 @@ private:
     QTimer*  m_workTick { nullptr };
     int      m_workDots { 0 };
 
+    // Offers Rollback under the turn that changed the document, and turns into
+    // Rollforward once used, so an accidental press is one press to undo.
+    void showRollback(bool rolledBack);
+
     StasisClient*         m_client { nullptr };
     AiChatStore*          m_chats  { nullptr };
+    AiDocumentAgent*      m_agent  { nullptr };
+    QTextEdit*            m_docTarget { nullptr };
+    QWidget*              m_rollRow   { nullptr };
+    QPushButton*          m_rollBtn   { nullptr };
     QString               m_chatId;      // minted on the first prompt of a chat
     QVector<AiMessage>    m_history;
     QVector<AiAttachment> m_pending;

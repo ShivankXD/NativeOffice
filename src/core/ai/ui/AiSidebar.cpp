@@ -2,6 +2,7 @@
 
 #include "AiToast.h"
 #include "ai/AiChatStore.h"
+#include "ai/AiDocumentAgent.h"
 #include "ai/AiQuota.h"
 #include "ai/StasisClient.h"
 
@@ -93,6 +94,7 @@ AiSidebar::AiSidebar(QWidget* parent)
 
     m_client = new StasisClient(this);
     m_chats  = new AiChatStore(this);
+    m_agent  = new AiDocumentAgent(this);
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
@@ -138,12 +140,30 @@ AiSidebar::AiSidebar(QWidget* parent)
             a.text = full;
             a.at   = QDateTime::currentDateTime();
             m_history.append(a);
-            // Answering costs nothing; only writing into a document does. The
-            // document agent books that when it applies an edit.
+
+            // Where the assistant may edit, the answer belongs in the document
+            // rather than only in the chat. The bubble keeps a short note of
+            // what happened so the transcript still reads as a conversation.
+            if (capabilityFor(m_mode) == AiCapability::Edit && m_docTarget
+                && !full.trimmed().isEmpty()) {
+                if (m_streamTarget)
+                    m_streamTarget->setText(QStringLiteral("Written into your %1 document.")
+                                                .arg(modeName(m_mode)));
+                m_agent->write(m_docTarget, full);
+            }
         }
         m_streamTarget = nullptr;
         refreshQuotaLabel();
         scrollToBottom();
+    });
+
+    connect(m_agent, &AiDocumentAgent::finished, this, [this](int chars) {
+        // The server counts characters from the stream it produced and is the
+        // tally that decides; this keeps the local mirror in step so the
+        // sidebar's "generations left" is right without waiting for a refresh.
+        AiQuota::recordGeneration(chars);
+        refreshQuotaLabel();
+        showRollback(false);
     });
 
     refreshQuotaLabel();
@@ -434,6 +454,53 @@ void AiSidebar::focusComposer() {
     m_input->setFocus(Qt::OtherFocusReason);
 }
 
+void AiSidebar::setDocumentTarget(QTextEdit* target) {
+    if (m_docTarget == target) return;
+    m_docTarget = target;
+    // The rollback on offer belonged to the document that was open. Moving to
+    // another tab retires it rather than letting one press edit the wrong file.
+    if (m_rollRow) { m_rollRow->deleteLater(); m_rollRow = nullptr; m_rollBtn = nullptr; }
+}
+
+void AiSidebar::showRollback(bool rolledBack) {
+    if (m_rollRow) { m_rollRow->deleteLater(); m_rollRow = nullptr; }
+
+    m_rollRow = new QWidget(m_chatBody);
+    m_rollRow->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* h = new QHBoxLayout(m_rollRow);
+    h->setContentsMargins(2, 0, 2, 0);
+    h->setSpacing(8);
+
+    // The arrow doubles back on itself, which is the shape of the action in
+    // both directions; the label is what says which way it currently goes.
+    m_rollBtn = new QPushButton(rolledBack ? QStringLiteral("↷  Rollforward")
+                                           : QStringLiteral("↶  Rollback"),
+                                m_rollRow);
+    m_rollBtn->setCursor(Qt::PointingHandCursor);
+    m_rollBtn->setFixedHeight(28);
+    m_rollBtn->setFocusPolicy(Qt::NoFocus);
+    m_rollBtn->setToolTip(rolledBack
+        ? QStringLiteral("Put back what Stasis wrote")
+        : QStringLiteral("Undo what Stasis wrote"));
+    m_rollBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { color:#C3CAD8; font:12px 'Segoe UI'; background:rgba(255,255,255,0.06);"
+        "  border:1px solid rgba(255,255,255,0.14); border-radius:8px; padding:0 12px; }"
+        "QPushButton:hover { color:#FFFFFF; border-color:rgba(124,92,255,0.60);"
+        "  background:rgba(124,92,255,0.16); }"));
+
+    connect(m_rollBtn, &QPushButton::clicked, this, [this] {
+        if (m_agent->canRollback())         { m_agent->rollback();    showRollback(true);  }
+        else if (m_agent->canRollforward()) { m_agent->rollforward(); showRollback(false); }
+    });
+
+    h->addWidget(m_rollBtn, 0);
+    h->addStretch(1);
+
+    const int idx = m_chatLay->indexOf(m_workRow);
+    m_chatLay->insertWidget(idx < 0 ? m_chatLay->count() - 1 : idx, m_rollRow);
+    scrollToBottom();
+}
+
 void AiSidebar::refreshHeroVisibility() {
     if (m_hero) m_hero->setVisible(m_history.isEmpty());
 }
@@ -488,6 +555,15 @@ void AiSidebar::submit() {
         return;
     }
 
+    // A turn that will write into the document spends a generation, so the
+    // allowance is checked before the prompt is sent rather than after the
+    // model has already been paid for.
+    const bool willEdit = capabilityFor(m_mode) == AiCapability::Edit && m_docTarget;
+    if (willEdit && !AiQuota::canGenerate()) {
+        m_toast->post(AiQuota::blockedReason(), AiToast::Tone::Warning, 9000);
+        return;
+    }
+
     AiMessage u;
     u.role = AiMessage::Role::User;
     u.text = text;
@@ -516,7 +592,9 @@ void AiSidebar::submit() {
     appendMessage(placeholder);
 
     setWorking(true);
-    m_client->send(QString(), m_history);
+    m_client->send(QString(), m_history,
+                   willEdit ? StasisClient::Intent::Generate
+                            : StasisClient::Intent::Answer);
 }
 
 void AiSidebar::pickAttachments() {
