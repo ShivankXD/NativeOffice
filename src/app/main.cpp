@@ -73,6 +73,11 @@
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QLinearGradient>
+#include <QSplitter>
+#include "ai/AiConsent.h"
+#include "ai/AiTypes.h"
+#include "ai/ui/AiConsentDialog.h"
+#include "ai/ui/AiSidebar.h"
 #include <functional>
 #include <thread>
 // Sprint 6: PDF export
@@ -1163,6 +1168,30 @@ public:
         connect(plus, &QToolButton::clicked, this, [this]() { openHomeTab(); });
         m_plus = plus;
 
+        // Use AI. Sits at the right of the strip, before the window buttons:
+        // far enough from the tabs that it is never hit by accident, and on the
+        // one row that is visible in every mode.
+        m_useAi = new QToolButton(m_topBar);
+        m_useAi->setText(QStringLiteral(" Use AI"));
+        m_useAi->setToolTip(QStringLiteral("Open Stasis  (Ctrl+A+I)"));
+        m_useAi->setCursor(Qt::PointingHandCursor);
+        m_useAi->setFixedHeight(ShellTabBar::kTabHeight);
+        m_useAi->setFocusPolicy(Qt::NoFocus);
+        m_useAi->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        {
+            // The mark alone, already cropped off its black field, so it sits on
+            // the strip instead of punching a dark rectangle into it.
+            QPixmap mk(QStringLiteral(":/assets/stasis-mark-32.png"));
+            if (!mk.isNull())
+                m_useAi->setIcon(QIcon(mk.scaledToHeight(15, Qt::SmoothTransformation)));
+        }
+        m_useAi->setStyleSheet(
+            "QToolButton { color:#C9CFDB; font:600 12px 'Segoe UI'; background:transparent;"
+            "  border:none; padding:0 12px; }"
+            "QToolButton:hover { color:#FFFFFF; background:rgba(124,92,255,0.20); }"
+            "QToolButton:pressed { background:rgba(124,92,255,0.32); }");
+        connect(m_useAi, &QToolButton::clicked, this, &MainShell::toggleAiSidebar);
+
         m_controls = new WindowControls(this, m_topBar);
 
         // Top row of the strip; the scrollbar the QScrollArea adds appears
@@ -1170,6 +1199,7 @@ public:
         hb->addWidget(m_scroll, 0, Qt::AlignTop);
         hb->addWidget(plus, 0, Qt::AlignTop);
         hb->addStretch(1);             // draggable gap
+        hb->addWidget(m_useAi, 0, Qt::AlignTop);
         hb->addWidget(m_controls, 0, Qt::AlignTop);
 
         // The visible scrollbar, mirroring the scroll area's own hidden one.
@@ -1194,13 +1224,35 @@ public:
 
         m_stack = new QStackedWidget(central);
 
+        // The assistant sits beside the suite rather than over it. A splitter
+        // is what makes that true in both directions: opening the panel narrows
+        // the document instead of covering it, and dragging the divider resizes
+        // both at once, which is the whole point of putting it here.
+        m_split = new QSplitter(Qt::Horizontal, central);
+        m_split->setObjectName("shellSplit");
+        m_split->setChildrenCollapsible(false);
+        m_split->setHandleWidth(1);
+        m_split->setStyleSheet(
+            "QSplitter#shellSplit::handle { background:rgba(255,255,255,0.10); }"
+            "QSplitter#shellSplit::handle:hover { background:#7C5CFF; }");
+        m_split->addWidget(m_stack);
+
+        m_ai = new NativeOffice::AiSidebar(m_split);
+        m_ai->hide();
+        m_split->addWidget(m_ai);
+        m_split->setStretchFactor(0, 1);   // the suite takes the slack
+        m_split->setStretchFactor(1, 0);   // the panel keeps the width it is given
+        connect(m_ai, &NativeOffice::AiSidebar::closeRequested,
+                this, &MainShell::closeAiSidebar);
+
         v->addWidget(m_topBar, 0);
-        v->addWidget(m_stack, 1);
+        v->addWidget(m_split, 1);
         setCentralWidget(central);
 
         connect(m_bar, &QTabBar::currentChanged, this, [this](int i) {
             m_stack->setCurrentIndex(i);
             ensureTabVisible(i);
+            syncAiMode();
         });
         connect(m_bar, &QTabBar::tabCloseRequested,
                 this, &MainShell::handleTabClose);
@@ -1253,6 +1305,11 @@ public:
         add(QKeySequence(Qt::CTRL | Qt::Key_PageUp),             &MainShell::prevTab);
         add(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T),      &MainShell::reopenClosedTab);
 
+        // Ctrl+A+I is handled in eventFilter rather than here, for the reason
+        // written there. The filter has to be on the application, not on this
+        // window, or the key never arrives while a document has focus.
+        qApp->installEventFilter(this);
+
         // Ctrl+1..8 jump to that tab, Ctrl+9 to the last one, matching browsers.
         for (int n = 1; n <= 9; ++n) {
             auto* sc = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key(Qt::Key_0 + n)), this);
@@ -1265,6 +1322,57 @@ public:
     }
 
 public slots:
+    // ── Stasis assistant ─────────────────────────────────────────────────────
+    // Use AI is a gate before it is a toggle. Until the notice has been
+    // accepted the panel does not open at all, and every press re-asks rather
+    // than silently doing nothing, so the way back in is always the button the
+    // user already pressed.
+    void toggleAiSidebar() {
+        if (m_ai->isVisible()) { closeAiSidebar(); return; }
+        if (!NativeOffice::AiConsent::accepted()) {
+            if (!NativeOffice::AiConsentDialog::runFor(this)) return;   // declined
+        }
+        openAiSidebar();
+    }
+
+    void openAiSidebar() {
+        if (m_ai->isVisible()) { m_ai->focusComposer(); return; }
+        // The hero belongs to a run of the app, not to a click: the first time
+        // the panel opens in this process it starts clean, and reopening it
+        // later in the same run keeps the conversation.
+        if (!m_aiSessionStarted) {
+            m_ai->startNewSession();
+            m_aiSessionStarted = true;
+        }
+        syncAiMode();
+        m_ai->show();
+
+        const int total = m_split->width();
+        const int panel = qBound(320, total / 4, 460);
+        m_split->setSizes({ qMax(320, total - panel), panel });
+        m_ai->focusComposer();
+    }
+
+    void closeAiSidebar() { m_ai->hide(); }
+
+    // Tells the panel which surface it is looking at, which is what the
+    // "In <mode>" chip reports and what decides whether it may edit or only
+    // answer. Driven off the tab stack rather than tracked by each window, so a
+    // new document type cannot forget to announce itself.
+    void syncAiMode() {
+        if (!m_ai) return;
+        QWidget* w = m_stack->currentWidget();
+        using NativeOffice::AiMode;
+        AiMode m = AiMode::Home;
+        if      (qobject_cast<WriterWindow*>(w))         m = AiMode::Writer;
+        else if (qobject_cast<CalcWindow*>(w))           m = AiMode::Calc;
+        else if (qobject_cast<ImpressWindow*>(w))        m = AiMode::Impress;
+        else if (qobject_cast<PdfWindow*>(w))            m = AiMode::Pdf;
+        else if (qobject_cast<ImageResizerWindow*>(w))   m = AiMode::ImageResizer;
+        else if (qobject_cast<MarkdownEditorWindow*>(w)) m = AiMode::MarkdownEditor;
+        m_ai->setMode(m);
+    }
+
     void closeCurrentTab() { handleTabClose(m_bar->currentIndex()); }
 
     void nextTab() {
@@ -1538,7 +1646,40 @@ protected:
             m_controls->refreshMaxIcon();
     }
 
+    // Is the A key down at this instant? Ctrl+I is Italic in Writer, so the
+    // chord must not fire on a stale flag: a tracked bool can be left set when
+    // the key release lands somewhere that consumes it, and stealing Italic
+    // would be a far worse bug than a shortcut that occasionally needs a second
+    // press. Windows can answer definitively, so it is asked.
+    bool aKeyPhysicallyDown() const {
+#ifdef Q_OS_WIN
+        return (GetAsyncKeyState('A') & 0x8000) != 0;
+#else
+        return m_aHeld;   // no equivalent query; the tracked flag is all there is
+#endif
+    }
+
     bool eventFilter(QObject* o, QEvent* e) override {
+        // Ctrl+A+I, as a genuinely held combination. It cannot be a QShortcut:
+        // "Ctrl+A, I" would be a two-step sequence and would have to swallow
+        // every Ctrl+A in the app while waiting for the second key, which would
+        // break Select All everywhere. Watching the A key's own press and
+        // release costs nothing and leaves Ctrl+A alone.
+        if (e->type() == QEvent::KeyPress) {
+            auto* k = static_cast<QKeyEvent*>(e);
+            if (k->key() == Qt::Key_A) m_aHeld = true;
+            else if (k->key() == Qt::Key_I && (k->modifiers() & Qt::ControlModifier)
+                     && aKeyPhysicallyDown()) {
+                toggleAiSidebar();
+                return true;
+            }
+        } else if (e->type() == QEvent::KeyRelease) {
+            auto* k = static_cast<QKeyEvent*>(e);
+            if (k->key() == Qt::Key_A) m_aHeld = false;
+        } else if (e->type() == QEvent::WindowDeactivate) {
+            m_aHeld = false;      // a key released while we were away is missed
+        }
+
         if (o == m_topBar) {
             // Reveal the window buttons for the whole strip rather than only
             // their own 132px. They are invisible until hovered, so requiring
@@ -1644,6 +1785,13 @@ private:
     TabFade*                   m_fade   { nullptr };
     QScrollBar*                m_hbar   { nullptr };
     QToolButton*               m_plus   { nullptr };
+    QToolButton*               m_useAi  { nullptr };
+    QSplitter*                 m_split  { nullptr };
+    NativeOffice::AiSidebar*   m_ai     { nullptr };
+    bool                       m_aiSessionStarted { false };
+    // Ctrl+A+I is a held combination rather than a key sequence, so the A has
+    // to be tracked by hand; see nativeEvent-adjacent filter in installShortcuts.
+    bool                       m_aHeld  { false };
     WindowControls*            m_controls { nullptr };
     QTimer*                    m_hoverPoll { nullptr };
     QStringList                m_closed;          // recently closed file paths
