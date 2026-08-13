@@ -32,6 +32,7 @@ class QPropertyAnimation;
 
 namespace NativeOffice {
 
+class AiChatStore;
 class AiToast;
 class StasisClient;
 
@@ -101,6 +102,8 @@ private:
     int      m_workDots { 0 };
 
     StasisClient*         m_client { nullptr };
+    AiChatStore*          m_chats  { nullptr };
+    QString               m_chatId;      // minted on the first prompt of a chat
     QVector<AiMessage>    m_history;
     QVector<AiAttachment> m_pending;
     QWidget*              m_attachStrip { nullptr };

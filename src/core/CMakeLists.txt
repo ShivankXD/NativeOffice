@@ -30,6 +30,8 @@ add_library(NativeOfficeCore STATIC
     # Stasis assistant. Lives in core rather than in a module because the panel
     # is owned by the shell and outlives any one document tab.
     ai/AiTypes.h
+    ai/AiChatStore.cpp
+    ai/AiChatStore.h
     ai/AiConsent.cpp
     ai/AiConsent.h
     ai/AiQuota.cpp

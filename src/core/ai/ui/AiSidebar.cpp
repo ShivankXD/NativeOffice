@@ -1,6 +1,7 @@
 #include "AiSidebar.h"
 
 #include "AiToast.h"
+#include "ai/AiChatStore.h"
 #include "ai/AiQuota.h"
 #include "ai/StasisClient.h"
 
@@ -91,6 +92,7 @@ AiSidebar::AiSidebar(QWidget* parent)
     setMinimumWidth(300);
 
     m_client = new StasisClient(this);
+    m_chats  = new AiChatStore(this);
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
@@ -413,6 +415,7 @@ void AiSidebar::setMode(AiMode mode) {
 void AiSidebar::startNewSession() {
     m_history.clear();
     m_pending.clear();
+    m_chatId.clear();          // the next prompt opens a new named conversation
     rebuildAttachmentStrip();
     // Drop every bubble, keeping the hero, the working row and the trailing
     // stretch that the layout is built around.
@@ -490,8 +493,16 @@ void AiSidebar::submit() {
     u.text = text;
     u.at   = QDateTime::currentDateTime();
     u.attachments = m_pending;
+
+    // The opening prompt names the conversation. Done here rather than when the
+    // answer arrives so a chat that is abandoned mid-reply is still in the list.
+    const bool firstTurn = m_history.isEmpty();
     m_history.append(u);
     appendMessage(u);
+    if (firstTurn) {
+        if (m_chatId.isEmpty()) m_chatId = AiChatStore::mintId();
+        m_chats->save(m_chatId, AiChatStore::titleFrom(text), modeName(m_mode));
+    }
 
     m_input->clear();
     m_pending.clear();
