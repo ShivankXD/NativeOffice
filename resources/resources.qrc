@@ -26,5 +26,13 @@
        <file alias="spin-up@2x.png">spin-up@2x.png</file>
        <file alias="spin-down.png">spin-down.png</file>
        <file alias="spin-down@2x.png">spin-down@2x.png</file>
+       <!-- Stasis brand mark for the AI sidebar and the Use AI button. The
+            source art is a white glyph on a large black field; these are the
+            glyph alone on transparency, cropped to its bounding box.
+            Regenerate with resources/make_stasis_mark.py. -->
+       <file alias="stasis-mark.png">stasis-mark.png</file>
+       <file alias="stasis-mark-32.png">stasis-mark-32.png</file>
+       <file alias="stasis-mark-64.png">stasis-mark-64.png</file>
+       <file alias="stasis-mark-256.png">stasis-mark-256.png</file>
     </qresource>
 </RCC>
