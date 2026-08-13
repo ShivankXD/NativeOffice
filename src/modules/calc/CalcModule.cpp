@@ -51,6 +51,7 @@
 #include <QMimeData>
 #include <QPainter>
 #include <QTimer>
+#include <QScopeGuard>
 #include <QScrollBar>
 #include <QEvent>
 #include <QKeySequence>
@@ -106,6 +107,7 @@
 #include <utility>
 #include <climits>
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <QGridLayout>
 #include <QStringList>
@@ -244,6 +246,105 @@ protected:
 
 private:
     QTableView* m_view;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FreezableTableView — a QTableView that reserves a strip of space along the
+// top and/or left for the frozen row/column views to sit in.
+//
+// The frozen views used to be children drawn ON TOP of the grid, so the band
+// always covered a band's worth of body content: freeze the top row, scroll
+// down, and the row underneath the band was hidden rather than skipped.
+// Reserving real space puts the band beside the body instead of over it.
+//
+// The reservation goes through the headers rather than through a direct
+// setViewportMargins call. QTableView::updateGeometries() derives the margins
+// from the header sizes and then sizes the scrollbars against the viewport it
+// just produced, so setting the margins behind its back loses twice over: the
+// next base pass takes them straight back, and the scroll range stays computed
+// for a viewport a band too tall, which puts the last rows out of reach.
+// Widening the header bounds for one extra base pass makes the base class do
+// both jobs itself. The headers are then shrunk back to their natural size at
+// the widget edge, leaving the band between them and the body.
+//
+// Reserving an axis needs that axis's header, so a band is only ever added
+// next to a visible header. Calc shows both.
+// ─────────────────────────────────────────────────────────────────────────────
+class FreezableTableView : public QTableView {
+public:
+    using QTableView::QTableView;
+
+    // width/height are the reserved strip in pixels; cols/rows are how many
+    // leading columns and rows the band is showing.
+    void setFrozenBand(int width, int height, int cols, int rows) {
+        if (m_bandW == width && m_bandH == height
+            && m_cols == cols && m_rows == rows) return;
+        m_bandW = width;
+        m_bandH = height;
+        m_cols  = cols;
+        m_rows  = rows;
+        updateGeometries();
+    }
+
+    // True while the strip is being reserved, when the headers are stretched
+    // across it and every size reads as natural + band. Anyone placing widgets
+    // against this view's geometry has to sit that out and wait for
+    // onBandSettled, or it lands them a whole band off.
+    bool isReserving() const { return m_reserving; }
+
+    // Run once the reserved strip has settled.
+    std::function<void()> onBandSettled;
+
+protected:
+    void updateGeometries() override {
+        // The guard comes first: the extra pass below re-enters here, and
+        // letting the base class run again would reset the margins it set.
+        if (m_reserving) return;
+        QTableView::updateGeometries();
+        if (m_bandW == 0 && m_bandH == 0) return;      // nothing frozen
+
+        m_reserving = true;
+
+        QHeaderView* vh = verticalHeader();
+        QHeaderView* hh = horizontalHeader();
+        const int vw = vh->isHidden() ? 0 : vh->width();
+        const int hy = hh->isHidden() ? 0 : hh->height();
+
+        // Both bounds move, not just the minimum: the row header is given a
+        // fixed width, which pins the maximum too, and the base class clamps
+        // the margin to it.
+        const int minW = vh->minimumWidth(),  maxW = vh->maximumWidth();
+        const int minH = hh->minimumHeight(), maxH = hh->maximumHeight();
+        if (vw) { vh->setMinimumWidth (vw + m_bandW); vh->setMaximumWidth (vw + m_bandW); }
+        if (hy) { hh->setMinimumHeight(hy + m_bandH); hh->setMaximumHeight(hy + m_bandH); }
+        QTableView::updateGeometries();
+        if (vw) { vh->setMinimumWidth (minW); vh->setMaximumWidth (maxW); }
+        if (hy) { hh->setMinimumHeight(minH); hh->setMaximumHeight(maxH); }
+
+        // That pass stretched the headers across the whole reserved strip. Put
+        // them back at the widget edge so the band sits on their inner side.
+        const QRect vg = viewport()->geometry();
+        if (vw) vh->setGeometry(vg.left() - m_bandW - vw, vg.top(), vw, vg.height());
+        if (hy) hh->setGeometry(vg.left(), vg.top() - m_bandH - hy, vg.width(), hy);
+
+        // The band is already showing the frozen rows and columns, so take them
+        // out of the body's range. Both scroll modes are per-item here, so the
+        // value is the first visible row/column. Without this the body starts
+        // back at row 1 at the top of the scroll and the frozen row is drawn
+        // twice. The base pass above resets the range, hence doing it after.
+        verticalScrollBar()->setMinimum(m_rows);
+        horizontalScrollBar()->setMinimum(m_cols);
+
+        m_reserving = false;
+        if (onBandSettled) onBandSettled();
+    }
+
+private:
+    int  m_bandW     { 0 };
+    int  m_bandH     { 0 };
+    int  m_cols      { 0 };
+    int  m_rows      { 0 };
+    bool m_reserving { false };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1004,7 +1105,12 @@ void CalcModule::buildUi() {
     m_model = createSheet("Sheet1");
     m_activeSheet = 0;
 
-    m_tableView = new QTableView(this);
+    auto* grid = new FreezableTableView(this);
+    // Place the frozen bands only once the reserved strip has settled. Anything
+    // that asks for a refresh mid-reserve is turned away by updateFrozenViews
+    // and answered here instead.
+    grid->onBandSettled = [this]{ updateFrozenViews(); };
+    m_tableView = grid;
     m_tableView->setObjectName("calcGrid");
     m_tableView->setModel(m_model);
     m_undoGroup->setActiveStack(m_model->undoStack());
@@ -2546,24 +2652,51 @@ void CalcModule::showColumnFilter() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Freeze panes — overlay table views pinned at the top band / left band.
+// Freeze panes — table views pinned in a strip reserved along the top / left.
+// The strip is real space taken out of the grid's viewport (see
+// FreezableTableView), not an overlay, so the frozen band never covers the row
+// or column sitting underneath it.
 // ─────────────────────────────────────────────────────────────────────────────
-QTableView* CalcModule::makeFrozenView() {
-    auto* v = new QTableView(m_tableView);
+// Width of the rule drawn along a band's inner edge to mark the freeze.
+static constexpr int kFreezeLine = 2;
+
+// A band view is pinned: updateFrozenViews is the only thing allowed to say
+// which rows and columns it shows. It shares the grid's selection model so the
+// band highlights with it, and that means currentChanged reaches it and it
+// scrolls itself to the current cell, which slides the band off its frozen
+// rows. Swallowing scrollTo keeps it where it was put.
+class FrozenBandView : public QTableView {
+public:
+    using QTableView::QTableView;
+    void scrollTo(const QModelIndex&, ScrollHint = EnsureVisible) override {}
+};
+
+QTableView* CalcModule::makeFrozenView(bool rightLine, bool bottomLine) {
+    auto* v = new FrozenBandView(m_tableView);
     v->setObjectName("frozenView");
     v->setModel(m_model);
     v->setSelectionModel(m_tableView->selectionModel());
     v->setItemDelegate(new CalcItemDelegate(v));
     v->setFocusPolicy(Qt::NoFocus);
+    // Real headers, so a band can carry the row numbers or column letters that
+    // belong to it. They stay hidden until updateFrozenViews works out which
+    // band owns which strip.
+    v->setHorizontalHeader(new CalcHeaderView(Qt::Horizontal, v));
+    v->setVerticalHeader  (new CalcHeaderView(Qt::Vertical,   v));
     v->horizontalHeader()->setVisible(false);
     v->verticalHeader()->setVisible(false);
     v->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     v->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     v->setFrameShape(QFrame::NoFrame);
     v->setShowGrid(false);          // the delegate draws the grid, as in the main view
-    v->setStyleSheet(
-        "QTableView#frozenView{border:none;gridline-color:#E2E2E2;background:#FFFFFF;"
-        "border-right:2px solid #B6BBC2;border-bottom:2px solid #B6BBC2;}");
+
+    const QString rule = QStringLiteral("%1px solid #B6BBC2;").arg(kFreezeLine);
+    QString css = QStringLiteral(
+        "QTableView#frozenView{border:none;gridline-color:#E2E2E2;background:#FFFFFF;");
+    if (rightLine)  css += QStringLiteral("border-right:")  + rule;
+    if (bottomLine) css += QStringLiteral("border-bottom:") + rule;
+    css += QLatin1Char('}');
+    v->setStyleSheet(css);
     return v;
 }
 
@@ -2572,13 +2705,21 @@ void CalcModule::setFreeze(int rows, int cols) {
     m_freezeCols = std::max(0, cols);
 
     auto drop = [](QTableView*& v){ if (v) { v->deleteLater(); v = nullptr; } };
-    if (m_freezeRows == 0 && m_freezeCols == 0) { drop(m_frozenTop); drop(m_frozenLeft); drop(m_frozenCorner); return; }
+    if (m_freezeRows == 0 && m_freezeCols == 0) {
+        drop(m_frozenTop); drop(m_frozenLeft); drop(m_frozenCorner);
+        // Give the reserved strip back to the grid. static_cast, not
+        // qobject_cast: m_tableView is always a FreezableTableView (one
+        // creation site) and the class is local to this file, so it carries no
+        // Q_OBJECT for qobject_cast to use.
+        static_cast<FreezableTableView*>(m_tableView)->setFrozenBand(0, 0, 0, 0);
+        return;
+    }
 
-    if (m_freezeRows > 0 && !m_frozenTop) m_frozenTop = makeFrozenView();
+    if (m_freezeRows > 0 && !m_frozenTop) m_frozenTop = makeFrozenView(false, true);
     if (m_freezeRows == 0) drop(m_frozenTop);
-    if (m_freezeCols > 0 && !m_frozenLeft) m_frozenLeft = makeFrozenView();
+    if (m_freezeCols > 0 && !m_frozenLeft) m_frozenLeft = makeFrozenView(true, false);
     if (m_freezeCols == 0) drop(m_frozenLeft);
-    if (m_freezeRows > 0 && m_freezeCols > 0 && !m_frozenCorner) m_frozenCorner = makeFrozenView();
+    if (m_freezeRows > 0 && m_freezeCols > 0 && !m_frozenCorner) m_frozenCorner = makeFrozenView(true, true);
     if ((m_freezeRows == 0 || m_freezeCols == 0)) drop(m_frozenCorner);
 
     updateFrozenViews();
@@ -2587,48 +2728,100 @@ void CalcModule::setFreeze(int rows, int cols) {
 void CalcModule::updateFrozenViews() {
     if (!m_frozenTop && !m_frozenLeft && !m_frozenCorner) return;
 
-    // KNOWN LIMITATION. The frozen views are children of the grid drawn ON TOP
-    // of it, so the band always covers one band's worth of body content: scroll
-    // down with the top row frozen and the row sitting under the band is hidden
-    // rather than skipped.
-    //
-    // Clamping the scroll range does not fix it (tried, reverted): it only
-    // moves which row is hidden, and makes it worse at the top, where the
-    // covered row is currently the frozen row itself so nothing is lost.
-    // A real fix needs the band to occupy layout space instead of overlapping,
-    // i.e. a split view with the frozen rows in their own scroll area kept in
-    // sync with the body. That is an architectural change, not a tweak.
+    // Reserving the strip resizes the viewport, which lands here again through
+    // the grid's own signals. Both of those moments have to be sat out: while
+    // the reserve is in flight the headers are stretched across the strip and
+    // read a whole band too large, and placing the bands against that geometry
+    // is what made the frozen labels disappear after a window resize. The
+    // grid's onBandSettled hook calls back once the geometry is final.
+    auto* grid = static_cast<FreezableTableView*>(m_tableView);
+    if (grid->isReserving() || m_placingFrozen) return;
+    m_placingFrozen = true;
+    const QScopeGuard done([this]{ m_placingFrozen = false; });
 
     auto syncSizes = [&](QTableView* v){
         for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c) v->setColumnWidth(c, m_tableView->columnWidth(c));
         for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r) v->setRowHeight(r, m_tableView->rowHeight(r));
     };
-    const int Lx = m_tableView->verticalHeader()->width() + m_tableView->frameWidth();
-    const int Ty = m_tableView->horizontalHeader()->height() + m_tableView->frameWidth();
+
     int fcW = 0; for (int c = 0; c < m_freezeCols; ++c) fcW += m_tableView->columnWidth(c);
     int frH = 0; for (int r = 0; r < m_freezeRows; ++r) frH += m_tableView->rowHeight(r);
-    const int vpW = m_tableView->viewport()->width();
-    const int vpH = m_tableView->viewport()->height();
+
+    // The freeze rule is chrome that needs its own pixels: a band draws it as a
+    // border, which insets that band's contents, so it has to be reserved too
+    // or the frozen cells come out short and stop lining up with the body.
+    const int bandW = fcW ? fcW + kFreezeLine : 0;
+    const int bandH = frH ? frH + kFreezeLine : 0;
+
+    // Reserve the strip first, then read the viewport geometry: the bands live
+    // in that reserved space, beside the body rather than on top of it, so no
+    // row or column is hidden underneath them.
+    grid->setFrozenBand(bandW, bandH, m_freezeCols, m_freezeRows);
+
+    const QRect vg = m_tableView->viewport()->geometry();
+    const int   vw = m_rowHeader->isHidden() ? 0 : m_rowHeader->width();
+    const int   hh = m_colHeader->isHidden() ? 0 : m_colHeader->height();
+
+    // Which view carries the labels for a band:
+    //
+    //         vw     fcW      body        With only one axis frozen, that
+    //      +------+-------+-----------+   band's own view carries them. With
+    //   hh | corn | cols  | colHeader |   both, the corner view carries both
+    //      +------+-------+-----------+   strips instead, because a band's
+    //  frH | rows |corner | frozenTop |   header has to sit against its own
+    //      +------+-------+-----------+   cells and the other band would be
+    //      | rowH | frzLt | viewport  |   sitting in between.
+    //      +------+-------+-----------+
+    const bool rowsFrozen = frH > 0;
+    const bool colsFrozen = fcW > 0;
+
+    const QModelIndex cur = m_tableView->currentIndex();
+    auto syncHighlight = [&](QTableView* v){
+        auto* h = static_cast<CalcHeaderView*>(v->horizontalHeader());
+        auto* r = static_cast<CalcHeaderView*>(v->verticalHeader());
+        if (!h->isHidden()) h->setHighlightedSections({cur.column()});
+        if (!r->isHidden()) r->setHighlightedSections({cur.row()});
+    };
 
     if (m_frozenTop) {
         syncSizes(m_frozenTop);
-        m_frozenTop->setGeometry(Lx, Ty, vpW, frH);
+        const bool ownsRowNumbers = !colsFrozen;
+        m_frozenTop->verticalHeader()->setVisible(ownsRowNumbers);
+        if (ownsRowNumbers) m_frozenTop->verticalHeader()->setFixedWidth(vw);
+        m_frozenTop->setGeometry(ownsRowNumbers ? vg.left() - vw   : vg.left(),
+                                 vg.top() - bandH,
+                                 ownsRowNumbers ? vw + vg.width()  : vg.width(),
+                                 bandH);
         m_frozenTop->horizontalScrollBar()->setValue(m_tableView->horizontalScrollBar()->value());
         m_frozenTop->verticalScrollBar()->setValue(0);
+        syncHighlight(m_frozenTop);
         m_frozenTop->raise(); m_frozenTop->show();
     }
     if (m_frozenLeft) {
         syncSizes(m_frozenLeft);
-        m_frozenLeft->setGeometry(Lx, Ty, fcW, vpH);
+        const bool ownsColLetters = !rowsFrozen;
+        m_frozenLeft->horizontalHeader()->setVisible(ownsColLetters);
+        if (ownsColLetters) m_frozenLeft->horizontalHeader()->setFixedHeight(hh);
+        m_frozenLeft->setGeometry(vg.left() - bandW,
+                                  ownsColLetters ? vg.top() - hh    : vg.top(),
+                                  bandW,
+                                  ownsColLetters ? hh + vg.height() : vg.height());
         m_frozenLeft->verticalScrollBar()->setValue(m_tableView->verticalScrollBar()->value());
         m_frozenLeft->horizontalScrollBar()->setValue(0);
+        syncHighlight(m_frozenLeft);
         m_frozenLeft->raise(); m_frozenLeft->show();
     }
     if (m_frozenCorner) {
         syncSizes(m_frozenCorner);
-        m_frozenCorner->setGeometry(Lx, Ty, fcW, frH);
+        m_frozenCorner->horizontalHeader()->setVisible(true);
+        m_frozenCorner->verticalHeader()->setVisible(true);
+        m_frozenCorner->horizontalHeader()->setFixedHeight(hh);
+        m_frozenCorner->verticalHeader()->setFixedWidth(vw);
+        m_frozenCorner->setGeometry(vg.left() - bandW - vw, vg.top() - bandH - hh,
+                                    vw + bandW, hh + bandH);
         m_frozenCorner->horizontalScrollBar()->setValue(0);
         m_frozenCorner->verticalScrollBar()->setValue(0);
+        syncHighlight(m_frozenCorner);
         m_frozenCorner->raise(); m_frozenCorner->show();
     }
 }

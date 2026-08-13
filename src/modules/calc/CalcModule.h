@@ -214,7 +214,7 @@ private:
     // ── Freeze panes ───────────────────────────────────────────────────────────
     void setFreeze(int rows, int cols);   // freeze the top 'rows' / left 'cols'
     void updateFrozenViews();             // re-sync geometry/sizes/scroll
-    QTableView* makeFrozenView();
+    QTableView* makeFrozenView(bool rightLine, bool bottomLine);
 
     // ── AutoFilter ─────────────────────────────────────────────────────────────
     void showColumnFilter();   // checklist filter for the active column
@@ -467,12 +467,13 @@ private:
     bool    m_eyeProtection   { false };
     bool    m_sheetProtected  { false };
 
-    // ── Freeze panes (overlay table views pinned at the top / left) ────────────
+    // ── Freeze panes (table views pinned in a strip reserved top / left) ──────
     QTableView* m_frozenTop    { nullptr };
     QTableView* m_frozenLeft   { nullptr };
     QTableView* m_frozenCorner { nullptr };
-    int m_freezeRows { 0 };
-    int m_freezeCols { 0 };
+    int  m_freezeRows    { 0 };
+    int  m_freezeCols    { 0 };
+    bool m_placingFrozen { false };   // guards updateFrozenViews re-entry
 
     // ── Data-export & conditional-formatting state ────────────────────────────
     QWidget* m_pandasPanel { nullptr };   // live pandas-code panel (file-local type)
