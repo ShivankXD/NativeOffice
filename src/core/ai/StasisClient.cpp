@@ -187,6 +187,27 @@ void StasisClient::readStream() {
         if (line.isEmpty()) continue;
         if (!line.startsWith("data:")) continue;
         const QByteArray payload = line.mid(5).trimmed();
+        // Our own backend adds a frame carrying the sources a search turned
+        // up. It is not part of the chat-completions format, so it is picked
+        // out before the frame is read as a content delta.
+        const QJsonObject obj = QJsonDocument::fromJson(payload).object();
+        if (obj.contains(QStringLiteral("stasis"))) {
+            const QJsonArray arr = obj.value(QStringLiteral("stasis")).toObject()
+                                      .value(QStringLiteral("sources")).toArray();
+            QVector<AiSource> list;
+            list.reserve(arr.size());
+            for (const QJsonValue& v : arr) {
+                const QJsonObject o = v.toObject();
+                AiSource src;
+                src.title  = o.value(QStringLiteral("title")).toString();
+                src.url    = o.value(QStringLiteral("url")).toString();
+                src.domain = o.value(QStringLiteral("domain")).toString();
+                if (!src.url.isEmpty()) list.append(src);
+            }
+            if (!list.isEmpty()) emit sources(list);
+            continue;
+        }
+
         const QString chunk = deltaFromEvent(payload);
         if (chunk.isEmpty()) continue;
         m_accumulated += chunk;

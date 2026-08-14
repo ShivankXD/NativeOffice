@@ -34,6 +34,7 @@ namespace NativeOffice {
 
 class AiChatStore;
 class AiDeckTarget;
+class AiSourcesStrip;
 class AiDocumentAgent;
 class AiToast;
 class StasisClient;
@@ -112,17 +113,18 @@ private:
     QTimer*  m_workTick { nullptr };
     int      m_workDots { 0 };
 
-    // Offers Rollback under the turn that changed the document, and turns into
+    // Offers Rollback in the strip above the composer, and turns it into
     // Rollforward once used, so an accidental press is one press to undo.
     void showRollback(bool rolledBack);
+    void hideRollback();
 
     StasisClient*         m_client { nullptr };
     AiChatStore*          m_chats  { nullptr };
     AiDocumentAgent*      m_agent  { nullptr };
     QTextEdit*            m_docTarget { nullptr };
     AiDeckTarget*         m_deckTarget { nullptr };
-    QWidget*              m_rollRow   { nullptr };
-    QPushButton*          m_rollBtn   { nullptr };
+    AiSourcesStrip*       m_strip     { nullptr };
+    bool                  m_rolledBack { false };
     QString               m_chatId;      // minted on the first prompt of a chat
     QVector<AiMessage>    m_history;
     QVector<AiAttachment> m_pending;

@@ -1,5 +1,6 @@
 #include "AiSidebar.h"
 
+#include "AiSourcesStrip.h"
 #include "AiToast.h"
 #include "ai/AiChatStore.h"
 #include "ai/AiDeckTarget.h"
@@ -188,6 +189,10 @@ AiSidebar::AiSidebar(QWidget* parent)
             if (m_streamTarget) m_streamTarget->setText(m_streamAccum);
         }
         scrollToBottom();
+    });
+    connect(m_client, &StasisClient::sources, this,
+            [this](const QVector<AiSource>& list) {
+        if (m_strip) m_strip->setSources(list);
     });
     connect(m_client, &StasisClient::finished, this,
             [this](bool ok, const QString& full, const QString& error) {
@@ -422,6 +427,19 @@ QWidget* AiSidebar::buildComposer() {
     m_attachStrip->hide();
     v->addWidget(m_attachStrip, 0);
 
+    // Sources and the rollback control share the row directly above the input.
+    m_strip = new AiSourcesStrip(wrap);
+    connect(m_strip, &AiSourcesStrip::rollbackClicked, this, [this] {
+        if (m_deckTarget && (m_deckTarget->aiCanRollback() || m_deckTarget->aiCanRollforward())) {
+            if (m_deckTarget->aiCanRollback()) { m_deckTarget->aiRollback();    showRollback(true);  }
+            else                               { m_deckTarget->aiRollforward(); showRollback(false); }
+            return;
+        }
+        if (m_agent->canRollback())         { m_agent->rollback();    showRollback(true);  }
+        else if (m_agent->canRollforward()) { m_agent->rollforward(); showRollback(false); }
+    });
+    v->addWidget(m_strip, 0);
+
     auto* box = new QWidget(wrap);
     box->setObjectName(QStringLiteral("composerBox"));
     box->setAttribute(Qt::WA_StyledBackground, true);
@@ -532,7 +550,7 @@ void AiSidebar::focusComposer() {
 void AiSidebar::setDeckTarget(AiDeckTarget* target) {
     if (m_deckTarget == target) return;
     m_deckTarget = target;
-    if (m_rollRow) { m_rollRow->deleteLater(); m_rollRow = nullptr; m_rollBtn = nullptr; }
+    hideRollback();
 }
 
 void AiSidebar::setDocumentTarget(QTextEdit* target) {
@@ -540,51 +558,16 @@ void AiSidebar::setDocumentTarget(QTextEdit* target) {
     m_docTarget = target;
     // The rollback on offer belonged to the document that was open. Moving to
     // another tab retires it rather than letting one press edit the wrong file.
-    if (m_rollRow) { m_rollRow->deleteLater(); m_rollRow = nullptr; m_rollBtn = nullptr; }
+    hideRollback();
 }
 
 void AiSidebar::showRollback(bool rolledBack) {
-    if (m_rollRow) { m_rollRow->deleteLater(); m_rollRow = nullptr; }
+    m_rolledBack = rolledBack;
+    if (m_strip) m_strip->setRollbackVisible(true, rolledBack);
+}
 
-    m_rollRow = new QWidget(m_chatBody);
-    m_rollRow->setStyleSheet(QStringLiteral("background:transparent;"));
-    auto* h = new QHBoxLayout(m_rollRow);
-    h->setContentsMargins(2, 0, 2, 0);
-    h->setSpacing(8);
-
-    // The arrow doubles back on itself, which is the shape of the action in
-    // both directions; the label is what says which way it currently goes.
-    m_rollBtn = new QPushButton(rolledBack ? QStringLiteral("↷  Rollforward")
-                                           : QStringLiteral("↶  Rollback"),
-                                m_rollRow);
-    m_rollBtn->setCursor(Qt::PointingHandCursor);
-    m_rollBtn->setFixedHeight(28);
-    m_rollBtn->setFocusPolicy(Qt::NoFocus);
-    m_rollBtn->setToolTip(rolledBack
-        ? QStringLiteral("Put back what Stasis wrote")
-        : QStringLiteral("Undo what Stasis wrote"));
-    m_rollBtn->setStyleSheet(QStringLiteral(
-        "QPushButton { color:#C3CAD8; font:12px 'Segoe UI'; background:rgba(255,255,255,0.06);"
-        "  border:1px solid rgba(255,255,255,0.14); border-radius:8px; padding:0 12px; }"
-        "QPushButton:hover { color:#FFFFFF; border-color:rgba(124,92,255,0.60);"
-        "  background:rgba(124,92,255,0.16); }"));
-
-    connect(m_rollBtn, &QPushButton::clicked, this, [this] {
-        if (m_deckTarget && (m_deckTarget->aiCanRollback() || m_deckTarget->aiCanRollforward())) {
-            if (m_deckTarget->aiCanRollback()) { m_deckTarget->aiRollback();    showRollback(true);  }
-            else                               { m_deckTarget->aiRollforward(); showRollback(false); }
-            return;
-        }
-        if (m_agent->canRollback())         { m_agent->rollback();    showRollback(true);  }
-        else if (m_agent->canRollforward()) { m_agent->rollforward(); showRollback(false); }
-    });
-
-    h->addWidget(m_rollBtn, 0);
-    h->addStretch(1);
-
-    const int idx = m_chatLay->indexOf(m_workRow);
-    m_chatLay->insertWidget(idx < 0 ? m_chatLay->count() - 1 : idx, m_rollRow);
-    scrollToBottom();
+void AiSidebar::hideRollback() {
+    if (m_strip) m_strip->setRollbackVisible(false, false);
 }
 
 void AiSidebar::refreshHeroVisibility() {
@@ -680,6 +663,7 @@ void AiSidebar::submit() {
     m_streamDecided = false;
     m_streamToDoc   = false;
     m_streamToDeck  = false;
+    if (m_strip) m_strip->clearSources();   // these belong to the new answer
     appendMessage(placeholder);
 
     // What the user has open travels with the prompt, so "add a conclusion" or

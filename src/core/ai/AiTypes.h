@@ -86,6 +86,15 @@ struct AiAttachment {
 inline constexpr int kMaxImageAttachments    = 5;
 inline constexpr int kMaxDocumentAttachments = 2;
 
+// One place the assistant took information from while answering. Shown above
+// the composer so the claim and its provenance are in the same glance, rather
+// than the user having to take a generated document on trust.
+struct AiSource {
+    QString title;
+    QString url;
+    QString domain;      // shown when a title is missing or unhelpfully long
+};
+
 // A single turn in the conversation.
 struct AiMessage {
     enum class Role { User, Assistant, System };

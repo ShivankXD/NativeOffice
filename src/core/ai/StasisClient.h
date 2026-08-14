@@ -73,6 +73,9 @@ public:
 
 signals:
     void delta(const QString& textChunk);
+    // Where the answer came from, when the model searched. Arrives as its own
+    // frame mid-stream, before the reply that used it.
+    void sources(const QVector<AiSource>& list);
     void finished(bool ok, const QString& fullText, const QString& error);
 
 private:

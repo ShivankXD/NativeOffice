@@ -44,6 +44,8 @@ add_library(NativeOfficeCore STATIC
     ai/ui/AiSidebar.h
     ai/ui/AiConsentDialog.cpp
     ai/ui/AiConsentDialog.h
+    ai/ui/AiSourcesStrip.cpp
+    ai/ui/AiSourcesStrip.h
     ai/ui/AiToast.cpp
     ai/ui/AiToast.h
 )
