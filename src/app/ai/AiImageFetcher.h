@@ -48,9 +48,9 @@ signals:
 
 private:
     void pump();
-    void start(quint64 token, const QString& query);
+    void start(quint64 token, const QString& query, int variant);
 
-    struct Pending { quint64 token; QString query; };
+    struct Pending { quint64 token; QString query; int variant; };
 
     QNetworkAccessManager*    m_net { nullptr };
     QQueue<Pending>           m_queue;
@@ -59,6 +59,9 @@ private:
     // from memory saves a round trip and, more usefully, guarantees the two
     // slides do not show two different photographs of the same thing.
     QHash<QString, QByteArray> m_cache;
+    // How many times each query has been asked for in this generation, so a
+    // repeat can ask the backend for the next result rather than the same one.
+    QHash<QString, int>       m_seen;
     quint64                   m_generation { 0 };
 };
 

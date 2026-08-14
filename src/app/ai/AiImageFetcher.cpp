@@ -26,15 +26,25 @@ void AiImageFetcher::request(quint64 token, const QString& query) {
     const QString key = query.trimmed().toLower();
     if (key.isEmpty()) { emit ready(token, {}); return; }
 
-    const auto hit = m_cache.constFind(key);
-    if (hit != m_cache.constEnd()) { emit ready(token, hit.value()); return; }
+    // A deck that asks for the same subject twice should not show the same
+    // photograph twice: two consecutive slides carrying one picture reads as a
+    // fault rather than as a motif. The repeat is asked for by index instead,
+    // and only an exact repeat of a query already served is cached.
+    const int seen = m_seen.value(key, 0);
+    m_seen.insert(key, seen + 1);
 
-    m_queue.enqueue({ token, query.trimmed() });
+    if (seen == 0) {
+        const auto hit = m_cache.constFind(key);
+        if (hit != m_cache.constEnd()) { emit ready(token, hit.value()); return; }
+    }
+
+    m_queue.enqueue({ token, query.trimmed(), seen });
     pump();
 }
 
 void AiImageFetcher::abandonAll() {
     m_queue.clear();
+    m_seen.clear();
     // Replies already in flight are not aborted: they will complete, find the
     // generation has moved on and drop their bytes. Aborting mid-body is what
     // leaves a socket in a state the next request pays for.
@@ -44,14 +54,15 @@ void AiImageFetcher::abandonAll() {
 void AiImageFetcher::pump() {
     while (m_inFlight < kMaxInFlight && !m_queue.isEmpty()) {
         const Pending p = m_queue.dequeue();
-        start(p.token, p.query);
+        start(p.token, p.query, p.variant);
     }
 }
 
-void AiImageFetcher::start(quint64 token, const QString& query) {
+void AiImageFetcher::start(quint64 token, const QString& query, int variant) {
     QUrl url(AuthManager::instance().baseUrl() + QStringLiteral("/api/ai/image"));
     QUrlQuery q;
     q.addQueryItem(QStringLiteral("q"), query);
+    if (variant > 0) q.addQueryItem(QStringLiteral("i"), QString::number(variant));
     url.setQuery(q);
 
     QNetworkRequest req(url);
@@ -62,7 +73,9 @@ void AiImageFetcher::start(quint64 token, const QString& query) {
     req.setTransferTimeout(15000);
 
     const quint64 generation = m_generation;
-    const QString key = query.toLower();
+    // Only the first result for a query is worth remembering: the later ones
+    // exist precisely because that first one was already used.
+    const QString key = variant == 0 ? query.toLower() : QString();
 
     ++m_inFlight;
     QNetworkReply* reply = m_net->get(req);
@@ -75,7 +88,7 @@ void AiImageFetcher::start(quint64 token, const QString& query) {
             bytes = reply->readAll();
             if (bytes.size() > kMaxBytes) bytes.clear();
         }
-        if (!bytes.isEmpty()) m_cache.insert(key, bytes);
+        if (!bytes.isEmpty() && !key.isEmpty()) m_cache.insert(key, bytes);
 
         // A reply that outlived its deck is read and thrown away rather than
         // delivered: the slide index it was for now belongs to something else.
