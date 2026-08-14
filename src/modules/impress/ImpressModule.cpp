@@ -1154,6 +1154,54 @@ void ImpressModule::addNewSlide() {
     commitUndoStep();
 }
 
+int ImpressModule::appendSlide(const SlideData& data) {
+    createSlide(data);
+    const int idx = static_cast<int>(m_scenes.size()) - 1;
+    // No addDefaultPlaceholders here: the caller has already filled the slide,
+    // and adding empty title/subtitle boxes on top would leave "Click to add
+    // title" sitting over generated content.
+    switchToSlide(idx);
+    return idx;
+}
+
+void ImpressModule::removeTrailingSlides(int n) {
+    if (n <= 0) return;
+    const int have = static_cast<int>(m_scenes.size());
+    const int take = std::min(n, have);
+    if (take <= 0) return;
+
+    m_view->setScene(nullptr);
+    for (int i = 0; i < take; ++i) {
+        delete m_scenes.back();
+        m_scenes.pop_back();
+        m_slideData.pop_back();
+    }
+
+    m_slidePanel->clear();
+    for (int i = 0; i < static_cast<int>(m_scenes.size()); ++i)
+        m_slidePanel->addSlide(i, m_scenes[i]);
+
+    if (m_scenes.empty()) {
+        // A deck with no slides has nothing to show and no valid current index.
+        // One blank slide is the honest empty state, and matches what the user
+        // would have had before anything was generated into a new deck.
+        SlideData blank;
+        blank.title      = QStringLiteral("Slide 1");
+        blank.background = Qt::white;
+        blank.layout     = SlideLayout::Title;
+        createSlide(blank);
+        m_scenes[0]->addDefaultPlaceholders();
+        m_currentIdx = -1;
+        switchToSlide(0);
+    } else {
+        m_currentIdx = -1;                 // force switchToSlide to re-attach
+        switchToSlide(static_cast<int>(m_scenes.size()) - 1);
+    }
+    m_dirty = true;
+    emit documentModified();
+    commitUndoStep();
+}
+
 void ImpressModule::switchToSlide(int index) {
     if (index < 0 || index >= static_cast<int>(m_scenes.size())) return;
 

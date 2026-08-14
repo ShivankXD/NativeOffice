@@ -78,6 +78,7 @@
 #include "ai/AiTypes.h"
 #include "ai/ui/AiConsentDialog.h"
 #include "ai/ui/AiSidebar.h"
+#include "ai/AiSlideAgent.h"
 #include <functional>
 #include <thread>
 // Sprint 6: PDF export
@@ -1237,6 +1238,7 @@ public:
             "QSplitter#shellSplit::handle:hover { background:#7C5CFF; }");
         m_split->addWidget(m_stack);
 
+        m_slideAgent = new NativeOffice::AiSlideAgent(this);
         m_ai = new NativeOffice::AiSidebar(m_split);
         m_ai->hide();
         m_split->addWidget(m_ai);
@@ -1365,6 +1367,7 @@ public slots:
         using NativeOffice::AiMode;
         AiMode m = AiMode::Home;
         QTextEdit* target = nullptr;
+        NativeOffice::AiDeckTarget* deck = nullptr;
         if (auto* ww = qobject_cast<WriterWindow*>(w)) {
             m = AiMode::Writer;
             // The one surface the agent can write into today. Handed over
@@ -1373,12 +1376,20 @@ public slots:
             if (ww->writer()) target = ww->writer()->editor();
         }
         else if (qobject_cast<CalcWindow*>(w))           m = AiMode::Calc;
-        else if (qobject_cast<ImpressWindow*>(w))        m = AiMode::Impress;
+        else if (auto* iw = qobject_cast<ImpressWindow*>(w)) {
+            m = AiMode::Impress;
+            // One agent, re-pointed at whichever deck is in front. Building a
+            // new one per tab would lose the rollback record the moment the
+            // user glanced at another tab and came back.
+            m_slideAgent->setTarget(iw->impress());
+            deck = m_slideAgent;
+        }
         else if (qobject_cast<PdfWindow*>(w))            m = AiMode::Pdf;
         else if (qobject_cast<ImageResizerWindow*>(w))   m = AiMode::ImageResizer;
         else if (qobject_cast<MarkdownEditorWindow*>(w)) m = AiMode::MarkdownEditor;
         m_ai->setMode(m);
         m_ai->setDocumentTarget(target);
+        m_ai->setDeckTarget(deck);
     }
 
     void closeCurrentTab() { handleTabClose(m_bar->currentIndex()); }
@@ -1796,6 +1807,7 @@ private:
     QToolButton*               m_useAi  { nullptr };
     QSplitter*                 m_split  { nullptr };
     NativeOffice::AiSidebar*   m_ai     { nullptr };
+    NativeOffice::AiSlideAgent* m_slideAgent { nullptr };
     bool                       m_aiSessionStarted { false };
     // Ctrl+A+I is a held combination rather than a key sequence, so the A has
     // to be tracked by hand; see nativeEvent-adjacent filter in installShortcuts.

@@ -2,6 +2,7 @@
 
 #include "AiToast.h"
 #include "ai/AiChatStore.h"
+#include "ai/AiDeckTarget.h"
 #include "ai/AiDocumentAgent.h"
 #include "ai/AiQuota.h"
 #include "ai/StasisClient.h"
@@ -145,7 +146,11 @@ AiSidebar::AiSidebar(QWidget* parent)
 
         // Once the reply is already going into the page, every further chunk
         // goes straight there. Nothing is staged in the chat on the way.
-        if (m_streamToDoc) { m_agent->feed(chunk); return; }
+        if (m_streamToDoc) {
+            if (m_streamToDeck) m_deckTarget->aiFeed(chunk);
+            else                m_agent->feed(chunk);
+            return;
+        }
         if (m_streamDecided) {
             if (m_streamTarget) { m_streamTarget->setText(m_streamAccum); scrollToBottom(); }
             return;
@@ -163,10 +168,14 @@ AiSidebar::AiSidebar(QWidget* parent)
             const int nl = m_streamAccum.indexOf(QLatin1Char('\n'));
             if (nl < 0) return;                       // marker line not finished
             m_streamDecided = true;
-            if (capabilityFor(m_mode) == AiCapability::Edit && m_docTarget) {
+            if (capabilityFor(m_mode) == AiCapability::Edit
+                && (m_docTarget || m_deckTarget)) {
                 m_streamToDoc = true;
-                m_agent->beginLive(m_docTarget);
-                m_agent->feed(m_streamAccum.mid(nl + 1));
+                m_streamToDeck = m_deckTarget && !m_docTarget;
+                if (m_streamToDeck) { m_deckTarget->aiBeginDeck();
+                                      m_deckTarget->aiFeed(m_streamAccum.mid(nl + 1)); }
+                else                { m_agent->beginLive(m_docTarget);
+                                      m_agent->feed(m_streamAccum.mid(nl + 1)); }
                 if (m_streamTarget)
                     m_streamTarget->setText(QStringLiteral("Writing into your %1 document...")
                                                 .arg(modeName(m_mode)));
@@ -199,7 +208,14 @@ AiSidebar::AiSidebar(QWidget* parent)
 
             // The stream already decided where this reply was going and put it
             // there as it arrived. All that is left is to close it off.
-            if (m_streamToDoc) {
+            if (m_streamToDeck && m_deckTarget) {
+                m_deckTarget->aiEndDeck();
+                AiQuota::recordGeneration(m_deckTarget->aiCharactersWritten());
+                refreshQuotaLabel();
+                showRollback(false);
+                if (m_streamTarget)
+                    m_streamTarget->setText(QStringLiteral("Built into your presentation."));
+            } else if (m_streamToDoc) {
                 m_agent->endLive();
                 if (m_streamTarget)
                     m_streamTarget->setText(QStringLiteral("Written into your %1 document.")
@@ -513,6 +529,12 @@ void AiSidebar::focusComposer() {
     m_input->setFocus(Qt::OtherFocusReason);
 }
 
+void AiSidebar::setDeckTarget(AiDeckTarget* target) {
+    if (m_deckTarget == target) return;
+    m_deckTarget = target;
+    if (m_rollRow) { m_rollRow->deleteLater(); m_rollRow = nullptr; m_rollBtn = nullptr; }
+}
+
 void AiSidebar::setDocumentTarget(QTextEdit* target) {
     if (m_docTarget == target) return;
     m_docTarget = target;
@@ -548,6 +570,11 @@ void AiSidebar::showRollback(bool rolledBack) {
         "  background:rgba(124,92,255,0.16); }"));
 
     connect(m_rollBtn, &QPushButton::clicked, this, [this] {
+        if (m_deckTarget && (m_deckTarget->aiCanRollback() || m_deckTarget->aiCanRollforward())) {
+            if (m_deckTarget->aiCanRollback()) { m_deckTarget->aiRollback();    showRollback(true);  }
+            else                               { m_deckTarget->aiRollforward(); showRollback(false); }
+            return;
+        }
         if (m_agent->canRollback())         { m_agent->rollback();    showRollback(true);  }
         else if (m_agent->canRollforward()) { m_agent->rollforward(); showRollback(false); }
     });
@@ -617,7 +644,8 @@ void AiSidebar::submit() {
     // A turn that will write into the document spends a generation, so the
     // allowance is checked before the prompt is sent rather than after the
     // model has already been paid for.
-    const bool willEdit = capabilityFor(m_mode) == AiCapability::Edit && m_docTarget;
+    const bool willEdit = capabilityFor(m_mode) == AiCapability::Edit
+                          && (m_docTarget || m_deckTarget);
     if (willEdit && !AiQuota::canGenerate()) {
         m_toast->post(AiQuota::blockedReason(), AiToast::Tone::Warning, 9000);
         return;
@@ -651,6 +679,7 @@ void AiSidebar::submit() {
     m_streamAccum.clear();
     m_streamDecided = false;
     m_streamToDoc   = false;
+    m_streamToDeck  = false;
     appendMessage(placeholder);
 
     // What the user has open travels with the prompt, so "add a conclusion" or

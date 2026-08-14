@@ -84,6 +84,16 @@ public slots:
     // "Business Review", …) — used by the Home screen template gallery.
     void applyDeckTemplate(const QString& name);
     void addNewSlide();
+
+    // ── Generated decks (the Stasis assistant) ───────────────────────────────
+    // appendSlide adds a slide that was built elsewhere, already populated,
+    // rather than the empty placeholder addNewSlide creates. Returns its index.
+    // removeTrailingSlides takes the last n back off again, which is how a
+    // generated deck is rolled back; unlike deleteCurrentSlide it will happily
+    // leave the deck empty, because the state before generating may well have
+    // been empty and restoring it exactly is the whole point.
+    int  appendSlide(const SlideData& data);
+    void removeTrailingSlides(int n);
     void switchToSlide(int index);
     void duplicateCurrentSlide();
     void deleteCurrentSlide();

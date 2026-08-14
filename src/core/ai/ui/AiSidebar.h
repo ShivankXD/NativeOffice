@@ -33,6 +33,7 @@ class QPropertyAnimation;
 namespace NativeOffice {
 
 class AiChatStore;
+class AiDeckTarget;
 class AiDocumentAgent;
 class AiToast;
 class StasisClient;
@@ -56,6 +57,11 @@ public:
     // The text surface the agent may write into for the current tab, or null
     // where there is nothing writable. Set by the shell alongside setMode.
     void setDocumentTarget(QTextEdit* target);
+
+    // The deck to build into, for a presentation tab. Null everywhere else.
+    // Kept behind an interface because core cannot depend on the Impress
+    // module; see AiDeckTarget.h.
+    void setDeckTarget(AiDeckTarget* target);
 
 signals:
     void closeRequested();
@@ -114,6 +120,7 @@ private:
     AiChatStore*          m_chats  { nullptr };
     AiDocumentAgent*      m_agent  { nullptr };
     QTextEdit*            m_docTarget { nullptr };
+    AiDeckTarget*         m_deckTarget { nullptr };
     QWidget*              m_rollRow   { nullptr };
     QPushButton*          m_rollBtn   { nullptr };
     QString               m_chatId;      // minted on the first prompt of a chat
@@ -124,6 +131,7 @@ private:
     QString               m_streamAccum;                // raw reply, marker included
     bool                  m_streamDecided { false };    // chat or document, settled
     bool                  m_streamToDoc   { false };    // feeding the page live
+    bool                  m_streamToDeck  { false };    // ... and it is a deck
 };
 
 } // namespace NativeOffice
