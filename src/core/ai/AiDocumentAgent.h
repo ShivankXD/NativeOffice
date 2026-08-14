@@ -116,6 +116,9 @@ private:
     int      m_line    { 0 };
     bool     m_live    { false };
     QString  m_pending;      // partial trailing line, waiting for its newline
+    // An operation the model pretty-printed across several lines, held until
+    // its braces balance so it is executed once rather than rendered in pieces.
+    QString  m_jsonCarry;
     int      m_blocks  { 0 };  // blocks inserted, so rollback spans them all
     // Where the written region currently ends. Rollback works off positions
     // rather than a character tally, because a table or an image adds document

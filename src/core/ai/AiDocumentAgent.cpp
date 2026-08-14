@@ -101,6 +101,7 @@ void AiDocumentAgent::beginLive(QTextEdit* target) {
     m_target   = target;
     m_markdown.clear();
     m_pending.clear();
+    m_jsonCarry.clear();
     m_lines.clear();
     m_line     = 0;
     m_written  = 0;
@@ -543,12 +544,48 @@ int AiDocumentAgent::executeOp(const QJsonObject& o) {
     return 0;
 }
 
+namespace {
+// Counts braces outside of strings, so a "{" inside a value does not make an
+// object look unfinished.
+int braceBalance(const QString& s) {
+    int depth = 0;
+    bool inStr = false, esc = false;
+    for (const QChar ch : s) {
+        if (esc)                       { esc = false; continue; }
+        if (inStr) {
+            if (ch == QLatin1Char('\\'))     esc = true;
+            else if (ch == QLatin1Char('"')) inStr = false;
+            continue;
+        }
+        if (ch == QLatin1Char('"'))      inStr = true;
+        else if (ch == QLatin1Char('{')) ++depth;
+        else if (ch == QLatin1Char('}')) --depth;
+    }
+    return depth;
+}
+} // namespace
+
 int AiDocumentAgent::renderLine(const QString& raw) {
-    const QString t = raw.trimmed();
+    QString t = raw.trimmed();
+
+    // An object the model pretty-printed across several lines is still one
+    // operation. Hold the opening line until its braces balance rather than
+    // rendering each fragment as prose.
+    if (!m_jsonCarry.isEmpty()) {
+        m_jsonCarry += QLatin1Char('\n') + raw;
+        if (braceBalance(m_jsonCarry) > 0) return 0;      // still incomplete
+        t = m_jsonCarry.trimmed();
+        m_jsonCarry.clear();
+    } else if (t.startsWith(QLatin1Char('{')) && braceBalance(t) > 0) {
+        m_jsonCarry = raw;
+        return 0;
+    }
+
     // Structured first. Only a line that is a complete JSON object carrying an
     // "op" is treated as one, so prose beginning with a brace is not mistaken
     // for an instruction.
-    if (t.startsWith(QLatin1Char('{')) && t.endsWith(QLatin1Char('}'))) {
+    const bool looksJson = t.startsWith(QLatin1Char('{'));
+    if (looksJson && t.endsWith(QLatin1Char('}'))) {
         QJsonParseError err{};
         const QJsonDocument d = QJsonDocument::fromJson(t.toUtf8(), &err);
         if (err.error == QJsonParseError::NoError && d.isObject()) {
@@ -560,6 +597,11 @@ int AiDocumentAgent::renderLine(const QString& raw) {
             }
         }
     }
+    // Malformed JSON is dropped, not printed. The markdown fallback exists for
+    // a model that answered in prose; using it here would stamp a broken
+    // operation into the page as literal text, which is worse than a gap.
+    if (looksJson) return 0;
+
     const int n = renderMarkdownLine(raw);
     m_endPos = m_target->textCursor().position();
     return n;
