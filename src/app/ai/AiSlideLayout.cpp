@@ -953,8 +953,42 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
         if (n < 1) return s;
         const qreal gap = 22;
         const qreal cw = (kSlideW - M * 2 - gap * (n - 1)) / n;
-        const qreal ch = qMin<qreal>(180, kSlideH - M - top);
+        const qreal ch = qMin<qreal>(214, kSlideH - M - top);
         const qreal cy = top + qMax<qreal>(0, (kSlideH - M - top - ch) / 2);
+
+        // One size for every figure on the slide. Letting each card pick its own
+        // produced four numbers at four sizes, which looks like four slides
+        // rather than one.
+        //
+        // The size is the largest at which all of them sit on a single line, but
+        // it will not go below the floor to achieve that. One verbose value
+        // ("340 kilometers per hour" where the others say "2.8 seconds") would
+        // otherwise drag every figure on the slide down to something nobody can
+        // read from the back of a room. Past the floor the long one wraps, which
+        // is measured and allowed for below.
+        constexpr qreal kFigureFloor = 27;
+        qreal vpt = 46;
+        for (; vpt > kFigureFloor; vpt -= 1) {
+            bool fits = true;
+            for (int i = 0; i < n && fits; ++i)
+                fits = textWidthOf(pairOf(bullets.at(i)).first, vpt, true, t.headFont)
+                       <= cw - 28 - kDocMargin;
+            if (fits) break;
+        }
+
+        // Figures and labels line up across the row rather than each card
+        // centring its own pair. Centring them individually put the four labels
+        // at four different heights the moment one figure wrapped, and a row of
+        // numbers that does not share a baseline looks accidental.
+        qreal maxVh = 0, maxLh = 0;
+        for (int i = 0; i < n; ++i) {
+            const QPair<QString, QString> p = pairOf(bullets.at(i));
+            maxVh = qMax(maxVh, textHeight(p.first, cw - 28, vpt, true, t.headFont));
+            if (!p.second.isEmpty())
+                maxLh = qMax(maxLh, textHeight(p.second, cw - 28, 13, false, t.bodyFont));
+        }
+        const qreal blockH = maxVh + (maxLh > 0 ? 12 + maxLh : 0);
+        const qreal ty = cy + (ch - blockH) / 2;
 
         for (int i = 0; i < n; ++i) {
             const QPair<QString, QString> p = pairOf(bullets.at(i));
@@ -963,24 +997,12 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
                                     ShapeKind::RoundedRect, t.radius));
             s.items.push_back(shape(QRectF(x, cy, cw, 3), t.accent));
 
-            // A figure that wraps is not a figure any more: "1,277 kg" broke
-            // across two lines and the second ran through the label under it.
-            // Shrink until it fits on one line, measuring the advance rather
-            // than the wrapped height, which is the only measure that can tell
-            // the difference.
-            qreal vpt = 46;
-            while (vpt > 16
-                   && textWidthOf(p.first, vpt, true, t.headFont) > cw - 28 - kDocMargin)
-                vpt -= 2;
-            const qreal vh = textHeight(p.first, cw - 28, vpt, true, t.headFont);
-            const qreal lh = p.second.isEmpty() ? 0
-                           : textHeight(p.second, cw - 28, 13, false, t.bodyFont);
-            const qreal blockH = vh + (p.second.isEmpty() ? 0 : 12 + lh);
-            qreal ty = cy + (ch - blockH) / 2;
-            s.items.push_back(textItem(QRectF(x + 14, ty, cw - 28, vh), p.first, vpt,
-                                       true, t.paper, t.headFont, Qt::AlignHCenter));
+            // Centred inside the shared figure band, so a one-line number sits
+            // level with a two-line one instead of hanging from its top.
+            s.items.push_back(textItem(QRectF(x + 14, ty, cw - 28, maxVh), p.first, vpt,
+                                       true, t.paper, t.headFont, Qt::AlignHCenter, 1));
             if (!p.second.isEmpty())
-                s.items.push_back(textItem(QRectF(x + 14, ty + vh + 12, cw - 28, lh),
+                s.items.push_back(textItem(QRectF(x + 14, ty + maxVh + 12, cw - 28, maxLh),
                                            p.second, 13, false, t.onDeep, t.bodyFont,
                                            Qt::AlignHCenter));
         }
