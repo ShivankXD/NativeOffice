@@ -21,13 +21,13 @@
 #include <QObject>
 #include <QString>
 
-#include "ai/AiDeckTarget.h"
+#include "ai/AiStreamTarget.h"
 
 namespace NativeOffice {
 
 class ImpressModule;
 
-class AiSlideAgent : public QObject, public AiDeckTarget {
+class AiSlideAgent : public QObject, public AiStreamTarget {
     Q_OBJECT
 public:
     explicit AiSlideAgent(QObject* parent = nullptr);
@@ -36,10 +36,10 @@ public:
     void setTarget(ImpressModule* target) { m_target = target; }
     ImpressModule* target() const { return m_target; }
 
-    // ── AiDeckTarget ────────────────────────────────────────────────────────
-    void aiBeginDeck() override;
+    // ── AiStreamTarget ────────────────────────────────────────────────────────
+    void aiBegin() override;
     void aiFeed(const QString& chunk) override;
-    void aiEndDeck() override;
+    void aiEnd() override;
     int  aiCharactersWritten() const override { return m_written; }
     bool aiCanRollback() const override { return m_state == State::Applied && m_added > 0; }
     bool aiCanRollforward() const override { return m_state == State::RolledBack; }

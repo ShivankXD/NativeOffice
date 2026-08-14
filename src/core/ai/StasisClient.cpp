@@ -3,6 +3,9 @@
 #include "auth/AuthManager.h"
 #include "auth/SecureStore.h"
 
+#include <QBuffer>
+#include <QFileInfo>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
@@ -28,6 +31,61 @@ constexpr char kKeyDeployment[] = "ai/deployment";
 // gets tested without a deploy.
 QString backendChatUrl() {
     return AuthManager::instance().baseUrl() + QStringLiteral("/api/ai/chat");
+}
+
+// Images are inlined as data URLs. That is the only shape the chat-completions
+// format takes for an image the model has not been given a public link to, and
+// a document on someone's disk has no public link by definition.
+//
+// Large photographs are scaled down first. A modern phone picture is several
+// megabytes, base64 adds a third again, and none of that extra detail survives
+// being turned into tokens: it costs upload time and the user's character
+// budget to send a bigger picture of the same thing.
+constexpr int kMaxImageEdge  = 1400;
+constexpr qint64 kMaxRawBytes = 12 * 1024 * 1024;
+
+QString imageDataUrl(const QString& path) {
+    QFileInfo fi(path);
+    if (!fi.exists() || fi.size() > kMaxRawBytes) return {};
+
+    QImage img(path);
+    if (img.isNull()) return {};
+    if (img.width() > kMaxImageEdge || img.height() > kMaxImageEdge)
+        img = img.scaled(kMaxImageEdge, kMaxImageEdge,
+                         Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+    QByteArray out;
+    QBuffer buf(&out);
+    buf.open(QIODevice::WriteOnly);
+    // PNG for anything with transparency, JPEG otherwise: a screenshot stays
+    // crisp and a photograph does not become a 6 MB PNG.
+    const bool alpha = img.hasAlphaChannel();
+    if (!img.save(&buf, alpha ? "PNG" : "JPEG", alpha ? -1 : 85)) return {};
+
+    return QStringLiteral("data:image/%1;base64,%2")
+        .arg(alpha ? QStringLiteral("png") : QStringLiteral("jpeg"),
+             QString::fromLatin1(out.toBase64()));
+}
+
+// The content parts for one turn, or an empty array when the turn is plain text
+// and the simple string form will do.
+QJsonArray contentParts(const AiMessage& m) {
+    QJsonArray images;
+    for (const AiAttachment& a : m.attachments) {
+        if (a.kind != AiAttachment::Kind::Image) continue;
+        const QString url = imageDataUrl(a.path);
+        if (url.isEmpty()) continue;
+        images.append(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("image_url")},
+            {QStringLiteral("image_url"), QJsonObject{{QStringLiteral("url"), url}}}});
+    }
+    if (images.isEmpty()) return {};
+
+    QJsonArray parts;
+    parts.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
+                             {QStringLiteral("text"), m.text}});
+    for (const QJsonValue& v : images) parts.append(v);
+    return parts;
 }
 } // namespace
 
@@ -112,8 +170,16 @@ void StasisClient::send(const QString& systemPrompt, const QVector<AiMessage>& h
         QString role = QStringLiteral("user");
         if (m.role == AiMessage::Role::Assistant) role = QStringLiteral("assistant");
         else if (m.role == AiMessage::Role::System) role = QStringLiteral("system");
-        messages.append(QJsonObject{{QStringLiteral("role"), role},
-                                    {QStringLiteral("content"), m.text}});
+
+        // Content is a plain string until there is an image, at which point the
+        // wire format requires an array of parts. Sending the array shape
+        // always would work too, but the string is what every turn without an
+        // attachment is, and it keeps the request small.
+        const QJsonArray parts = contentParts(m);
+        messages.append(QJsonObject{
+            {QStringLiteral("role"), role},
+            {QStringLiteral("content"), parts.isEmpty() ? QJsonValue(m.text)
+                                                        : QJsonValue(parts)}});
     }
 
     QJsonObject body{

@@ -3,7 +3,7 @@
 #include "AiSourcesStrip.h"
 #include "AiToast.h"
 #include "ai/AiChatStore.h"
-#include "ai/AiDeckTarget.h"
+#include "ai/AiStreamTarget.h"
 #include "ai/AiDocumentAgent.h"
 #include "ai/AiQuota.h"
 #include "ai/StasisClient.h"
@@ -173,7 +173,7 @@ AiSidebar::AiSidebar(QWidget* parent)
                 && (m_docTarget || m_deckTarget)) {
                 m_streamToDoc = true;
                 m_streamToDeck = m_deckTarget && !m_docTarget;
-                if (m_streamToDeck) { m_deckTarget->aiBeginDeck();
+                if (m_streamToDeck) { m_deckTarget->aiBegin();
                                       m_deckTarget->aiFeed(m_streamAccum.mid(nl + 1)); }
                 else                { m_agent->beginLive(m_docTarget);
                                       m_agent->feed(m_streamAccum.mid(nl + 1)); }
@@ -214,7 +214,7 @@ AiSidebar::AiSidebar(QWidget* parent)
             // The stream already decided where this reply was going and put it
             // there as it arrived. All that is left is to close it off.
             if (m_streamToDeck && m_deckTarget) {
-                m_deckTarget->aiEndDeck();
+                m_deckTarget->aiEnd();
                 AiQuota::recordGeneration(m_deckTarget->aiCharactersWritten());
                 refreshQuotaLabel();
                 showRollback(false);
@@ -547,7 +547,7 @@ void AiSidebar::focusComposer() {
     m_input->setFocus(Qt::OtherFocusReason);
 }
 
-void AiSidebar::setDeckTarget(AiDeckTarget* target) {
+void AiSidebar::setDeckTarget(AiStreamTarget* target) {
     if (m_deckTarget == target) return;
     m_deckTarget = target;
     hideRollback();

@@ -33,7 +33,7 @@ class QPropertyAnimation;
 namespace NativeOffice {
 
 class AiChatStore;
-class AiDeckTarget;
+class AiStreamTarget;
 class AiSourcesStrip;
 class AiDocumentAgent;
 class AiToast;
@@ -61,8 +61,8 @@ public:
 
     // The deck to build into, for a presentation tab. Null everywhere else.
     // Kept behind an interface because core cannot depend on the Impress
-    // module; see AiDeckTarget.h.
-    void setDeckTarget(AiDeckTarget* target);
+    // module; see AiStreamTarget.h.
+    void setDeckTarget(AiStreamTarget* target);
 
 signals:
     void closeRequested();
@@ -122,7 +122,7 @@ private:
     AiChatStore*          m_chats  { nullptr };
     AiDocumentAgent*      m_agent  { nullptr };
     QTextEdit*            m_docTarget { nullptr };
-    AiDeckTarget*         m_deckTarget { nullptr };
+    AiStreamTarget*         m_deckTarget { nullptr };
     AiSourcesStrip*       m_strip     { nullptr };
     bool                  m_rolledBack { false };
     QString               m_chatId;      // minted on the first prompt of a chat

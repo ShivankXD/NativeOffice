@@ -74,7 +74,7 @@ SlideItem accentBar(qreal x, qreal y, qreal w, qreal h, const QColor& c) {
 
 AiSlideAgent::AiSlideAgent(QObject* parent) : QObject(parent) {}
 
-void AiSlideAgent::aiBeginDeck() {
+void AiSlideAgent::aiBegin() {
     if (!m_target) return;
     m_pending.clear();
     m_jsonCarry.clear();
@@ -97,7 +97,7 @@ void AiSlideAgent::aiFeed(const QString& chunk) {
     }
 }
 
-void AiSlideAgent::aiEndDeck() {
+void AiSlideAgent::aiEnd() {
     if (!m_live) return;
     if (!m_pending.trimmed().isEmpty()) takeLine(m_pending);
     m_pending.clear();
@@ -228,9 +228,9 @@ void AiSlideAgent::aiRollback() {
 void AiSlideAgent::aiRollforward() {
     if (!aiCanRollforward() || !m_target) return;
     const QString script = m_script;
-    aiBeginDeck();
+    aiBegin();
     aiFeed(script);
-    aiEndDeck();
+    aiEnd();
 }
 
 } // namespace NativeOffice

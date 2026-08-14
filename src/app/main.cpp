@@ -78,6 +78,7 @@
 #include "ai/AiTypes.h"
 #include "ai/ui/AiConsentDialog.h"
 #include "ai/ui/AiSidebar.h"
+#include "ai/AiSheetAgent.h"
 #include "ai/AiSlideAgent.h"
 #include <functional>
 #include <thread>
@@ -1239,6 +1240,7 @@ public:
         m_split->addWidget(m_stack);
 
         m_slideAgent = new NativeOffice::AiSlideAgent(this);
+        m_sheetAgent = new NativeOffice::AiSheetAgent(this);
         m_ai = new NativeOffice::AiSidebar(m_split);
         m_ai->hide();
         m_split->addWidget(m_ai);
@@ -1367,7 +1369,7 @@ public slots:
         using NativeOffice::AiMode;
         AiMode m = AiMode::Home;
         QTextEdit* target = nullptr;
-        NativeOffice::AiDeckTarget* deck = nullptr;
+        NativeOffice::AiStreamTarget* deck = nullptr;
         if (auto* ww = qobject_cast<WriterWindow*>(w)) {
             m = AiMode::Writer;
             // The one surface the agent can write into today. Handed over
@@ -1375,7 +1377,11 @@ public slots:
             // happily return the comments pane.
             if (ww->writer()) target = ww->writer()->editor();
         }
-        else if (qobject_cast<CalcWindow*>(w))           m = AiMode::Calc;
+        else if (auto* cw = qobject_cast<CalcWindow*>(w)) {
+            m = AiMode::Calc;
+            m_sheetAgent->setTarget(cw->calc());
+            deck = m_sheetAgent;
+        }
         else if (auto* iw = qobject_cast<ImpressWindow*>(w)) {
             m = AiMode::Impress;
             // One agent, re-pointed at whichever deck is in front. Building a
@@ -1808,6 +1814,7 @@ private:
     QSplitter*                 m_split  { nullptr };
     NativeOffice::AiSidebar*   m_ai     { nullptr };
     NativeOffice::AiSlideAgent* m_slideAgent { nullptr };
+    NativeOffice::AiSheetAgent* m_sheetAgent { nullptr };
     bool                       m_aiSessionStarted { false };
     // Ctrl+A+I is a held combination rather than a key sequence, so the A has
     // to be tracked by hand; see nativeEvent-adjacent filter in installShortcuts.
