@@ -94,6 +94,11 @@ public slots:
     // been empty and restoring it exactly is the whole point.
     int  appendSlide(const SlideData& data);
     void removeTrailingSlides(int n);
+    void removeSlideAt(int index);
+    // True when the deck is still the single empty slide a new presentation
+    // opens with: nothing typed, nothing added. Generating into one of those
+    // should replace it rather than leave it sitting in front of the result.
+    [[nodiscard]] bool deckIsPristine() const;
     void switchToSlide(int index);
     void duplicateCurrentSlide();
     void deleteCurrentSlide();

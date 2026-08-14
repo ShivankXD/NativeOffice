@@ -28,6 +28,8 @@ qt_add_executable(NativeOffice
     tools/MarkdownEditor.h
     ai/AiSheetAgent.cpp
     ai/AiSheetAgent.h
+    ai/AiSlideLayout.cpp
+    ai/AiSlideLayout.h
     ai/AiSlideAgent.cpp
     ai/AiSlideAgent.h
     common/Avatars.h

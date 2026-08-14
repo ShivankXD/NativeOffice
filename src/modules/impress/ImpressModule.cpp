@@ -1202,6 +1202,37 @@ void ImpressModule::removeTrailingSlides(int n) {
     commitUndoStep();
 }
 
+bool ImpressModule::deckIsPristine() const {
+    if (m_scenes.size() != 1) return false;
+    // Placeholders count as empty: a fresh slide carries a title and subtitle
+    // box with no text in them, which is exactly the state being detected.
+    for (const SlideItem& it : m_slideData[0].items)
+        if (!it.text.trimmed().isEmpty()) return false;
+    return m_slideData[0].notes.trimmed().isEmpty();
+}
+
+void ImpressModule::removeSlideAt(int index) {
+    if (index < 0 || index >= static_cast<int>(m_scenes.size())) return;
+    if (m_scenes.size() <= 1) return;         // never leave the deck with none
+
+    const bool wasCurrent = (m_currentIdx == index);
+    m_view->setScene(nullptr);
+    delete m_scenes[index];
+    m_scenes.erase(m_scenes.begin() + index);
+    m_slideData.erase(m_slideData.begin() + index);
+
+    m_slidePanel->clear();
+    for (int i = 0; i < static_cast<int>(m_scenes.size()); ++i)
+        m_slidePanel->addSlide(i, m_scenes[i]);
+
+    const int want = wasCurrent ? qMin(index, static_cast<int>(m_scenes.size()) - 1)
+                                : qMax(0, m_currentIdx - (index < m_currentIdx ? 1 : 0));
+    m_currentIdx = -1;                        // force switchToSlide to re-attach
+    switchToSlide(want);
+    m_dirty = true;
+    emit documentModified();
+}
+
 void ImpressModule::switchToSlide(int index) {
     if (index < 0 || index >= static_cast<int>(m_scenes.size())) return;
 

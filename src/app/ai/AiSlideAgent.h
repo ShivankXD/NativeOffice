@@ -64,6 +64,7 @@ private:
     QString m_jsonCarry;    // an object the model spread over several lines
     QString m_script;       // every op seen, so rollforward can replay
     bool    m_live    { false };
+    bool    m_replaceFirst { false };  // swap out the blank opening slide
     int     m_added   { 0 };
     int     m_written { 0 };
     State   m_state   { State::Idle };
