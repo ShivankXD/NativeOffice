@@ -12,19 +12,25 @@
 // is what stops a half-written "## Hea" appearing as a paragraph and then
 // being rewritten as a heading a moment later.
 //
-// Newly written text carries a violet tint that settles to the document's own
-// colour a moment later, so you can see exactly what was added without a panel
-// covering the page.
+// Content arrives as operations rather than prose: one JSON object per line,
+// executed against QTextDocument's own API. That is what makes a real table, a
+// tinted callout, a title block or a page break possible at all, none of which
+// markdown can express. A line that is not an operation is still rendered as
+// markdown, so a model that forgets the format produces a plain document rather
+// than a page of visible JSON.
 //
-// Rollback is a range, not an undo depth. The agent remembers where it started
-// and how much it wrote, so undoing is removing that span and redoing is
-// putting it back. Counting undo steps would be wrong the moment the user
-// typed anything of their own in between.
+// Rollback is a range, not an undo depth: the agent remembers where it started
+// and where it ended, so undoing is removing that span. Counting undo steps
+// would be wrong the moment the user typed anything of their own in between,
+// and counting characters would be wrong the moment a table was involved.
 // ─────────────────────────────────────────────────────────────────────────────
 
+#include <QJsonObject>
 #include <QObject>
 #include <QString>
 
+class QTextCharFormat;
+class QTextCursor;
 class QTextEdit;
 class QTimer;
 
@@ -72,9 +78,36 @@ signals:
 private:
     void step();
     void settleTint();
-    // Renders one markdown line at the cursor, applying heading, list and
-    // inline emphasis. Returns the number of characters of visible text added.
+
+    // One streamed line. Structured operations are the real path: a line that
+    // parses as a JSON object with an "op" is executed against the document's
+    // own API, which is how tables, callouts and title blocks become possible
+    // at all. Markdown cannot express any of them.
+    //
+    // A line that is not an operation is still rendered as markdown, so a model
+    // that forgets the format produces a plain document rather than a page of
+    // visible JSON. That fallback is the difference between a bad answer and a
+    // broken one.
     int  renderLine(const QString& line);
+    int  executeOp(const QJsonObject& op);
+    int  renderMarkdownLine(const QString& line);
+
+    // ── operations ──────────────────────────────────────────────────────────
+    int  opTitle(const QJsonObject& o);
+    int  opHeading(const QJsonObject& o);
+    int  opParagraph(const QJsonObject& o);
+    int  opList(const QJsonObject& o, bool numbered);
+    int  opQuote(const QJsonObject& o);
+    int  opCallout(const QJsonObject& o);
+    int  opTable(const QJsonObject& o);
+    int  opDivider();
+    int  opPageBreak();
+
+    // Writes inline-markdown text at the cursor with a base format applied.
+    int  insertRuns(QTextCursor& c, const QString& text, const QTextCharFormat& base);
+    // The document's own body size, so generated headings stay proportional to
+    // whatever the user is actually writing at.
+    qreal bodyPt() const;
 
     enum class State { Idle, Applied, RolledBack };
 
@@ -84,6 +117,10 @@ private:
     bool     m_live    { false };
     QString  m_pending;      // partial trailing line, waiting for its newline
     int      m_blocks  { 0 };  // blocks inserted, so rollback spans them all
+    // Where the written region currently ends. Rollback works off positions
+    // rather than a character tally, because a table or an image adds document
+    // length that no count of visible characters can predict.
+    int      m_endPos  { 0 };
     int      m_start   { 0 };     // document position the edit began at
     int      m_written { 0 };     // visible characters written
     QString  m_markdown;          // kept so rollforward can replay it
