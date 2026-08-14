@@ -49,6 +49,13 @@ enum class InsertMode {
 
 class SlideHandleItem;
 
+// The prompt text the two placeholder boxes on a new slide carry. Named here
+// rather than written out twice, because ImpressModule has to recognise them to
+// tell a deck nobody has touched from one that has been typed into, and two
+// copies of a string are two strings that will eventually disagree.
+inline constexpr char kTitlePlaceholder[]    = "Click to add Title";
+inline constexpr char kSubtitlePlaceholder[] = "Click to add Subtitle";
+
 enum class HandleRole {
     TopLeft, Top, TopRight, Right, BottomRight, Bottom, BottomLeft, Left, Rotate
 };

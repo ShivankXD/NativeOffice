@@ -1202,12 +1202,38 @@ void ImpressModule::removeTrailingSlides(int n) {
     commitUndoStep();
 }
 
+void ImpressModule::replaceSlide(int index, const SlideData& data) {
+    if (index < 0 || index >= static_cast<int>(m_scenes.size())) return;
+
+    m_slideData[index] = data;
+    m_scenes[index]->loadFromData(data);
+
+    // loadFromData clears every item, the slide-number field included, and it
+    // is a deck-wide field rather than one of the slide's own items. Without
+    // this the number silently disappears from any slide a picture landed on.
+    if (m_showSlideNumbers)
+        m_scenes[index]->setSlideNumber(true, index + 1, m_slideNumberPos);
+
+    m_slidePanel->refreshSlide(index);
+}
+
 bool ImpressModule::deckIsPristine() const {
     if (m_scenes.size() != 1) return false;
-    // Placeholders count as empty: a fresh slide carries a title and subtitle
-    // box with no text in them, which is exactly the state being detected.
-    for (const SlideItem& it : m_slideData[0].items)
-        if (!it.text.trimmed().isEmpty()) return false;
+    if (!m_currentPath.isEmpty()) return false;   // an opened file is never blank
+
+    // Placeholders count as empty. They are not empty boxes, though: a new
+    // slide's title and subtitle carry prompt text, and the first undo
+    // checkpoint writes that text back into the slide data. Testing for an
+    // empty string therefore reported every fresh deck as already having
+    // content, and a ten slide request came back eleven slides long with
+    // "Click to add Title" in front of it.
+    for (const SlideItem& it : m_slideData[0].items) {
+        const QString t = it.text.trimmed();
+        if (t.isEmpty()) continue;
+        if (t == QLatin1String(kTitlePlaceholder)) continue;
+        if (t == QLatin1String(kSubtitlePlaceholder)) continue;
+        return false;
+    }
     return m_slideData[0].notes.trimmed().isEmpty();
 }
 

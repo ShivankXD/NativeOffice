@@ -95,6 +95,12 @@ public slots:
     int  appendSlide(const SlideData& data);
     void removeTrailingSlides(int n);
     void removeSlideAt(int index);
+    // Re-lays one slide that is already in the deck. Generated slides are
+    // placed the moment their line arrives, but a photograph takes a further
+    // second or two to fetch, so the slide it belongs to is rebuilt around it
+    // when it lands. Same reason a theme named late re-lays the slides before
+    // it. Not an edit the user made, so it does not disturb the selection.
+    void replaceSlide(int index, const SlideData& data);
     // True when the deck is still the single empty slide a new presentation
     // opens with: nothing typed, nothing added. Generating into one of those
     // should replace it rather than leave it sitting in front of the result.

@@ -560,9 +560,9 @@ void SlideScene::applyBackgroundBrush() {
 // ── Default placeholders ──────────────────────────────────────────────────────
 void SlideScene::addDefaultPlaceholders() {
     // Title
-    addTextBox(QPointF(80, 160), "Click to add Title",    40.0);
+    addTextBox(QPointF(80, 160), QLatin1String(kTitlePlaceholder),    40.0);
     // Subtitle
-    addTextBox(QPointF(80, 310), "Click to add Subtitle", 22.0);
+    addTextBox(QPointF(80, 310), QLatin1String(kSubtitlePlaceholder), 22.0);
 }
 
 void SlideScene::applyLayout(SlideLayout layout) {
