@@ -85,6 +85,9 @@ private:
     void scrollToBottom();
     void setWorking(bool on);
     void refreshQuotaLabel();
+    // Draws the composer's focus ring. A text box that looks identical whether
+    // or not it has the caret is the single cheapest-looking thing in a panel.
+    void setComposerFocused(bool on);
     void pickAttachments();
     void rebuildAttachmentStrip();
 
@@ -96,6 +99,7 @@ private:
     QVBoxLayout* m_chatLay  { nullptr };
     QWidget*     m_hero     { nullptr };
     AiToast*     m_toast    { nullptr };
+    QWidget*     m_composerBox { nullptr };
     QTextEdit*   m_input    { nullptr };
     QPushButton* m_send     { nullptr };
     QPushButton* m_attach   { nullptr };

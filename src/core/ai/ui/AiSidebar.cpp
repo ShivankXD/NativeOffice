@@ -17,6 +17,7 @@
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
+#include <QResizeEvent>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QScrollArea>
@@ -37,48 +38,88 @@ constexpr int kCloseRevealBand = 56;
 const char* kPanelBg   = "#0F131B";
 const char* kPanelEdge = "rgba(255,255,255,0.07)";
 
-// A chat bubble. Assistant turns are flush left on a faint raised card, user
-// turns are inset and tinted violet, so the two read apart at a glance without
-// needing a name label on every message.
+// The card a user turn sits on. Assistant turns get none: the reply is the
+// substance of the panel and putting it in a grey slab of its own makes a
+// column of them read as a form rather than as an answer. Only the shorter of
+// the two speakers is boxed, which is what separates them.
+class BubbleCard : public QWidget {
+public:
+    BubbleCard(bool user, QWidget* parent) : QWidget(parent), m_user(user) {}
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (!m_user) return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        // Square off the bottom right corner. It points the bubble at its
+        // author, and it is the whole reason a chat reads as a conversation
+        // rather than as a stack of identical panels.
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        QPainterPath path;
+        path.moveTo(r.left() + 14, r.top());
+        path.lineTo(r.right() - 14, r.top());
+        path.quadTo(r.right(), r.top(), r.right(), r.top() + 14);
+        path.lineTo(r.right(), r.bottom() - 4);
+        path.quadTo(r.right(), r.bottom(), r.right() - 4, r.bottom());
+        path.lineTo(r.left() + 14, r.bottom());
+        path.quadTo(r.left(), r.bottom(), r.left(), r.bottom() - 14);
+        path.lineTo(r.left(), r.top() + 14);
+        path.quadTo(r.left(), r.top(), r.left() + 14, r.top());
+        p.fillPath(path, QColor(0x6D, 0x4E, 0xF2, 56));
+        p.setPen(QPen(QColor(0x8B, 0x74, 0xFF, 80), 1));
+        p.drawPath(path);
+    }
+
+private:
+    bool m_user { false };
+};
+
+// One turn in the transcript. A user turn is a card pushed to the right and
+// held to a fraction of the panel, so a short question does not stretch into a
+// full-width banner; an assistant turn runs the full width as plain text.
 class Bubble : public QWidget {
 public:
     Bubble(const QString& text, bool fromUser, QWidget* parent)
         : QWidget(parent), m_user(fromUser)
     {
-        setAttribute(Qt::WA_StyledBackground, true);
-        auto* v = new QVBoxLayout(this);
-        v->setContentsMargins(13, 10, 13, 10);
+        auto* h = new QHBoxLayout(this);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+
+        m_card = new BubbleCard(fromUser, this);
+        auto* v = new QVBoxLayout(m_card);
+        v->setContentsMargins(fromUser ? 14 : 2, fromUser ? 10 : 1,
+                              fromUser ? 14 : 2, fromUser ? 10 : 1);
         v->setSpacing(0);
-        m_label = new QLabel(text, this);
+
+        m_label = new QLabel(text, m_card);
         m_label->setWordWrap(true);
         m_label->setTextInteractionFlags(Qt::TextSelectableByMouse);
         m_label->setStyleSheet(QStringLiteral(
-            "color:%1; font:13px 'Segoe UI'; background:transparent;")
-            .arg(fromUser ? QStringLiteral("#EAECF2") : QStringLiteral("#D5DAE4")));
+            "color:%1; font:%2 13.5px 'Segoe UI'; background:transparent;")
+            .arg(fromUser ? QStringLiteral("#F2F0FF") : QStringLiteral("#D9DEE9"),
+                 fromUser ? QStringLiteral("500") : QStringLiteral("400")));
         v->addWidget(m_label);
+
+        if (fromUser) { h->addStretch(1); h->addWidget(m_card, 0); }
+        else          { h->addWidget(m_card, 1); }
     }
 
     QLabel* label() const { return m_label; }
 
 protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        QPainterPath path;
-        path.addRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 11, 11);
-        if (m_user) {
-            p.fillPath(path, QColor(0x7C, 0x5C, 0xFF, 34));
-            p.setPen(QPen(QColor(0x7C, 0x5C, 0xFF, 70), 1));
-        } else {
-            p.fillPath(path, QColor(255, 255, 255, 10));
-            p.setPen(QPen(QColor(255, 255, 255, 20), 1));
-        }
-        p.drawPath(path);
+    void resizeEvent(QResizeEvent* e) override {
+        QWidget::resizeEvent(e);
+        // A question of three words should be three words wide. Without a
+        // ceiling the card grows to whatever the text wants, and a long one
+        // fills the panel edge to edge and stops looking addressed to anyone.
+        if (m_user) m_card->setMaximumWidth(qMax(120, int(width() * 0.84)));
     }
 
 private:
-    QLabel* m_label { nullptr };
-    bool    m_user  { false };
+    QLabel*      m_label { nullptr };
+    BubbleCard*  m_card  { nullptr };
+    bool         m_user  { false };
 };
 
 // The model marks a reply that is meant for the file with this on its own
@@ -215,11 +256,22 @@ AiSidebar::AiSidebar(QWidget* parent)
             // there as it arrived. All that is left is to close it off.
             if (m_streamToDeck && m_deckTarget) {
                 m_deckTarget->aiEnd();
-                AiQuota::recordGeneration(m_deckTarget->aiCharactersWritten());
+                const int written = m_deckTarget->aiCharactersWritten();
+                if (written > 0) {
+                    AiQuota::recordGeneration(written);
+                    showRollback(false);
+                    if (m_streamTarget)
+                        m_streamTarget->setText(
+                            QStringLiteral("Built into your presentation."));
+                } else if (m_streamTarget) {
+                    // Nothing reached the deck. Saying so is the whole point:
+                    // the alternative is an empty bubble sitting under the
+                    // request, which reads as the assistant ignoring it, and
+                    // the count of remaining generations going down anyway.
+                    m_streamTarget->setText(
+                        QStringLiteral("Nothing came back that time. Send it again."));
+                }
                 refreshQuotaLabel();
-                showRollback(false);
-                if (m_streamTarget)
-                    m_streamTarget->setText(QStringLiteral("Built into your presentation."));
             } else if (m_streamToDoc) {
                 m_agent->endLive();
                 if (m_streamTarget)
@@ -229,7 +281,13 @@ AiSidebar::AiSidebar(QWidget* parent)
                 QString docContent;
                 // A reply so short it finished before the marker line could be
                 // judged still needs the marker taken off.
-                m_streamTarget->setText(isDocumentReply(full, &docContent) ? docContent : full);
+                const QString shown =
+                    isDocumentReply(full, &docContent) ? docContent : full;
+                // An empty reply gets said out loud rather than left as a blank
+                // bubble under the question.
+                m_streamTarget->setText(shown.trimmed().isEmpty()
+                    ? QStringLiteral("Nothing came back that time. Send it again.")
+                    : shown);
             }
         }
         m_streamTarget = nullptr;
@@ -241,9 +299,15 @@ AiSidebar::AiSidebar(QWidget* parent)
         // The server counts characters from the stream it produced and is the
         // tally that decides; this keeps the local mirror in step so the
         // sidebar's "generations left" is right without waiting for a refresh.
-        AiQuota::recordGeneration(chars);
+        //
+        // A turn that wrote nothing spends nothing. The server already works
+        // this way, and counting it here anyway is what told the user two of
+        // their generations had gone on two replies that never arrived.
+        if (chars > 0) {
+            AiQuota::recordGeneration(chars);
+            showRollback(false);
+        }
         refreshQuotaLabel();
-        showRollback(false);
     });
 
     refreshQuotaLabel();
@@ -256,7 +320,12 @@ QWidget* AiSidebar::buildHeader() {
     m_header = new QWidget(this);
     m_header->setFixedHeight(kHeaderHeight);
     m_header->setAttribute(Qt::WA_StyledBackground, true);
-    m_header->setStyleSheet(QStringLiteral("background:transparent;"));
+    m_header->setObjectName(QStringLiteral("aiHeader"));
+    // A hairline under the header. Without it the panel is one flat field from
+    // the title to the composer and nothing looks deliberate.
+    m_header->setStyleSheet(QStringLiteral(
+        "#aiHeader { background:transparent; border-bottom:1px solid %1; }")
+        .arg(QLatin1String(kPanelEdge)));
 
     auto* h = new QHBoxLayout(m_header);
     h->setContentsMargins(14, 0, 0, 0);
@@ -275,10 +344,14 @@ QWidget* AiSidebar::buildHeader() {
     // "In Writer". Sits above the chat and changes as the user moves between
     // tabs, so the panel never silently acts on a surface you are not looking at.
     m_modeChip = new QLabel(m_header);
+    // Fixed height, or the row stretches it to the full header and a small
+    // label becomes a button-sized slab next to the product name.
+    m_modeChip->setFixedHeight(20);
+    m_modeChip->setAlignment(Qt::AlignCenter);
     m_modeChip->setStyleSheet(QStringLiteral(
-        "color:#9B8CFF; font:600 11px 'Segoe UI';"
-        "background:rgba(124,92,255,0.13); border:1px solid rgba(124,92,255,0.30);"
-        "border-radius:9px; padding:2px 9px;"));
+        "color:#AFA3FF; font:600 10.5px 'Segoe UI';"
+        "background:rgba(124,92,255,0.14); border:none;"
+        "border-radius:7px; padding:0 9px;"));
 
     // Matches the shell's own close button: transparent until hovered, then the
     // Windows close red.
@@ -369,8 +442,8 @@ QWidget* AiSidebar::buildChatArea() {
     m_chatBody = new QWidget(m_scroll);
     m_chatBody->setStyleSheet(QStringLiteral("background:transparent;"));
     m_chatLay = new QVBoxLayout(m_chatBody);
-    m_chatLay->setContentsMargins(12, 6, 12, 6);
-    m_chatLay->setSpacing(10);
+    m_chatLay->setContentsMargins(14, 12, 14, 8);
+    m_chatLay->setSpacing(15);
 
     m_chatLay->addWidget(buildHero(), 1);
 
@@ -440,12 +513,11 @@ QWidget* AiSidebar::buildComposer() {
     });
     v->addWidget(m_strip, 0);
 
-    auto* box = new QWidget(wrap);
+    m_composerBox = new QWidget(wrap);
+    QWidget* box = m_composerBox;
     box->setObjectName(QStringLiteral("composerBox"));
     box->setAttribute(Qt::WA_StyledBackground, true);
-    box->setStyleSheet(QStringLiteral(
-        "#composerBox { background:#151A24; border:1px solid rgba(255,255,255,0.10);"
-        "  border-radius:12px; }"));
+    setComposerFocused(false);
     auto* bv = new QVBoxLayout(box);
     bv->setContentsMargins(10, 8, 8, 8);
     bv->setSpacing(6);
@@ -568,6 +640,15 @@ void AiSidebar::showRollback(bool rolledBack) {
 
 void AiSidebar::hideRollback() {
     if (m_strip) m_strip->setRollbackVisible(false, false);
+}
+
+void AiSidebar::setComposerFocused(bool on) {
+    if (!m_composerBox) return;
+    m_composerBox->setStyleSheet(QStringLiteral(
+        "#composerBox { background:%1; border:1px solid %2; border-radius:13px; }")
+        .arg(on ? QStringLiteral("#171D29") : QStringLiteral("#141924"),
+             on ? QStringLiteral("rgba(124,92,255,0.55)")
+                : QStringLiteral("rgba(255,255,255,0.09)")));
 }
 
 void AiSidebar::refreshHeroVisibility() {
@@ -764,6 +845,8 @@ void AiSidebar::resizeEvent(QResizeEvent* e) {
 }
 
 bool AiSidebar::eventFilter(QObject* o, QEvent* e) {
+    if (o == m_input && e->type() == QEvent::FocusIn)  setComposerFocused(true);
+    if (o == m_input && e->type() == QEvent::FocusOut) setComposerFocused(false);
     if (o == m_input && e->type() == QEvent::KeyPress) {
         auto* k = static_cast<QKeyEvent*>(e);
         // Enter sends, Shift+Enter makes a new line: the convention every chat
