@@ -1994,6 +1994,35 @@ qint64 emu(double px) { return static_cast<qint64>(px * 9525.0); }
 
 QString hex6(const QColor& c) { return c.name(QColor::HexRgb).mid(1).toUpper(); }
 
+// A colour with its transparency. OOXML carries alpha as a child element rather
+// than in the hex, so a colour written as bare srgbClr is fully opaque whatever
+// it was on the canvas. Every faint thing on a generated slide came out of the
+// exporter at full strength because of it: ghost section numerals arrived as
+// solid white, and decorations meant to sit at a tenth of their colour arrived
+// as bright bands across the slide.
+QString clrXml(const QColor& c) {
+    const int a = static_cast<int>(c.alphaF() * 100000.0 + 0.5);
+    if (a >= 100000) return QStringLiteral("<a:srgbClr val=\"%1\"/>").arg(hex6(c));
+    return QStringLiteral("<a:srgbClr val=\"%1\"><a:alpha val=\"%2\"/></a:srgbClr>")
+        .arg(hex6(c)).arg(a);
+}
+
+QString fillXml(const QColor& c) {
+    if (c.alpha() == 0) return QStringLiteral("<a:noFill/>");
+    return QStringLiteral("<a:solidFill>%1</a:solidFill>").arg(clrXml(c));
+}
+
+// A shape's outline. A pen width of zero means no outline at all rather than a
+// hairline one: exporting it as half a pixel drew a full-strength edge around
+// every faint panel, which is what turned a set of soft background bands into
+// bright stripes across the finished deck.
+QString lnXml(const QColor& c, qreal penWidth) {
+    if (penWidth <= 0.01 || c.alpha() == 0)
+        return QStringLiteral("<a:ln><a:noFill/></a:ln>");
+    return QStringLiteral("<a:ln w=\"%1\">%2</a:ln>")
+        .arg(emu(penWidth)).arg(fillXml(c));
+}
+
 // Map a gallery ShapeKind to its PowerPoint preset geometry name.
 QString prstForShape(ShapeKind k) {
     switch (k) {
@@ -2258,14 +2287,25 @@ bool ImpressModule::exportPptxTo(const QString& path) {
         for (const SlideItem& item : slide.items) {
             switch (item.type) {
             case SlideItemType::TextBox: {
-                const int sz = std::max(1, static_cast<int>(item.fontSize * 100));
+                // sz is hundredths of a POINT; fontSize is in scene units, which
+                // are pixels at 96 dpi. Writing one as the other made every
+                // exported deck render a third too large in PowerPoint and WPS:
+                // titles ran off the slide, section numerals broke across two
+                // lines, and "20,000" came out as "20,00" with the zero on the
+                // line below. The import side has always converted the other way
+                // (see PptxImport, ptToUnit); this is its inverse and uses the
+                // same two constants so the pair cannot drift apart.
+                constexpr double kEmuPerPx = 9525.0;
+                constexpr double kEmuPerPt = 12700.0;
+                const int sz = std::max(1, static_cast<int>(
+                    item.fontSize * (kEmuPerPx / kEmuPerPt) * 100.0 + 0.5));
                 const bool bold = item.html.contains("font-weight:6") ||
                                   item.html.contains("font-weight:7") ||
                                   item.html.contains("font-weight:8") ||
                                   item.html.contains("font-weight:9") ||
                                   item.html.contains("font-weight:bold");
                 const bool ital = item.html.contains("font-style:italic");
-                const QString col = hex6(item.penColor);
+                const QString col = fillXml(item.penColor);
 
                 QString body;
                 const QStringList lines = item.text.split('\n');
@@ -2273,8 +2313,7 @@ bool ImpressModule::exportPptxTo(const QString& path) {
                     body += "<a:p>";
                     if (!line.isEmpty()) {
                         body += QString("<a:r><a:rPr lang=\"en-US\" sz=\"%1\" b=\"%2\" i=\"%3\" dirty=\"0\">"
-                                        "<a:solidFill><a:srgbClr val=\"%4\"/></a:solidFill></a:rPr>"
-                                        "<a:t>%5</a:t></a:r>")
+                                        "%4</a:rPr><a:t>%5</a:t></a:r>")
                                     .arg(sz).arg(bold ? 1 : 0).arg(ital ? 1 : 0)
                                     .arg(col, xmlEscape(line));
                     }
@@ -2295,44 +2334,39 @@ bool ImpressModule::exportPptxTo(const QString& path) {
             case SlideItemType::Rectangle:
             case SlideItemType::Ellipse: {
                 const QString prst = (item.type == SlideItemType::Rectangle) ? "rect" : "ellipse";
-                const int fillAlpha = static_cast<int>(item.fillColor.alphaF() * 100000);
-                const qint64 lnW = emu(std::max(0.5, item.penWidth));
                 shapes += QString(
                     "<p:sp><p:nvSpPr><p:cNvPr id=\"%1\" name=\"Shape %1\"/>"
                     "<p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
                     "<p:spPr>%2<a:prstGeom prst=\"%3\"><a:avLst/></a:prstGeom>"
-                    "<a:solidFill><a:srgbClr val=\"%4\"><a:alpha val=\"%5\"/></a:srgbClr></a:solidFill>"
-                    "<a:ln w=\"%6\"><a:solidFill><a:srgbClr val=\"%7\"/></a:solidFill></a:ln></p:spPr>"
+                    "%4%5</p:spPr>"
                     "<p:txBody><a:bodyPr rtlCol=\"0\"/><a:lstStyle/><a:p/></p:txBody></p:sp>")
                     .arg(shapeId).arg(xfrmXml(item.rect, item.rotation), prst,
-                                       hex6(item.fillColor)).arg(fillAlpha).arg(lnW)
-                    .arg(hex6(item.penColor));
+                                      fillXml(item.fillColor),
+                                      lnXml(item.penColor, item.penWidth));
                 ++shapeId;
                 break;
             }
             case SlideItemType::Shape: {
-                const int fillAlpha = static_cast<int>(item.fillColor.alphaF() * 100000);
-                const qint64 lnW = emu(std::max(0.5, item.penWidth));
                 if (item.shapeKind == ShapeKind::Line) {
                     shapes += QString(
                         "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"%1\" name=\"Line %1\"/>"
                         "<p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>"
                         "<p:spPr>%2<a:prstGeom prst=\"line\"><a:avLst/></a:prstGeom>"
-                        "<a:ln w=\"%3\"><a:solidFill><a:srgbClr val=\"%4\"/></a:solidFill></a:ln></p:spPr>"
-                        "</p:cxnSp>")
-                        .arg(shapeId).arg(xfrmXml(item.rect, item.rotation)).arg(lnW)
-                        .arg(hex6(item.penColor));
+                        "%3</p:spPr></p:cxnSp>")
+                        .arg(shapeId).arg(xfrmXml(item.rect, item.rotation),
+                                          lnXml(item.penColor,
+                                                std::max(0.75, item.penWidth)));
                 } else {
                     shapes += QString(
                         "<p:sp><p:nvSpPr><p:cNvPr id=\"%1\" name=\"Shape %1\"/>"
                         "<p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
                         "<p:spPr>%2<a:prstGeom prst=\"%3\"><a:avLst/></a:prstGeom>"
-                        "<a:solidFill><a:srgbClr val=\"%4\"><a:alpha val=\"%5\"/></a:srgbClr></a:solidFill>"
-                        "<a:ln w=\"%6\"><a:solidFill><a:srgbClr val=\"%7\"/></a:solidFill></a:ln></p:spPr>"
+                        "%4%5</p:spPr>"
                         "<p:txBody><a:bodyPr rtlCol=\"0\"/><a:lstStyle/><a:p/></p:txBody></p:sp>")
                         .arg(shapeId).arg(xfrmXml(item.rect, item.rotation),
-                                           prstForShape(item.shapeKind), hex6(item.fillColor))
-                        .arg(fillAlpha).arg(lnW).arg(hex6(item.penColor));
+                                          prstForShape(item.shapeKind),
+                                          fillXml(item.fillColor),
+                                          lnXml(item.penColor, item.penWidth));
                 }
                 ++shapeId;
                 break;
