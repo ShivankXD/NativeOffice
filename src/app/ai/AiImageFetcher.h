@@ -34,7 +34,7 @@ public:
     // Asks for one picture. `token` is handed straight back with the result, so
     // the caller can find the slide and the item it belongs to without this
     // class knowing anything about decks.
-    void request(quint64 token, const QString& query);
+    void request(quint64 token, const QString& query, int targetWidth);
 
     // Drops every queued and in-flight request. Called when a generation is
     // rolled back or a new one starts: pictures for a deck that no longer
@@ -48,9 +48,9 @@ signals:
 
 private:
     void pump();
-    void start(quint64 token, const QString& query, int variant);
+    void start(quint64 token, const QString& query, int variant, int width);
 
-    struct Pending { quint64 token; QString query; int variant; };
+    struct Pending { quint64 token; QString query; int variant; int width; };
 
     QNetworkAccessManager*    m_net { nullptr };
     QQueue<Pending>           m_queue;

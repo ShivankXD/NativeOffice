@@ -22,7 +22,8 @@ constexpr int kMaxBytes    = 8 * 1024 * 1024;
 AiImageFetcher::AiImageFetcher(QObject* parent)
     : QObject(parent), m_net(new QNetworkAccessManager(this)) {}
 
-void AiImageFetcher::request(quint64 token, const QString& query) {
+void AiImageFetcher::request(quint64 token, const QString& query,
+                             int targetWidth) {
     const QString key = query.trimmed().toLower();
     if (key.isEmpty()) { emit ready(token, {}); return; }
 
@@ -38,7 +39,7 @@ void AiImageFetcher::request(quint64 token, const QString& query) {
         if (hit != m_cache.constEnd()) { emit ready(token, hit.value()); return; }
     }
 
-    m_queue.enqueue({ token, query.trimmed(), seen });
+    m_queue.enqueue({ token, query.trimmed(), seen, targetWidth });
     pump();
 }
 
@@ -54,15 +55,20 @@ void AiImageFetcher::abandonAll() {
 void AiImageFetcher::pump() {
     while (m_inFlight < kMaxInFlight && !m_queue.isEmpty()) {
         const Pending p = m_queue.dequeue();
-        start(p.token, p.query, p.variant);
+        start(p.token, p.query, p.variant, p.width);
     }
 }
 
-void AiImageFetcher::start(quint64 token, const QString& query, int variant) {
+void AiImageFetcher::start(quint64 token, const QString& query, int variant,
+                           int width) {
     QUrl url(AuthManager::instance().baseUrl() + QStringLiteral("/api/ai/image"));
     QUrlQuery q;
     q.addQueryItem(QStringLiteral("q"), query);
     if (variant > 0) q.addQueryItem(QStringLiteral("i"), QString::number(variant));
+    // The exact width this picture will be drawn at, so the backend can ask
+    // its sources for a thumbnail of that size rather than a scan that has to
+    // be downloaded in full and then thrown away.
+    q.addQueryItem(QStringLiteral("w"), QString::number(qBound(320, width, 1920)));
     url.setQuery(q);
 
     QNetworkRequest req(url);

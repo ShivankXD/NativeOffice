@@ -148,7 +148,7 @@ void AiSlideAgent::buildSlide(const QJsonObject& o) {
         const quint64 token = m_nextToken++;
         m_images.insert(token, PendingImage{ slot, rq.itemIndex, rq.markIndex,
                                              rq.size, rq.treatment, rq.radius });
-        m_fetcher->request(token, rq.query);
+        m_fetcher->request(token, rq.query, rq.size.width());
     }
 }
 
@@ -176,7 +176,7 @@ void AiSlideAgent::rebuildAll() {
             const quint64 token = m_nextToken++;
             m_images.insert(token, PendingImage{ slot, rq.itemIndex, rq.markIndex,
                                                  rq.size, rq.treatment, rq.radius });
-            m_fetcher->request(token, rq.query);
+            m_fetcher->request(token, rq.query, rq.size.width());
         }
     }
 }
