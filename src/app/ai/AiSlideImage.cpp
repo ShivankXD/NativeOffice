@@ -83,7 +83,29 @@ QByteArray composeSlideImage(const QByteArray& source, const QSize& target,
     if (!src.loadFromData(source)) return {};
     if (src.isNull() || src.width() < 8 || src.height() < 8) return {};
 
-    QImage img = coverCrop(src.convertToFormat(QImage::Format_RGB32), target);
+    // A transparent source has to be composited, not flattened. Converting
+    // straight to RGB32 throws the alpha away and keeps whatever was stored in
+    // the colour channels underneath it, which for a great many PNGs is the
+    // editor's own transparency checkerboard. One went out on a finished deck:
+    // a full-bleed anatomy illustration with a grey chequered grid across the
+    // whole slide, baked into the exported file where no later fix could reach
+    // it. Painting the source over a solid ground blends by alpha properly and
+    // leaves the theme's colour wherever the picture is see-through.
+    if (src.hasAlphaChannel()) {
+        const bool onDark = treatment != ImageTreatment::Plain
+                         && treatment != ImageTreatment::Tinted;
+        QImage flat(src.size(), QImage::Format_RGB32);
+        flat.fill(onDark ? theme.deep : theme.paper);
+        QPainter fp(&flat);
+        fp.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        fp.drawImage(0, 0, src);
+        fp.end();
+        src = flat;
+    } else {
+        src = src.convertToFormat(QImage::Format_RGB32);
+    }
+
+    QImage img = coverCrop(src, target);
     if (img.isNull()) return {};
 
     if (treatment == ImageTreatment::Duotone) {
