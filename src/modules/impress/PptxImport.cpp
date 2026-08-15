@@ -341,6 +341,16 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
     QString curText;
     bool    inRun = false;
 
+    // Transparency and outlines. A colour carries its alpha as a child element
+    // rather than in the hex, and an outline is a separate colour again, so a
+    // reader that takes only the fill hex draws every soft panel at full
+    // strength and every outline-only shape as a solid disc. pendingClr points
+    // at whichever colour an <a:alpha> that comes next belongs to.
+    QColor  lineColor;
+    double  lineWidth = 0.0;
+    bool    shapeNoFill = false;
+    QColor* pendingClr = nullptr;
+
     int depth = 1;                                  // we are inside <p:sp>
     QStringList path;                               // local-name stack below <p:sp>
 
@@ -412,6 +422,20 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
             else if (ln == "br" && !paras.isEmpty()) {
                 paras.back().runs.push_back({ QString(QChar(0x2028)), curFmt });
             }
+            else if (ln == "ln" && path.contains("spPr")) {
+                const QString w = av(attrs, "w");
+                if (!w.isEmpty()) lineWidth = w.toDouble() / 9525.0;   // EMU to px
+            }
+            else if (ln == "noFill" && path.contains("spPr")) {
+                if (path.contains("ln")) lineColor = QColor(Qt::transparent);
+                else                     shapeNoFill = true;
+            }
+            else if (ln == "alpha") {
+                // Belongs to the colour element it sits inside.
+                const int v = av(attrs, "val").toInt();
+                if (pendingClr && pendingClr->isValid())
+                    pendingClr->setAlphaF(qBound(0.0, v / 100000.0, 1.0));
+            }
             else if (ln == "srgbClr") {
                 const QString val = av(attrs, "val");
                 if (!val.isEmpty()) {
@@ -419,8 +443,13 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
                     // Scope carefully: srgbClr shows up under rPr (text colour),
                     // spPr (shape fill) and ln (outline). endParaRPr carries one
                     // too and must not leak into a run.
-                    if (inRun && path.contains("rPr")) { if (!curFmt.color.isValid()) curFmt.color = c; }
-                    else if (path.contains("spPr") && !path.contains("ln")) { if (!shapeFill.isValid()) shapeFill = c; }
+                    if (inRun && path.contains("rPr")) {
+                        if (!curFmt.color.isValid()) { curFmt.color = c; pendingClr = &curFmt.color; }
+                    } else if (path.contains("spPr") && path.contains("ln")) {
+                        if (!lineColor.isValid()) { lineColor = c; pendingClr = &lineColor; }
+                    } else if (path.contains("spPr")) {
+                        if (!shapeFill.isValid()) { shapeFill = c; pendingClr = &shapeFill; }
+                    }
                 }
             }
             else if (ln == "t") {
@@ -513,9 +542,18 @@ void parseSp(QXmlStreamReader& xml, const Scale& sc, std::vector<SlideItem>& out
         item.type      = SlideItemType::Shape;
         item.shapeKind = shapeFromPrst(prst);
         item.cornerAdj = cornerAdj;
-        item.fillColor = shapeFill.isValid() ? shapeFill : QColor("#B7CFF4");
-        item.penColor  = item.fillColor;
-        item.penWidth  = 0.0;
+        // No fill means no fill. Falling back to a default here painted every
+        // outline-only shape as a solid pale blue disc, including in decks this
+        // app had exported itself moments earlier.
+        item.fillColor = shapeNoFill ? QColor(Qt::transparent)
+                       : shapeFill.isValid() ? shapeFill : QColor("#B7CFF4");
+        if (lineColor.isValid() && lineColor.alpha() > 0 && lineWidth > 0.01) {
+            item.penColor = lineColor;
+            item.penWidth = lineWidth;
+        } else {
+            item.penColor = item.fillColor;
+            item.penWidth = 0.0;
+        }
         // A shape that blankets the whole slide is a backdrop, not a draggable
         // object — lock it so the slide stays fixed.
         if (rect.left() <= 24 && rect.top() <= 24 &&
