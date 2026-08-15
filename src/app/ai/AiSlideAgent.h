@@ -74,6 +74,7 @@ signals:
 private:
     void takeLine(const QString& line);
     void buildSlide(const QJsonObject& o);
+    static QString subjectOf(const QString& title);
     void chooseTheme(const QString& named, const QString& headline,
                      const QString& context = QString());
     void rebuildAll();

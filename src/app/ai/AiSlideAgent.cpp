@@ -97,6 +97,17 @@ void AiSlideAgent::takeLine(const QString& raw) {
     emit progress(m_added);
 }
 
+// The deck's subject, taken from its title. A title reads "Doraemon: The Robot
+// Cat from the Future"; the part worth searching for is the bit before the
+// colon, or the first few words when there is no colon.
+QString AiSlideAgent::subjectOf(const QString& title) {
+    QString t = title.trimmed();
+    const int colon = t.indexOf(QLatin1Char(':'));
+    if (colon > 2) t = t.left(colon);
+    const QStringList words = t.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    return words.mid(0, 3).join(QLatin1Char(' ')).trimmed();
+}
+
 void AiSlideAgent::chooseTheme(const QString& named, const QString& headline,
                                const QString& context) {
     m_theme = themeFor(named, headline, context);
@@ -117,6 +128,14 @@ void AiSlideAgent::buildSlide(const QJsonObject& o) {
             + QLatin1Char(' ') + o.value(QStringLiteral("notes")).toString();
         chooseTheme(o.value(QStringLiteral("theme")).toString(), headline, context);
     }
+
+    // The opening slide names the deck, and that name is what every picture on
+    // it should be about. Set from the first slide whatever else happened
+    // before it: the theme usually arrives on its own line ahead of any slide,
+    // and hanging this off the theme decision meant the subject was never set
+    // at all on exactly the decks that followed the instructions.
+    if (m_placed.isEmpty())
+        m_fetcher->setSubject(subjectOf(o.value(QStringLiteral("title")).toString()));
 
     SlideBuildContext ctx;
     ctx.theme   = m_theme;

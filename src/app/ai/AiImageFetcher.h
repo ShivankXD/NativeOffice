@@ -19,6 +19,7 @@
 #include <QHash>
 #include <QObject>
 #include <QQueue>
+#include <QSet>
 #include <QString>
 
 class QNetworkAccessManager;
@@ -34,6 +35,12 @@ public:
     // Asks for one picture. `token` is handed straight back with the result, so
     // the caller can find the slide and the item it belongs to without this
     // class knowing anything about decks.
+    // The deck's own subject, set once when a generation starts. Sent with
+    // every request so the backend can anchor its search to it: a deck about
+    // Doraemon that asks for "anime characters" must not be handed a picture
+    // of a different anime.
+    void setSubject(const QString& subject) { m_subject = subject; }
+
     void request(quint64 token, const QString& query, int targetWidth);
 
     // Drops every queued and in-flight request. Called when a generation is
@@ -50,6 +57,8 @@ private:
     void pump();
     void start(quint64 token, const QString& query, int variant, int width);
 
+    QString m_subject;
+
     struct Pending { quint64 token; QString query; int variant; int width; };
 
     QNetworkAccessManager*    m_net { nullptr };
@@ -62,6 +71,11 @@ private:
     // How many times each query has been asked for in this generation, so a
     // repeat can ask the backend for the next result rather than the same one.
     QHash<QString, int>       m_seen;
+    // Every picture already placed in this deck, by content. Different queries
+    // routinely fall back to the same photograph of the subject, and one
+    // photograph repeated across six slides is worse than six different ones
+    // that are each slightly less apt.
+    QSet<QByteArray>          m_used;
     quint64                   m_generation { 0 };
 };
 
