@@ -301,6 +301,47 @@ void setLight(SlideData& s, const DeckTheme& t) {
     s.layout      = SlideLayout::TitleContent;
 }
 
+// The surface a slide is laid on, and the ink that goes with it.
+//
+// Every ordinary slide used to be the same pale card, so a deck came out as one
+// dark title, one dark section break and eight identical light slides in a row.
+// A deck that never changes surface reads as a template with the words swapped
+// out, which is the loudest single thing about a generated one. Every fourth
+// content slide is now laid on the deep surface instead, which changes the
+// rhythm of the whole deck without any slide having to ask for it.
+struct Surface {
+    bool   dark { false };
+    QColor bg1, bg2, head, body, muted, panel, panelEdge;
+};
+
+Surface surfaceFor(const DeckTheme& t, int ordinal) {
+    Surface su;
+    su.dark = ordinal > 0 && (ordinal % 4) == 0;
+    if (su.dark) {
+        su.bg1 = t.deep;   su.bg2 = t.deep2;
+        su.head = t.paper; su.body = t.onDeep;
+        su.muted = mixed(t.onDeep, t.deep, 0.42);
+        su.panel = alpha(t.paper, 18);
+        su.panelEdge = alpha(t.paper, 38);
+    } else {
+        su.bg1 = t.paper;  su.bg2 = QColor();
+        su.head = t.ink;   su.body = t.body;
+        su.muted = t.muted;
+        su.panel = t.paperTint;
+        su.panelEdge = mixed(t.paper, t.ink, 0.12);
+    }
+    return su;
+}
+
+// Lays the surface down and puts the decoration that belongs to it on top.
+void applySurface(SlideData& s, const DeckTheme& t, const Surface& su, int ordinal) {
+    s.background  = su.bg1;
+    s.background2 = su.bg2;
+    s.layout      = su.dark ? SlideLayout::Title : SlideLayout::TitleContent;
+    if (su.dark) darkMotif(s, t, ordinal);
+    else         motif(s, t, ordinal);
+}
+
 // A small capitalised label. Every professionally set deck has one of these
 // over its headings; it is the cheapest single thing that separates a slide
 // from a word processor page.
@@ -335,22 +376,70 @@ qreal pillKicker(SlideData& s, const DeckTheme& t, const QString& text, qreal y)
 // Heading block for an ordinary slide: optional kicker, the title at whatever
 // size it fits in two lines, and a short accent rule under it. Returns the y
 // the content below should start at.
-qreal header(SlideData& s, const DeckTheme& t, const QString& kickerText,
-             const QString& title, bool dark) {
-    const QColor ink = dark ? t.paper : t.ink;
-    const qreal  tw  = kSlideW - M * 2 - 46;
+// Three treatments, chosen by where the slide sits in the deck. One heading
+// style repeated for ten slides is most of what makes a deck feel like a form;
+// rotating between a ruled heading, a barred one and a labelled one costs
+// nothing and gives the deck a pulse. The variant is picked from the ordinal so
+// the same deck always comes out the same way.
+qreal header(SlideData& s, const DeckTheme& t, const Surface& su,
+             const QString& kickerText, const QString& title, int ordinal) {
+    const int variant = qAbs(ordinal) % 3;
+    const qreal tw = kSlideW - M * 2 - 46;
+    const QString plain = inlinePlain(title);
+
+    // Two lines at the theme's heading size, and it shrinks rather than taking
+    // a third.
+    const qreal cap = textHeight(QStringLiteral("Hg"), 4000, t.headPt, true,
+                                 t.headFont) * 2.15;
+
+    if (variant == 1) {
+        // A full-height accent bar beside the heading block.
+        const qreal x = M + 20;
+        const qreal w = tw - 20;
+        qreal y = 52;
+        y = kicker(s, t, kickerText, x, y, w, t.accent, Qt::AlignLeft);
+        const qreal top = y;
+        if (!plain.isEmpty()) {
+            const qreal pt = fitOne(plain, w, cap, t.headPt, 17, t.headFont);
+            const qreal th = textHeight(plain, w, pt, true, t.headFont);
+            s.items.push_back(textItem(QRectF(x, y, w, th), title, pt, true,
+                                       su.head, t.headFont));
+            y += th;
+        }
+        s.items.push_back(shape(QRectF(M, 52, 5, qMax<qreal>(28, y - 52)), t.accent));
+        Q_UNUSED(top);
+        return y + 26;
+    }
+
+    if (variant == 2) {
+        // The label in a solid pill, and no rule under the heading.
+        qreal y = 50;
+        if (!kickerText.trimmed().isEmpty()) {
+            const QString k = t.eyebrowUpper ? kickerText.toUpper() : kickerText;
+            const qreal kw = textWidthOf(k, 11.5, true, t.bodyFont) + 26;
+            s.items.push_back(shape(QRectF(M, y, kw, 22), t.accent,
+                                    ShapeKind::RoundedRect, 11));
+            s.items.push_back(textItem(QRectF(M, y, kw, 22), k, 11.5, true,
+                                       t.paper, t.bodyFont, Qt::AlignHCenter, 1));
+            y += 22 + 12;
+        }
+        if (!plain.isEmpty()) {
+            const qreal pt = fitOne(plain, tw, cap, t.headPt, 17, t.headFont);
+            const qreal th = textHeight(plain, tw, pt, true, t.headFont);
+            s.items.push_back(textItem(QRectF(M, y, tw, th), title, pt, true,
+                                       su.head, t.headFont));
+            y += th;
+        }
+        return y + 28;
+    }
+
     qreal y = 52;
     y = kicker(s, t, kickerText, M, y, tw, t.accent, Qt::AlignLeft);
-
-    const QString plain = inlinePlain(title);
     if (!plain.isEmpty()) {
-        // Two lines at the theme's heading size, and it shrinks rather than
-        // taking a third.
-        const qreal cap = textHeight(QStringLiteral("Hg"), 4000, t.headPt, true,
-                                     t.headFont) * 2.15;
-        const qreal pt  = fitOne(plain, tw, cap, t.headPt, 17, t.headFont);
-        const qreal th  = textHeight(plain, tw, pt, true, t.headFont);
-        s.items.push_back(textItem(QRectF(M, y, tw, th), title, pt, true, ink, t.headFont));
+        const qreal pt = fitOne(plain, tw, cap, t.headPt, 17, t.headFont);
+        const qreal th = textHeight(plain, tw, pt, true, t.headFont);
+        s.items.push_back(textItem(QRectF(M, y, tw, th), title, pt, true,
+                                   su.head, t.headFont));
         y += th + 13;
     }
     s.items.push_back(shape(QRectF(M, y, 54, 4), t.accent));
@@ -635,9 +724,9 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
 
     // ── a row of pictures ───────────────────────────────────────────────────
     if (layout == QLatin1String("imagegrid")) {
-        setLight(s, t);
-        motif(s, t, ctx.ordinal);
-        const qreal top = header(s, t, kick, title, false);
+        const Surface su = surfaceFor(t, ctx.ordinal);
+        applySurface(s, t, su, ctx.ordinal);
+        const qreal top = header(s, t, su, kick, title, ctx.ordinal);
 
         QStringList queries = list(o, "images", nullptr);
         if (queries.isEmpty()) for (const QString& b : bullets) queries << pairOf(b).first;
@@ -662,14 +751,14 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
 
         for (int i = 0; i < n; ++i) {
             const qreal x = M + i * (cw + gap);
-            wantImage(s, reqs, queries.at(i), QRectF(x, top, cw, ih), t, false,
+            wantImage(s, reqs, queries.at(i), QRectF(x, top, cw, ih), t, su.dark,
                       ImageTreatment::Plain, t.radius, false);
             if (i < bullets.size()) {
                 const QPair<QString, QString> p = pairOf(bullets.at(i));
                 const QString cap = p.second.isEmpty() ? p.first : p.second;
                 const qreal h = textHeight(inlinePlain(cap), cw, 13, false, t.bodyFont);
                 s.items.push_back(textItem(QRectF(x, top + ih + 12, cw, h + 4), cap,
-                                           13, false, t.muted, t.bodyFont));
+                                           13, false, su.muted, t.bodyFont));
             }
         }
         return s;
@@ -677,9 +766,9 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
 
     // ── cards ───────────────────────────────────────────────────────────────
     if (layout == QLatin1String("cards")) {
-        setLight(s, t);
-        motif(s, t, ctx.ordinal);
-        const qreal top = header(s, t, kick, title, false);
+        const Surface su = surfaceFor(t, ctx.ordinal);
+        applySurface(s, t, su, ctx.ordinal);
+        const qreal top = header(s, t, su, kick, title, ctx.ordinal);
 
         const int n = qMin(4, int(bullets.size()));
         if (n < 1) return s;
@@ -720,7 +809,7 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
         for (int i = 0; i < n; ++i) {
             const QPair<QString, QString> p = pairOf(bullets.at(i));
             const qreal x = M + i * (cw + gap);
-            s.items.push_back(shape(QRectF(x, cy, cw, ch), t.paperTint,
+            s.items.push_back(shape(QRectF(x, cy, cw, ch), su.panel,
                                     ShapeKind::RoundedRect, t.radius));
             // A rule along the top edge rather than a filled header band: it
             // marks the card without turning four cards into four boxes of
@@ -731,13 +820,13 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
             const qreal hh = textHeight(inlinePlain(p.first), cw - pad * 2, headPt,
                                         true, t.headFont);
             s.items.push_back(textItem(QRectF(x + pad, ty, cw - pad * 2, hh), p.first,
-                                       headPt, true, t.ink, t.headFont));
+                                       headPt, true, su.head, t.headFont));
             ty += hh + 10;
             if (!p.second.isEmpty()) {
                 const qreal bh = textHeight(inlinePlain(p.second), cw - pad * 2,
                                             textPt, false, t.bodyFont);
                 s.items.push_back(textItem(QRectF(x + pad, ty, cw - pad * 2, bh + 4),
-                                           p.second, textPt, false, t.body, t.bodyFont));
+                                           p.second, textPt, false, su.body, t.bodyFont));
             }
         }
         return s;
@@ -745,9 +834,9 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
 
     // ── timeline ────────────────────────────────────────────────────────────
     if (layout == QLatin1String("timeline")) {
-        setLight(s, t);
-        motif(s, t, ctx.ordinal);
-        const qreal top = header(s, t, kick, title, false);
+        const Surface su = surfaceFor(t, ctx.ordinal);
+        applySurface(s, t, su, ctx.ordinal);
+        const qreal top = header(s, t, su, kick, title, ctx.ordinal);
 
         const int n = qMin(5, int(bullets.size()));
         if (n < 2) return s;
@@ -781,13 +870,13 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
         const qreal panelH = qMin(band, blockH + 76);
         const qreal panelY = top + (band - panelH) / 2;
         s.items.push_back(shape(QRectF(M - 14, panelY, fullW + 28, panelH),
-                                t.paperTint, ShapeKind::RoundedRect, t.radius));
+                                su.panel, ShapeKind::RoundedRect, t.radius));
         const qreal lineY = panelY + (panelH - blockH) / 2 + dot / 2;
 
         // The connector stops at the outer markers rather than running the full
         // width, which would leave a stub of line hanging past the last step.
         s.items.push_back(shape(QRectF(M + cw / 2, lineY - 1.5,
-                                       fullW - cw, 3), mixed(t.paper, t.accent, 0.45)));
+                                       fullW - cw, 3), mixed(su.bg1, t.accent, 0.45)));
 
         for (int i = 0; i < n; ++i) {
             const QPair<QString, QString> p = pairOf(bullets.at(i));
@@ -804,14 +893,14 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
             const qreal hh = textHeight(inlinePlain(p.first), textW, titlePt, true,
                                         t.headFont);
             s.items.push_back(textItem(QRectF(cx - textW / 2, cy, textW, hh), p.first,
-                                       titlePt, true, t.ink, t.headFont,
+                                       titlePt, true, su.head, t.headFont,
                                        Qt::AlignHCenter));
             cy += hh + 7;
             if (!p.second.isEmpty()) {
                 const qreal bh = textHeight(inlinePlain(p.second), textW, textPt,
                                             false, t.bodyFont);
                 s.items.push_back(textItem(QRectF(cx - textW / 2, cy, textW, bh + 4),
-                                           p.second, textPt, false, t.body,
+                                           p.second, textPt, false, su.body,
                                            t.bodyFont, Qt::AlignHCenter));
             }
         }
@@ -820,9 +909,9 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
 
     // ── two things, side by side ────────────────────────────────────────────
     if (layout == QLatin1String("compare")) {
-        setLight(s, t);
-        motif(s, t, ctx.ordinal);
-        const qreal top = header(s, t, kick, title, false);
+        const Surface su = surfaceFor(t, ctx.ordinal);
+        applySurface(s, t, su, ctx.ordinal);
+        const qreal top = header(s, t, su, kick, title, ctx.ordinal);
 
         const QStringList leftItems  = list(o, "left",  written);
         const QStringList rightItems = list(o, "right", written);
@@ -836,8 +925,8 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
         const qreal band = 46;
         const qreal pad = 20;
 
-        const QColor fills[2]  = { t.paperTint, mixed(t.paper, t.accent, 0.10) };
-        const QColor bands[2]  = { mixed(t.ink, t.paper, 0.14), t.accent };
+        const QColor fills[2]  = { su.panel, mixed(su.bg1, t.accent, 0.14) };
+        const QColor bands[2]  = { mixed(su.head, su.bg1, 0.22), t.accent };
         const QString heads[2] = { leftTitle, rightTitle };
         const QStringList cols[2] = { leftItems, rightItems };
 
@@ -872,7 +961,7 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
                                        t.paper, t.headFont));
             if (!cols[c].isEmpty())
                 bulletColumn(s, t, cols[c], x + pad, py + band + pad, listW, pt,
-                             13, t.body);
+                             13, su.body);
         }
         return s;
     }
@@ -947,7 +1036,10 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
     if (layout == QLatin1String("metrics")) {
         setDark(s, t);
         darkMotif(s, t, ctx.ordinal);
-        const qreal top = header(s, t, kick, title, true);
+        Surface su;
+        su.dark = true;   su.bg1  = t.deep;   su.head  = t.paper;
+        su.body = t.onDeep; su.muted = t.onDeep; su.panel = alpha(t.paper, 20);
+        const qreal top = header(s, t, su, kick, title, ctx.ordinal);
 
         const int n = qMin(4, int(bullets.size()));
         if (n < 1) return s;
@@ -1013,9 +1105,9 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
     // A real chart item, not a picture of one: it is drawn by the same code
     // that draws a chart the user inserts, so it stays sharp and editable.
     if (layout == QLatin1String("chart")) {
-        setLight(s, t);
-        motif(s, t, ctx.ordinal);
-        const qreal top = header(s, t, kick, title, false);
+        const Surface su = surfaceFor(t, ctx.ordinal);
+        applySurface(s, t, su, ctx.ordinal);
+        const qreal top = header(s, t, su, kick, title, ctx.ordinal);
 
         SlideItem ch;
         ch.type = SlideItemType::Chart;
@@ -1038,8 +1130,8 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
                           ? qreal(i) / qreal(ch.chartValues.size() - 1) : 0.0));
         ch.chartShowValues = true;
         ch.chartShowLegend = false;
-        ch.fillColor = t.paper;
-        ch.penColor  = mixed(t.paper, t.ink, 0.16);
+        ch.fillColor = su.dark ? mixed(t.deep, t.paper, 0.10) : t.paper;
+        ch.penColor  = mixed(su.bg1, su.head, 0.16);
 
         const bool hasBody = !body.isEmpty();
         ch.rect = hasBody ? QRectF(M, top, kSlideW * 0.55, kSlideH - top - M)
@@ -1050,15 +1142,15 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
             const qreal w = kSlideW - x - M;
             const qreal h = textHeight(inlinePlain(body), w, 15, false, t.bodyFont);
             s.items.push_back(textItem(QRectF(x, top + 6, w, h + 6), body, 15, false,
-                                       t.body, t.bodyFont));
+                                       su.body, t.bodyFont));
         }
         return s;
     }
 
     // ── content, the workhorse ──────────────────────────────────────────────
-    setLight(s, t);
-    motif(s, t, ctx.ordinal);
-    qreal y = header(s, t, kick, title, false);
+    const Surface su = surfaceFor(t, ctx.ordinal);
+    applySurface(s, t, su, ctx.ordinal);
+    qreal y = header(s, t, su, kick, title, ctx.ordinal);
 
     const bool twoCol = layout == QLatin1String("twocolumn") && bullets.size() >= 4;
     const qreal fullW = kSlideW - M * 2;
@@ -1066,7 +1158,7 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
     if (!body.isEmpty()) {
         const qreal h = textHeight(inlinePlain(body), fullW, 17, false, t.bodyFont);
         s.items.push_back(textItem(QRectF(M, y, fullW, h + 8), body, 17, false,
-                                   t.body, t.bodyFont));
+                                   su.body, t.bodyFont));
         y += h + 22;
     }
 
@@ -1094,10 +1186,10 @@ SlideData buildSlideFromOp(const QJsonObject& o, const SlideBuildContext& ctx,
     if (used < available * 0.74) y += (available - used) * 0.34;
 
     if (twoCol) {
-        bulletColumn(s, t, bullets.mid(0, perCol), M, y, colW, pt, gap, t.body);
-        bulletColumn(s, t, bullets.mid(perCol), M + colW + 40, y, colW, pt, gap, t.body);
+        bulletColumn(s, t, bullets.mid(0, perCol), M, y, colW, pt, gap, su.body);
+        bulletColumn(s, t, bullets.mid(perCol), M + colW + 40, y, colW, pt, gap, su.body);
     } else {
-        bulletColumn(s, t, bullets, M, y, colW, pt, gap, t.body);
+        bulletColumn(s, t, bullets, M, y, colW, pt, gap, su.body);
     }
     return s;
 }
