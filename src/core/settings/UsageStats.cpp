@@ -2,6 +2,7 @@
 // UsageStats.cpp — see UsageStats.h.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "UsageStats.h"
+#include "ActivityLog.h"
 
 #include <QSettings>
 #include <QTimer>
@@ -42,6 +43,9 @@ void UsageStats::flush() {
 
     QSettings st;
     st.setValue(kTotalSeconds, st.value(kTotalSeconds, 0).toLongLong() + elapsed);
+    // The same seconds, bucketed per day, so the activity window can show how
+    // long each day actually ran rather than one lifetime total.
+    ActivityLog::instance().addSeconds(elapsed);
     m_session.restart();
 }
 
@@ -64,12 +68,14 @@ QString UsageStats::formattedTotal() const {
 void UsageStats::noteDocumentOpened() {
     QSettings st;
     st.setValue(kDocsOpened, st.value(kDocsOpened, 0).toInt() + 1);
+    ActivityLog::instance().noteAction();
     emit changed();
 }
 
 void UsageStats::noteFileEdited() {
     QSettings st;
     st.setValue(kFilesEdited, st.value(kFilesEdited, 0).toInt() + 1);
+    ActivityLog::instance().noteAction();
     emit changed();
 }
 

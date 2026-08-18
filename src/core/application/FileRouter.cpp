@@ -33,10 +33,19 @@ DetectedFileType FileRouter::detectFileType(const QString& filePath)
 
     // ── 1. Fast-path: binary formats whose content can't be usefully
     //       scanned as text.  Route by extension only.
-    if (ext == "xlsx" || ext == "ods" || ext == "xls")
+    if (ext == "xlsx" || ext == "xlsm" || ext == "ods" || ext == "xls")
         return DetectedFileType::SpreadsheetData;
     if (ext == "pptx" || ext == "odp" || ext == "ppt")
         return DetectedFileType::PresentationData;
+    // .docx is a ZIP too, so without this it fell through to the text sniffer,
+    // which was reading 8 KB of compressed bytes and could in principle see a
+    // consistent comma count in them and route a Word file to Sheets.
+    if (ext == "docx" || ext == "doc" || ext == "odt" || ext == "rtf")
+        return DetectedFileType::WriterDocument;
+    // A single-column .csv has no delimiter for the sniffer to find, and would
+    // otherwise open as a text document.
+    if (ext == "csv" || ext == "tsv")
+        return DetectedFileType::SpreadsheetData;
 
     // ── 2. Read a text sample from the file ──────────────────────────────
     QFile f(filePath);
