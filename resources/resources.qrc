@@ -54,5 +54,19 @@
        <file alias="card-spreadsheet.jpg">card-spreadsheet.jpg</file>
        <file alias="card-presentation.jpg">card-presentation.jpg</file>
        <file alias="card-pdf.jpg">card-pdf.jpg</file>
+       <!-- Second round of supplied art: the neon Create New pill with its
+            black field keyed out, the assistant card, the four finished
+            template cards, and cut-outs of the format renders for file lists.
+            Regenerate with scratchpad/make_assets2.py. -->
+       <file alias="btn-create-new.png">btn-create-new.png</file>
+       <file alias="ai-card.jpg">ai-card.jpg</file>
+       <file alias="tpl-resume.jpg">tpl-resume.jpg</file>
+       <file alias="tpl-budget.jpg">tpl-budget.jpg</file>
+       <file alias="tpl-pitch.jpg">tpl-pitch.jpg</file>
+       <file alias="tpl-report.jpg">tpl-report.jpg</file>
+       <file alias="icon-document.png">icon-document.png</file>
+       <file alias="icon-spreadsheet.png">icon-spreadsheet.png</file>
+       <file alias="icon-presentation.png">icon-presentation.png</file>
+       <file alias="icon-pdf.png">icon-pdf.png</file>
     </qresource>
 </RCC>
