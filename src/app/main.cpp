@@ -14,6 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "startscreen/StartScreen.h"
 #include "startscreen/SplashScreen.h"
+#include "startscreen/LucideIcons.h"
 #include "tools/ImageResizer.h"
 #include "tools/MarkdownEditor.h"
 #include "tools/QrCodeGenerator.h"
@@ -1265,16 +1266,16 @@ public:
         m_useAi = new QToolButton(m_topBar);
         m_useAi->setToolTip(QStringLiteral("Open Stasis  (Ctrl+A+I)"));
         m_useAi->setCursor(Qt::PointingHandCursor);
-        m_useAi->setFixedHeight(ShellTabBar::kTabHeight);
         m_useAi->setFocusPolicy(Qt::NoFocus);
         m_useAi->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        {
-            // The mark alone, already cropped off its black field, so it sits on
-            // the strip instead of punching a dark rectangle into it.
-            QPixmap mk(QStringLiteral(":/assets/stasis-mark-32.png"));
-            if (!mk.isNull())
-                m_useAi->setIcon(QIcon(mk.scaledToHeight(15, Qt::SmoothTransformation)));
-        }
+        // Sized and centred rather than stretched to the full strip height: a
+        // chip as tall as a tab read as a slab with its corners cut off, and
+        // the old stasis mark came out as a grey squiggle beside white text.
+        m_useAi->setFixedSize(150, 28);
+        m_useAi->setIconSize(QSize(15, 15));
+        m_useAi->setIcon(QIcon(NativeOffice::Lucide::pixmap(
+            NativeOffice::Lucide::kSparkles, QStringLiteral("#FFFFFF"), 15,
+            devicePixelRatio())));
         // The same violet chip Home shows in its own top bar, so the button
         // does not change shape depending on which tab you are looking at.
         m_useAi->setText(QStringLiteral(" AI Assistant "));
@@ -1282,7 +1283,7 @@ public:
             "QToolButton { color:#FFFFFF; font:600 12px 'Segoe UI';"
             "  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             "    stop:0 #6D5BF0, stop:1 #9B6BF6);"
-            "  border:none; border-radius:11px; padding:0 13px; margin:5px 4px; }"
+            "  border:none; border-radius:9px; padding:0 10px; }"
             "QToolButton:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             "    stop:0 #7C6CF6, stop:1 #AC7DFF); }"
             "QToolButton:pressed { background:#6455D8; }");
@@ -1295,7 +1296,7 @@ public:
         hb->addWidget(m_scroll, 0, Qt::AlignTop);
         hb->addWidget(plus, 0, Qt::AlignTop);
         hb->addStretch(1);             // draggable gap
-        hb->addWidget(m_useAi, 0, Qt::AlignTop);
+        hb->addWidget(m_useAi, 0, Qt::AlignVCenter);
         hb->addWidget(m_controls, 0, Qt::AlignTop);
 
         // The visible scrollbar, mirroring the scroll area's own hidden one.
@@ -2372,7 +2373,7 @@ QMenuBar::item:pressed {
         QMessageBox::about(win, "About NativeOffice",
             "<h3>NativeOffice Impress</h3>"
             "<p>A high-performance, cross-platform presentation tool.</p>"
-            "<p>Version 1.7.2</p>"
+            "<p>Version 1.7.3</p>"
             "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
@@ -2408,26 +2409,57 @@ static QString writerTemplateHtml(const QString& name) {
 
     if (name == "Professional Resume" || name == "Modern Resume") {
         const QString accent = name.startsWith("Modern") ? "#0E7C5A" : "#1F3864";
-        return QString(R"(<h1 style="%1 color:%2; margin-bottom:0px;">Your Name</h1>
-<p style="%1 color:%2; margin-top:0px;"><b>Professional Title</b></p>
-<p style="%1 color:#5A6071;">youremail@example.com &nbsp;·&nbsp; +1 234 567 890 &nbsp;·&nbsp; City, Country</p><hr/>
-<h2 style="%1 color:%2;">Summary</h2>
-<p style="%1">Results-driven professional with X years of experience in ____. Known for ____ and ____.</p>
-<h2 style="%1 color:%2;">Education</h2>
-<p style="%1"><b>Degree, Institution</b> &nbsp;·&nbsp; <i>20XX</i></p>
-<p style="%1"><b>Certification or second degree</b> &nbsp;·&nbsp; <i>20XX</i></p>
+        // Laid out as the card shows it: a header block, then two columns,
+        // with the skill strengths drawn as bars rather than described. Tables
+        // are the only way to get columns in a QTextDocument, so the structure
+        // is a table even though it does not read as one.
+        auto bar = [&accent](const QString& skill, int percent) {
+            return QString(
+                "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
+                "style=\"margin-bottom:6px;\"><tr>"
+                "<td style=\"font-size:9pt; color:#3C4250;\">%1</td></tr><tr>"
+                "<td><table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr>"
+                "<td width=\"%2%\" bgcolor=\"%3\" style=\"font-size:3pt;\">&nbsp;</td>"
+                "<td width=\"%4%\" bgcolor=\"#E4E8F0\" style=\"font-size:3pt;\">&nbsp;</td>"
+                "</tr></table></td></tr></table>")
+                .arg(skill).arg(percent).arg(accent).arg(100 - percent);
+        };
+
+        return QString(R"(<table width="100%" cellspacing="0" cellpadding="0"><tr>
+<td><h1 style="%1 color:%2; margin:0;">Your Name</h1>
+<p style="%1 color:%2; margin:2px 0 0 0; font-size:12pt;"><b>Professional Title</b></p></td>
+<td align="right" style="%1 color:#5A6071; font-size:9pt;">youremail@example.com<br/>
++1 234 567 890<br/>City, Country</td></tr></table>
+<hr/>
+<table width="100%" cellspacing="0" cellpadding="8"><tr valign="top">
+<td width="58%">
+<h2 style="%1 color:%2; margin-top:0;">Summary</h2>
+<p style="%1">Results-driven professional with X years of experience in ____.
+Known for ____ and ____.</p>
 <h2 style="%1 color:%2;">Experience</h2>
-<p style="%1"><b>Job Title, Company</b> &nbsp;·&nbsp; <i>20XX to Present</i></p>
+<p style="%1"><b>Job Title, Company</b><br/><i style="color:#6B7280;">20XX to Present</i></p>
 <ul><li style="%1">Achievement with a measurable result (grew X by Y%)</li>
 <li style="%1">Responsibility that shows scope and ownership</li>
 <li style="%1">Tool, process or initiative you led</li></ul>
-<p style="%1"><b>Previous Title, Company</b> &nbsp;·&nbsp; <i>20XX to 20XX</i></p>
+<p style="%1"><b>Previous Title, Company</b><br/><i style="color:#6B7280;">20XX to 20XX</i></p>
 <ul><li style="%1">Key contribution</li><li style="%1">Key contribution</li></ul>
+</td>
+<td width="42%" bgcolor="#F5F7FB">
+<h2 style="%1 color:%2; margin-top:0;">Education</h2>
+<p style="%1 font-size:10pt;"><b>Degree, Institution</b><br/>
+<span style="color:#6B7280;">20XX</span></p>
+<p style="%1 font-size:10pt;"><b>Certification</b><br/>
+<span style="color:#6B7280;">20XX</span></p>
 <h2 style="%1 color:%2;">Skills</h2>
-<p style="%1">Skill one · Skill two · Skill three · Skill four · Skill five</p>
+%3%4%5%6
 <h2 style="%1 color:%2;">Languages</h2>
-<p style="%1">Language one — native &nbsp;·&nbsp; Language two — fluent &nbsp;·&nbsp; Language three — basic</p>)")
-            .arg(base, accent);
+<p style="%1 font-size:10pt;">Language one, native<br/>Language two, fluent<br/>
+Language three, basic</p>
+</td></tr></table>)")
+            .arg(base, accent, bar(QStringLiteral("Skill one"), 90),
+                 bar(QStringLiteral("Skill two"), 75),
+                 bar(QStringLiteral("Skill three"), 60),
+                 bar(QStringLiteral("Skill four"), 45));
     }
     if (name == "Cover Letter")
         return p("Your Name<br/>Your Address<br/>you@email.com") + p(QDate::currentDate().toString("MMMM d, yyyy"))
@@ -2444,21 +2476,45 @@ static QString writerTemplateHtml(const QString& name) {
              + p("Final paragraph: state the action you request and by when, and how you can be reached.")
              + p("Yours faithfully,<br/><br/><b>Your Name</b><br/>Your Title");
     if (name == "Project Report")
-        return h1("Project Name") + p("<i>Prepared by Your Name · " + QDate::currentDate().toString("MMMM d, yyyy") + "</i>") + hr()
-             + QString("<h2 style=\"%1 color:#1F3864;\">Project Overview</h2>").arg(base)
-             + p("Two or three sentences: what the project is, its current status, and the headline result.")
-             + QString("<h2 style=\"%1 color:#1F3864;\">Objectives</h2>").arg(base)
-             + QString("<ul><li style=\"%1\">Objective one, with the measure that says it is met</li>"
-                       "<li style=\"%1\">Objective two</li>"
-                       "<li style=\"%1\">Objective three</li></ul>").arg(base)
-             + QString("<h2 style=\"%1 color:#1F3864;\">Timeline</h2>").arg(base)
-             + QString("<ul><li style=\"%1\">Phase 1, Discovery: dates, owner</li>"
-                       "<li style=\"%1\">Phase 2, Build: dates, owner</li>"
-                       "<li style=\"%1\">Phase 3, Launch: dates, owner</li></ul>").arg(base)
-             + QString("<h2 style=\"%1 color:#1F3864;\">Risks and Issues</h2>").arg(base)
-             + p("Top risks with owner and mitigation.")
-             + QString("<h2 style=\"%1 color:#1F3864;\">Summary</h2>").arg(base)
-             + p("Overall assessment and recommendation.");
+        // A title band, a real timeline table and a status column, as the card
+        // shows, rather than a run of headings.
+        return QString(R"(<table width="100%" cellspacing="0" cellpadding="10">
+<tr><td bgcolor="#1F3864">
+<h1 style="%1 color:#FFFFFF; margin:0;">Project Name</h1>
+<p style="%1 color:#C3CEE4; margin:4px 0 0 0; font-size:10pt;">Prepared by Your Name &nbsp;·&nbsp; %2</p>
+</td></tr></table>
+<h2 style="%1 color:#1F3864;">Project Overview</h2>
+<p style="%1">Two or three sentences: what the project is, its current status,
+and the headline result.</p>
+<h2 style="%1 color:#1F3864;">Objectives</h2>
+<ul><li style="%1">Objective one, with the measure that says it is met</li>
+<li style="%1">Objective two</li><li style="%1">Objective three</li></ul>
+<h2 style="%1 color:#1F3864;">Timeline</h2>
+<table width="100%" cellspacing="0" cellpadding="6" border="1"
+       style="border-collapse:collapse; border-color:#D5DAE3;">
+<tr bgcolor="#1F3864">
+<td style="%1 color:#FFFFFF;"><b>Phase</b></td>
+<td style="%1 color:#FFFFFF;"><b>Dates</b></td>
+<td style="%1 color:#FFFFFF;"><b>Owner</b></td>
+<td style="%1 color:#FFFFFF;"><b>Status</b></td></tr>
+<tr><td style="%1">1. Discovery</td><td style="%1">20XX-XX to 20XX-XX</td>
+<td style="%1">Name</td><td style="%1 color:#147B45;"><b>Complete</b></td></tr>
+<tr bgcolor="#F5F7FB"><td style="%1">2. Build</td><td style="%1">20XX-XX to 20XX-XX</td>
+<td style="%1">Name</td><td style="%1 color:#B7791F;"><b>In progress</b></td></tr>
+<tr><td style="%1">3. Launch</td><td style="%1">20XX-XX to 20XX-XX</td>
+<td style="%1">Name</td><td style="%1 color:#6B7280;"><b>Not started</b></td></tr>
+</table>
+<h2 style="%1 color:#1F3864;">Risks and Issues</h2>
+<table width="100%" cellspacing="0" cellpadding="6" border="1"
+       style="border-collapse:collapse; border-color:#D5DAE3;">
+<tr bgcolor="#F5F7FB"><td style="%1"><b>Risk</b></td><td style="%1"><b>Owner</b></td>
+<td style="%1"><b>Mitigation</b></td></tr>
+<tr><td style="%1">What could go wrong</td><td style="%1">Name</td>
+<td style="%1">What is being done about it</td></tr>
+</table>
+<h2 style="%1 color:#1F3864;">Summary</h2>
+<p style="%1">Overall assessment and recommendation.</p>)")
+            .arg(base, QDate::currentDate().toString("MMMM d, yyyy"));
     if (name == "Meeting Notes")
         return h1("Meeting Notes") + p(QString("<b>Date:</b> %1 &nbsp;&nbsp; <b>Time:</b> ____ &nbsp;&nbsp; <b>Location:</b> ____")
                     .arg(QDate::currentDate().toString("MMMM d, yyyy")))
@@ -2512,18 +2568,118 @@ static QString writerTemplateHtml(const QString& name) {
 static void applyCalcTemplate(NativeOffice::CalcModule* calc, const QString& name) {
     if (!calc || !calc->model()) return;
     QList<QStringList> rows;
-    if (name == "Monthly Budget")
-        rows = { {"Monthly Budget"}, {},
-                 {"Category","Budget","Actual","Difference"},
-                 {"Income","5000","5200","=C4-B4"},
-                 {"Housing","1500","1450","=B5-C5"},
-                 {"Food","800","750","=B6-C6"},
-                 {"Transportation","400","380","=B7-C7"},
-                 {"Utilities","300","320","=B8-C8"},
-                 {"Entertainment","200","180","=B9-C9"},
-                 {"Savings","800","900","=C10-B10"}, {},
-                 {"Total","=SUM(B5:B10)","=SUM(C5:C10)","=B12-C12"} };
-    else if (name == "Invoice")
+    // ── Monthly Budget ───────────────────────────────────────────────────────
+    // Built cell by cell rather than from the plain rows table below, because
+    // the card on the Home screen shows a designed sheet: a green header band,
+    // money formatting, a pie of where it goes and a bar chart beside it. What
+    // the card promises is what has to open.
+    if (name == "Monthly Budget") {
+        using NativeOffice::Cell;
+        const QColor headerBg(0x14, 0x7B, 0x45);
+        const QColor bandBg(0xE8, 0xF6, 0xEE);
+        const QColor titleFg(0x0B, 0x4A, 0x2A);
+        const QColor good(0x14, 0x7B, 0x45);
+        const QColor over(0xC0, 0x39, 0x2B);
+
+        std::vector<std::pair<QPoint, Cell>> edits;
+        auto put = [&edits](int c, int r, const QString& text,
+                            const std::function<void(NativeOffice::CellFormat&)>& style = {}) {
+            Cell cell;
+            cell.content = text;
+            if (style) style(cell.format);
+            edits.emplace_back(QPoint(c, r), cell);
+        };
+
+        put(0, 0, "Monthly Budget", [&](NativeOffice::CellFormat& f) {
+            f.bold = true; f.fontSize = 18; f.textColor = titleFg;
+        });
+        put(0, 1, "Where the money goes this month", [&](NativeOffice::CellFormat& f) {
+            f.italic = true; f.textColor = QColor(0x6B, 0x72, 0x80);
+        });
+
+        const char* heads[] = { "Category", "Budget", "Actual", "Difference" };
+        for (int c = 0; c < 4; ++c)
+            put(c, 2, QString::fromLatin1(heads[c]), [&](NativeOffice::CellFormat& f) {
+                f.bold = true; f.textColor = QColor(Qt::white); f.bgColor = headerBg;
+                f.hAlign = c == 0 ? Qt::AlignLeft : Qt::AlignRight;
+            });
+
+        struct Row { const char* label; int budget; int actual; bool moreIsBetter; };
+        const Row rows[] = {
+            { "Income",         5000, 5200, true  },
+            { "Housing",        1500, 1450, false },
+            { "Food",            800,  750, false },
+            { "Transportation",  400,  380, false },
+            { "Utilities",       300,  320, false },
+            { "Entertainment",   200,  180, false },
+            { "Savings",         800,  900, true  },
+        };
+        int r = 3;
+        for (const Row& row : rows) {
+            const int line = r + 1;                 // 1-based for formulas
+            const bool banded = (r % 2) == 1;
+            put(0, r, QString::fromLatin1(row.label), [&](NativeOffice::CellFormat& f) {
+                if (banded) f.bgColor = bandBg;
+            });
+            put(1, r, QString::number(row.budget), [&](NativeOffice::CellFormat& f) {
+                f.numberFormat = QStringLiteral("$#,##0");
+                if (banded) f.bgColor = bandBg;
+            });
+            put(2, r, QString::number(row.actual), [&](NativeOffice::CellFormat& f) {
+                f.numberFormat = QStringLiteral("$#,##0");
+                if (banded) f.bgColor = bandBg;
+            });
+            // Under budget is good for spending, over target is good for income
+            // and savings, so the sign is taken the way each row is read, and
+            // the one row that went the wrong way is the one that shows red.
+            const int delta = row.moreIsBetter ? row.actual - row.budget
+                                               : row.budget - row.actual;
+            put(3, r, row.moreIsBetter
+                          ? QStringLiteral("=C%1-B%1").arg(line)
+                          : QStringLiteral("=B%1-C%1").arg(line),
+                [&](NativeOffice::CellFormat& f) {
+                    f.numberFormat = QStringLiteral("$#,##0");
+                    f.bold = true;
+                    f.textColor = delta < 0 ? over : good;
+                    if (banded) f.bgColor = bandBg;
+                });
+            ++r;
+        }
+
+        ++r;                                        // blank spacer row
+        put(0, r, "Total out", [&](NativeOffice::CellFormat& f) {
+            f.bold = true; f.textColor = QColor(Qt::white); f.bgColor = headerBg;
+        });
+        for (int c = 1; c <= 3; ++c) {
+            // Built by concatenation: "%1" followed by a digit would be read as
+            // argument 14, not argument 1 then a 4.
+            const QString col = QString(QChar('A' + c));
+            put(c, r, QStringLiteral("=SUM(") + col + QStringLiteral("5:")
+                      + col + QStringLiteral("10)"),
+                [&](NativeOffice::CellFormat& f) {
+                    f.bold = true; f.textColor = QColor(Qt::white); f.bgColor = headerBg;
+                    f.numberFormat = QStringLiteral("$#,##0");
+                    f.hAlign = Qt::AlignRight;
+                });
+        }
+
+        calc->setTemplateColumnWidths({ {0, 150}, {1, 90}, {2, 90}, {3, 100} });
+        calc->model()->applyCellEdits(edits, QStringLiteral("Apply Template"));
+        // The two charts the card shows: spending by category, and budget
+        // against actual side by side. Both read the cells above, so editing a
+        // number redraws them.
+        // Both ranges start on the header row, so the chart names its series
+        // from it rather than treating the first category as a heading.
+        calc->addChartAt(NativeOffice::ChartType::Pie,
+                         QRect(0, 2, 2, 8), QRect(520, 18, 430, 300));
+        calc->addChartAt(NativeOffice::ChartType::Column,
+                         QRect(0, 2, 3, 8), QRect(520, 336, 430, 300));
+
+        calc->markClean();
+        return;
+    }
+
+    if (name == "Invoice")
         rows = { {"INVOICE"}, {"Invoice #","0001","","Date",""}, {},
                  {"From:","Your Company"}, {"Bill To:","Client Name"}, {},
                  {"Description","Qty","Unit Price","Amount"},
@@ -2698,7 +2854,7 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("1.7.2");
+    app.setApplicationVersion("1.7.3");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
