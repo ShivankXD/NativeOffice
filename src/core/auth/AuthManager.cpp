@@ -149,11 +149,25 @@ void AuthManager::applyMe(const QByteArray& body) {
         + st.value("account/firstName").toString()
         + st.value("account/occupation").toString();
 
-    st.setValue("account/email",      user.value("email").toString());
-    st.setValue("account/name",       user.value("name").toString());
-    st.setValue("account/firstName",  user.value("first_name").toString());
-    st.setValue("account/lastName",   user.value("last_name").toString());
-    st.setValue("account/occupation", user.value("occupation").toString());
+    // Only overwrite a field the response actually carries. A reply that
+    // parses but omits the user block used to blank the cached identity, and
+    // an empty email moves the AI consent record onto its anonymous slot, so
+    // an account that had already accepted the notice was asked again. It also
+    // emptied the name the greeting and the profile page read.
+    auto keep = [&st, &user](const char* jsonKey, const char* settingsKey) {
+        const QJsonValue v = user.value(QLatin1String(jsonKey));
+        if (v.isUndefined() || v.isNull()) return;
+        const QString text = v.toString();
+        if (text.isEmpty() && !st.value(settingsKey).toString().isEmpty()) return;
+        st.setValue(settingsKey, text);
+    };
+    keep("email",      "account/email");
+    keep("name",       "account/name");
+    keep("first_name", "account/firstName");
+    keep("last_name",  "account/lastName");
+    // Occupation is legitimately clearable, so it is written as it arrives.
+    if (user.contains(QLatin1String("occupation")))
+        st.setValue("account/occupation", user.value("occupation").toString());
     st.setValue("account/createdAt",
                 static_cast<qint64>(user.value("created_at").toDouble(0)));
 
