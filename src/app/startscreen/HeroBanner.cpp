@@ -29,24 +29,27 @@ constexpr int kRadius = 16;
 // colour; right of it the picture is at full strength.
 constexpr qreal kScrimEnd = 0.62;
 
+// Rings of the halo painted under the Create New button.
+constexpr int kGlowRings = 7;
+
 } // namespace
 
 HeroBanner::HeroBanner(QWidget* parent) : QFrame(parent) {
     setObjectName("heroBanner");
     setAttribute(Qt::WA_StyledBackground, false);   // painted by paintEvent
-    setMinimumHeight(172);
-    setMaximumHeight(172);
+    setMinimumHeight(158);
+    setMaximumHeight(158);
 
     auto* v = new QVBoxLayout(this);
-    v->setContentsMargins(32, 22, 32, 22);
+    v->setContentsMargins(30, 18, 30, 18);
     v->setSpacing(0);
 
     m_greeting = new QLabel(this);
     m_greeting->setTextFormat(Qt::RichText);
-    m_greeting->setStyleSheet("background:transparent;font:700 30px 'Segoe UI';");
+    m_greeting->setStyleSheet("background:transparent;font:700 27px 'Segoe UI';");
     v->addWidget(m_greeting);
 
-    v->addSpacing(7);
+    v->addSpacing(5);
     m_subtitle = heading(QStringLiteral("Where ideas become documents."), 14,
                          "#AEB6C6", false, this);
     v->addWidget(m_subtitle);
@@ -66,7 +69,7 @@ HeroBanner::HeroBanner(QWidget* parent) : QFrame(parent) {
     create->setCursor(Qt::PointingHandCursor);
     // Stated explicitly: a QPushButton takes its size from its text and icon,
     // not from a layout placed inside it.
-    create->setFixedSize(192, 44);
+    create->setFixedSize(184, 42);
     {
         // The plus, the label and the chevron are laid out inside the button so
         // the chevron can sit hard right behind a hairline divider, as in the
@@ -92,7 +95,7 @@ HeroBanner::HeroBanner(QWidget* parent) : QFrame(parent) {
     auto* open = new QPushButton(row);
     open->setObjectName("heroOpen");
     open->setCursor(Qt::PointingHandCursor);
-    open->setFixedSize(158, 44);
+    open->setFixedSize(152, 42);
     {
         auto* bl = new QHBoxLayout(open);
         bl->setContentsMargins(18, 0, 18, 0);
@@ -265,6 +268,22 @@ void HeroBanner::paintEvent(QPaintEvent*) {
     v.setAlphaF(0.10);
     tint.setColorAt(1.0, v);
     p.fillRect(box, tint);
+
+    // A halo under Create New. Painted here, behind the button, rather than
+    // with a QGraphicsDropShadowEffect, which would also blur the label inside
+    // it and cost a full-widget render pass on every repaint.
+    if (m_createBtn) {
+        const QRectF b(m_createBtn->mapTo(this, QPoint(0, 0)), QSizeF(m_createBtn->size()));
+        p.setPen(Qt::NoPen);
+        for (int i = kGlowRings; i >= 1; --i) {
+            const qreal spread = i * 3.0;
+            QColor g(Home::kAccent);
+            g.setAlphaF(0.085 * (1.0 - qreal(i - 1) / kGlowRings));
+            p.setBrush(g);
+            p.drawRoundedRect(b.adjusted(-spread, -spread, spread, spread),
+                              12 + spread, 12 + spread);
+        }
+    }
 
     p.setClipping(false);
     p.setPen(QPen(QColor(Home::kBorder), 1));

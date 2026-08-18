@@ -124,7 +124,12 @@ private:
     QLineEdit*             m_search      { nullptr };
     QPointer<SearchPopup>  m_searchPopup;
 
-    HeroBanner*  m_hero { nullptr };
+    HeroBanner*  m_hero        { nullptr };
+    // Tracked so a narrow page can drop them rather than be clipped.
+    QWidget*     m_rightColumn { nullptr };
+    QLabel*      m_quote        { nullptr };
+    QWidget*     m_trustLocal   { nullptr };
+    QWidget*     m_trustPrivate { nullptr };
 
     // Recent panel, kept so a star / delete can refresh it in place.
     QHBoxLayout* m_recentRowLayout { nullptr };

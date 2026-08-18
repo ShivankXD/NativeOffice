@@ -21,6 +21,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QResizeEvent>
 #include <QSvgRenderer>
 #include <QString>
 
@@ -108,6 +109,39 @@ inline QLabel* label600(const QString& text, int px, const QString& color, QWidg
                          .arg(color).arg(px));
     return l;
 }
+
+// A label that shrinks. A plain QLabel reports the full width of its text as
+// its minimum, so one long file name or a quotation was enough to stop the whole
+// page from narrowing, and the Stasis sidebar ended up covering the home screen
+// instead of squeezing it.
+class ElidedLabel : public QLabel {
+public:
+    explicit ElidedLabel(const QString& text, QWidget* parent = nullptr)
+        : QLabel(parent), m_full(text) {
+        setMinimumWidth(24);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        setText(text);
+    }
+
+    void setFullText(const QString& text) { m_full = text; relayoutText(); }
+    [[nodiscard]] QString fullText() const { return m_full; }
+
+protected:
+    void resizeEvent(QResizeEvent* e) override {
+        QLabel::resizeEvent(e);
+        relayoutText();
+    }
+
+private:
+    void relayoutText() {
+        const QString shown = fontMetrics().elidedText(m_full, Qt::ElideRight,
+                                                       qMax(0, width()));
+        if (shown != text()) QLabel::setText(shown);
+        setToolTip(shown == m_full ? QString() : m_full);
+    }
+
+    QString m_full;
+};
 
 // ── Badges ───────────────────────────────────────────────────────────────────
 // A rounded "app tile": a soft vertical gradient of the module colour with a

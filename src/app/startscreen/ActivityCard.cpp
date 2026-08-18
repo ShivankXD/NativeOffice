@@ -40,7 +40,7 @@ QString formatSeconds(qint64 s) {
 ActivitySpark::ActivitySpark(QWidget* parent) : QWidget(parent) {
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
-    setMinimumHeight(96);
+    setMinimumHeight(58);
     setAttribute(Qt::WA_TranslucentBackground);
     reload();
 }
@@ -49,7 +49,7 @@ void ActivitySpark::setRange(ActivityLog::Range r) { m_range = r; reload(); }
 
 void ActivitySpark::setCompact(bool on) {
     m_compact = on;
-    setMinimumHeight(on ? 96 : 260);
+    setMinimumHeight(on ? 58 : 260);
     update();
 }
 
@@ -229,8 +229,8 @@ void ActivitySpark::leaveEvent(QEvent*) {
 ActivityCard::ActivityCard(QWidget* parent) : QFrame(parent) {
     setObjectName("sidePanel");
     auto* v = new QVBoxLayout(this);
-    v->setContentsMargins(18, 16, 18, 14);
-    v->setSpacing(10);
+    v->setContentsMargins(16, 12, 16, 10);
+    v->setSpacing(7);
 
     // Header: title + range pill.
     auto* head = new QHBoxLayout();
@@ -268,7 +268,7 @@ ActivityCard::ActivityCard(QWidget* parent) : QFrame(parent) {
                    QLabel** out) {
         auto* r = new QWidget(this);
         auto* h = new QHBoxLayout(r);
-        h->setContentsMargins(2, 3, 2, 3);
+        h->setContentsMargins(2, 1, 2, 1);
         h->setSpacing(10);
         h->addWidget(Lucide::label(icon, Home::kMuted, 15, r));
         h->addWidget(heading(text, 12, Home::kTextBody, false, r));
