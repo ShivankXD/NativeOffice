@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// HeroBanner.h — the wide greeting band at the top of the home dashboard.
+// HeroBanner.h: the wide greeting band at the top of the home dashboard.
 //
 //  ┌──────────────────────────────────────────────────────────────────────┐
 //  │  Good evening, Shivank 👋                     ░░▒▒▓▓ photo ▓▓▒▒░░    │
@@ -65,7 +65,9 @@ private:
 
     QLabel*      m_greeting  { nullptr };
     QLabel*      m_subtitle  { nullptr };
-    QPushButton* m_createBtn { nullptr };
+    // The neon pill, which is artwork with a moving highlight rather
+    // than a styled QPushButton.
+    QWidget*     m_createBtn { nullptr };
     QPixmap m_art;                     // full-size source for the current slot
     QPixmap m_scaled;                  // cover-cropped cache for the current size
     Slot    m_slot { Slot::Morning };

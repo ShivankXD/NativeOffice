@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// HomeKit.h — the small shared vocabulary of the home dashboard: its colour
+// HomeKit.h: the small shared vocabulary of the home dashboard: its colour
 // palette, the click-anywhere frame, text/badge/SVG helpers, and the
 // extension → module mapping that every file row (search results, recent
 // files, quick access) paints itself from.
@@ -102,7 +102,7 @@ inline QLabel* heading(const QString& text, int px, const QString& color,
     return l;
 }
 
-// Semibold variant — the dashboard leans on 600 far more than on 700.
+// Semibold variant, the dashboard leans on 600 far more than on 700.
 inline QLabel* label600(const QString& text, int px, const QString& color, QWidget* p = nullptr) {
     auto* l = new QLabel(text, p);
     l->setStyleSheet(QString("color:%1;font:600 %2px 'Segoe UI';background:transparent;")
@@ -223,40 +223,68 @@ inline QLabel* svgArt(const char* svg, int h, QWidget* parent) {
 // files, quick access) paints the same badge for the same extension, and the
 // same "which module opens this" wording.
 struct FileKind {
-    QString letter;    // badge glyph
+    QString letter;    // badge glyph, for places with no room for artwork
     QString color;     // badge colour
     QString module;    // "Writer" | "Sheets" | "Slides" | "PDF" | "Markdown"
+    QString art;       // cut-out of the format render, or empty
 };
+
+// A file badge: the cut-out render where there is one, the lettered tile
+// otherwise. Every list of files on the home screen uses this, so a .docx
+// looks the same in search results as it does under Recent Files.
+inline QLabel* fileBadge(const FileKind& kind, int size, QWidget* parent) {
+    if (kind.art.isEmpty()) return badge(kind.letter, kind.color, size, parent);
+    const qreal dpr = parent ? parent->devicePixelRatio() : 1.0;
+    QPixmap pm(kind.art);
+    pm = pm.scaled(int(size * dpr), int(size * dpr),
+                   Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    pm.setDevicePixelRatio(dpr);
+    auto* l = new QLabel(parent);
+    l->setPixmap(pm);
+    l->setFixedSize(size, size);
+    l->setAlignment(Qt::AlignCenter);
+    l->setStyleSheet("background:transparent;");
+    l->setAttribute(Qt::WA_TransparentForMouseEvents);
+    return l;
+}
 
 inline FileKind fileKindForSuffix(const QString& suffixIn) {
     const QString s = suffixIn.toLower();
     if (s == "xlsx" || s == "xls" || s == "xlsm" || s == "ods"
         || s == "csv" || s == "tsv")
-        return { QStringLiteral("S"), Home::kCalc,     QStringLiteral("Sheets") };
+        return { QStringLiteral("S"), Home::kCalc,     QStringLiteral("Sheets"),
+                 QStringLiteral(":/assets/icon-spreadsheet.png") };
     if (s == "pptx" || s == "ppt" || s == "odp")
-        return { QStringLiteral("P"), Home::kImpress,  QStringLiteral("Slides") };
+        return { QStringLiteral("P"), Home::kImpress,  QStringLiteral("Slides"),
+                 QStringLiteral(":/assets/icon-presentation.png") };
     if (s == "pdf")
-        return { QStringLiteral("A"), Home::kPdf,      QStringLiteral("PDF") };
+        return { QStringLiteral("A"), Home::kPdf,      QStringLiteral("PDF"),
+                 QStringLiteral(":/assets/icon-pdf.png") };
     if (s == "md" || s == "markdown" || s == "mdown")
-        return { QStringLiteral("M"), Home::kMarkdown, QStringLiteral("Markdown") };
+        return { QStringLiteral("M"), Home::kMarkdown, QStringLiteral("Markdown"), {} };
     if (s == "png" || s == "jpg" || s == "jpeg" || s == "webp" || s == "bmp"
         || s == "gif")
-        return { QStringLiteral("I"), Home::kImageKind, QStringLiteral("Image") };
-    return { QStringLiteral("W"), Home::kWriter, QStringLiteral("Writer") };
+        return { QStringLiteral("I"), Home::kImageKind, QStringLiteral("Image"), {} };
+    return { QStringLiteral("W"), Home::kWriter, QStringLiteral("Writer"),
+             QStringLiteral(":/assets/icon-document.png") };
 }
 
 // The same mapping keyed by the module name RecentFilesManager persists.
 inline FileKind fileKindForModule(const QString& module) {
     if (module == QLatin1String("Calc"))
-        return { QStringLiteral("S"), Home::kCalc,    QStringLiteral("Sheets") };
+        return { QStringLiteral("S"), Home::kCalc,    QStringLiteral("Sheets"),
+                 QStringLiteral(":/assets/icon-spreadsheet.png") };
     if (module == QLatin1String("Impress"))
-        return { QStringLiteral("P"), Home::kImpress, QStringLiteral("Slides") };
+        return { QStringLiteral("P"), Home::kImpress, QStringLiteral("Slides"),
+                 QStringLiteral(":/assets/icon-presentation.png") };
     // The recent-files store has written both spellings over time.
     if (module.compare(QLatin1String("pdf"), Qt::CaseInsensitive) == 0)
-        return { QStringLiteral("A"), Home::kPdf,     QStringLiteral("PDF") };
+        return { QStringLiteral("A"), Home::kPdf,     QStringLiteral("PDF"),
+                 QStringLiteral(":/assets/icon-pdf.png") };
     if (module == QLatin1String("Markdown"))
-        return { QStringLiteral("M"), Home::kMarkdown, QStringLiteral("Markdown") };
-    return { QStringLiteral("W"), Home::kWriter, QStringLiteral("Writer") };
+        return { QStringLiteral("M"), Home::kMarkdown, QStringLiteral("Markdown"), {} };
+    return { QStringLiteral("W"), Home::kWriter, QStringLiteral("Writer"),
+             QStringLiteral(":/assets/icon-document.png") };
 }
 
 // Every extension the Open File dialog and the global search accept.

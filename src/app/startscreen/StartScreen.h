@@ -22,12 +22,12 @@
 // TemplateArt (the gallery and its painted thumbnails).
 //
 // Signals the app wires to AppController / the shell:
-//   • newDocumentRequested(type) – blank doc in Writer/Calc/Impress/PDF
-//   • fileOpenRequested(path)    – open an existing file
-//   • templateChosen(type, name) – a named template from the gallery
-//   • toolRequested(tool)        – one of the Home tools
-//   • aiRequested()              – open the Stasis sidebar
-//   • settingsRequested()        – open settings
+//   • newDocumentRequested(type), blank doc in Writer/Calc/Impress/PDF
+//   • fileOpenRequested(path)   , open an existing file
+//   • templateChosen(type, name), a named template from the gallery
+//   • toolRequested(tool)       , one of the Home tools
+//   • aiRequested()             , open the Stasis sidebar
+//   • settingsRequested()       , open settings
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "core/application/AppController.h"
@@ -127,7 +127,6 @@ private:
     HeroBanner*  m_hero        { nullptr };
     // Tracked so a narrow page can drop them rather than be clipped.
     QWidget*     m_rightColumn { nullptr };
-    QLabel*      m_quote        { nullptr };
     QWidget*     m_trustLocal   { nullptr };
     QWidget*     m_trustPrivate { nullptr };
 

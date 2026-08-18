@@ -206,6 +206,77 @@ private:
     bool    m_hover { false };
 };
 
+// A card that is nothing but a picture: rounded, cover-cropped, and lit at the
+// edge under the pointer. The template cards and the assistant card are both
+// finished artwork, so there is no text to lay over them.
+class ArtCard : public QFrame {
+public:
+    ArtCard(const QString& art, int radius, QWidget* parent)
+        : QFrame(parent), m_art(art), m_radius(radius) {
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover, true);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        setMinimumSize(60, 40);
+    }
+
+    std::function<void()> onClick;
+
+protected:
+    void enterEvent(QEnterEvent*) override { m_hover = true;  update(); }
+    void leaveEvent(QEvent*) override      { m_hover = false; update(); }
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton && onClick) { onClick(); e->accept(); return; }
+        QFrame::mousePressEvent(e);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+
+        const QRectF box(0, 0, width(), height());
+        QPainterPath clip;
+        clip.addRoundedRect(box, m_radius, m_radius);
+        p.setClipPath(clip);
+        p.fillRect(box, QColor(Home::kPanelSoft));
+
+        const QSize want = size() * devicePixelRatio();
+        if (m_scaled.isNull() || m_scaled.size() != want) {
+            const QPixmap src(m_art);
+            if (!src.isNull()) {
+                // Fit, not fill: the artwork carries its own title, and filling
+                // cropped the words off the side of it.
+                m_scaled = src.scaled(want, Qt::KeepAspectRatio,
+                                      Qt::SmoothTransformation);
+                m_scaled.setDevicePixelRatio(devicePixelRatio());
+            }
+        }
+        if (!m_scaled.isNull()) {
+            const QSizeF drawn = m_scaled.deviceIndependentSize();
+            p.drawPixmap(QPointF((width() - drawn.width()) / 2.0,
+                                 (height() - drawn.height()) / 2.0), m_scaled);
+        }
+
+        if (m_hover) {
+            QColor wash(Home::kAccent);
+            wash.setAlphaF(0.12);
+            p.fillRect(box, wash);
+        }
+
+        p.setClipping(false);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(m_hover ? QColor(Home::kAccentSoft) : QColor(Home::kBorder),
+                      m_hover ? 1.6 : 1));
+        p.drawRoundedRect(box.adjusted(0.8, 0.8, -0.8, -0.8), m_radius, m_radius);
+    }
+
+private:
+    QString m_art;
+    QPixmap m_scaled;
+    int     m_radius { 12 };
+    bool    m_hover  { false };
+};
+
 // ── Quick tips ───────────────────────────────────────────────────────────────
 struct Tip { QString body; };
 
@@ -293,7 +364,7 @@ public:
         v->addLayout(dots);
 
         m_timer = new QTimer(this);
-        m_timer->setInterval(10'000);
+        m_timer->setInterval(5'000);
         connect(m_timer, &QTimer::timeout, this,
                 [this] { showTip((m_index + 1) % m_tips.size()); });
         m_timer->start();
@@ -384,18 +455,6 @@ protected:
         p.drawEllipse(QPointF(c.x() - r * 1.62, c.y() + r * 0.72), 1.7, 1.7);
         p.drawEllipse(QPointF(c.x() + r * 1.15, c.y() + r * 1.32), 1.4, 1.4);
     }
-};
-
-// A quote for the footer strip; changes with the day rather than every repaint.
-struct Quote { const char* text; const char* who; };
-constexpr Quote kQuotes[] = {
-    { "Simplicity is the ultimate sophistication.", "Leonardo da Vinci" },
-    { "The best way out is always through.",        "Robert Frost" },
-    { "Well begun is half done.",                   "Aristotle" },
-    { "Make it work, make it right, make it fast.", "Kent Beck" },
-    { "Order and simplification are the first steps toward mastery.", "Thomas Mann" },
-    { "What we do now echoes in eternity.",         "Marcus Aurelius" },
-    { "Clutter is the enemy of clarity.",           "Edward Tufte" },
 };
 
 } // namespace
@@ -579,6 +638,20 @@ void StartScreen::buildUi() {
                     showNotificationsPopup(m_search);
                 } else if (show == QLatin1String("ai")) {
                     emit aiRequested();
+                } else if (show.startsWith(QLatin1String("tpl:"))) {
+                    const QString which = show.mid(4);
+                    if (which == QLatin1String("resume"))
+                        emit templateChosen(DocumentType::Writer,
+                                            QStringLiteral("Professional Resume"));
+                    else if (which == QLatin1String("budget"))
+                        emit templateChosen(DocumentType::Calc,
+                                            QStringLiteral("Monthly Budget"));
+                    else if (which == QLatin1String("pitch"))
+                        emit templateChosen(DocumentType::Impress,
+                                            QStringLiteral("Pitch Deck"));
+                    else
+                        emit templateChosen(DocumentType::Writer,
+                                            QStringLiteral("Project Report"));
                 } else if (show == QLatin1String("createmenu")) {
                     m_hero->openCreateMenu();
                 } else if (show == QLatin1String("search")) {
@@ -621,6 +694,12 @@ void StartScreen::buildUi() {
                       scroll->viewport()->height(), scroll->widget()->height(),
                       scroll->widget()->height() - scroll->viewport()->height());
             }
+            if (m_searchPopup) {
+                // A Qt::Popup takes a keyboard grab, which is what limited the
+                // search box to one character. It must be an ordinary child.
+                qInfo("[home] search list isWindow=%d, box has focus=%d",
+                      int(m_searchPopup->isWindow()), int(m_search->hasFocus()));
+            }
         });
     }
 }
@@ -636,9 +715,7 @@ void StartScreen::resizeEvent(QResizeEvent* e) {
     constexpr int kDropRightColumn = 1280;
     if (m_rightColumn)  m_rightColumn->setVisible(width() >= kDropRightColumn);
     // The footer sheds its decoration before anything gets clipped.
-    if (m_trustPrivate) m_trustPrivate->setVisible(width() >= 1240);
-    if (m_trustLocal)   m_trustLocal->setVisible(width() >= 1040);
-    if (m_quote)        m_quote->setVisible(width() >= 1300);
+    if (m_trustPrivate) m_trustPrivate->setVisible(width() >= 980);
 }
 
 bool StartScreen::eventFilter(QObject* watched, QEvent* event) {
@@ -648,8 +725,11 @@ bool StartScreen::eventFilter(QObject* watched, QEvent* event) {
         if (key == Qt::Key_Down || key == Qt::Key_Up || key == Qt::Key_Escape)
             return m_searchPopup->handleKey(key);
     }
-    if (watched == m_search && event->type() == QEvent::FocusIn && m_searchPopup) {
-        FileIndex::instance().ensureStarted();
+    if (watched == m_search && m_searchPopup) {
+        if (event->type() == QEvent::FocusIn) FileIndex::instance().ensureStarted();
+        // Now that the list is an ordinary child widget it does not close
+        // itself, so it follows the search box's focus.
+        if (event->type() == QEvent::FocusOut) m_searchPopup->hide();
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -996,83 +1076,17 @@ QWidget* StartScreen::buildTopBar() {
 }
 
 // ── Bottom strip ─────────────────────────────────────────────────────────────
+// Just the two promises the app makes about your files. The quotation and the
+// quick-access row that used to sit here were decoration, and decoration is
+// what a dashboard can least afford at the bottom of the page.
 QWidget* StartScreen::buildBottomBar() {
     auto* bar = new QFrame(this);
     bar->setObjectName("bottomBar");
-    bar->setFixedHeight(54);
+    bar->setFixedHeight(42);
     auto* h = new QHBoxLayout(bar);
-    h->setContentsMargins(26, 0, 26, 8);
-    h->setSpacing(18);
-
-    // Quote of the day.
-    const Quote& q = kQuotes[QDate::currentDate().dayOfYear()
-                             % int(sizeof(kQuotes) / sizeof(kQuotes[0]))];
-    h->addWidget(Lucide::label(Lucide::kQuote, Home::kFaint, 15, bar), 0, Qt::AlignVCenter);
-    auto* quote = new QLabel(bar);
-    m_quote = quote;
-    quote->setTextFormat(Qt::RichText);
-    quote->setText(QStringLiteral("<span style='color:%1;'>&ldquo;%2&rdquo;</span>"
-                                  "<span style='color:%3;'>&nbsp;&nbsp;%4</span>")
-                       .arg(Home::kTextBody, QString::fromUtf8(q.text),
-                            Home::kFaint, QString::fromUtf8(q.who)));
-    quote->setStyleSheet("background:transparent;font:12px 'Segoe UI';");
-    h->addWidget(quote, 0, Qt::AlignVCenter);
+    h->setContentsMargins(26, 0, 26, 4);
+    h->setSpacing(22);
     h->addStretch();
-
-    // Quick access.
-    h->addWidget(label600(tr("Quick Access"), 12, Home::kTextBody, bar), 0, Qt::AlignVCenter);
-
-    struct Quick { QString letter; const char* glyph; QString color; int action; QString tip; };
-    const Quick quicks[] = {
-        { QStringLiteral("W"), nullptr, Home::kWriter,  1, tr("New document") },
-        { QStringLiteral("S"), nullptr, Home::kCalc,    2, tr("New spreadsheet") },
-        { QStringLiteral("P"), nullptr, Home::kImpress, 3, tr("New presentation") },
-        { QString(), Lucide::kFileText, Home::kPdf,     4, tr("Open the PDF workspace") },
-        { QString(), Lucide::kFolderOpen, Home::kMarkdown, 0, tr("Open a file") },
-    };
-    for (const Quick& qk : quicks) {
-        auto* b = new ClickableFrame(bar);
-        b->setFixedSize(34, 34);
-        b->setCursor(Qt::PointingHandCursor);
-        b->setToolTip(qk.tip);
-        auto* bl = new QHBoxLayout(b);
-        bl->setContentsMargins(0, 0, 0, 0);
-        bl->addWidget(qk.glyph ? iconTile(qk.glyph, qk.color, 34, b)
-                               : badge(qk.letter, qk.color, 34, b));
-        const int action = qk.action;
-        b->onClick = [this, action] {
-            if (launchLocked()) return;
-            switch (action) {
-            case 1: emit newDocumentRequested(DocumentType::Writer);  break;
-            case 2: emit newDocumentRequested(DocumentType::Calc);    break;
-            case 3: emit newDocumentRequested(DocumentType::Impress); break;
-            case 4: emit newDocumentRequested(DocumentType::Pdf);     break;
-            default: openFileDialog(); break;
-            }
-        };
-        h->addWidget(b, 0, Qt::AlignVCenter);
-    }
-
-    auto* plus = new ClickableFrame(bar);
-    plus->setObjectName("quickPlus");
-    plus->setFixedSize(34, 34);
-    plus->setCursor(Qt::PointingHandCursor);
-    plus->setToolTip(tr("Browse templates"));
-    {
-        auto* pl = new QHBoxLayout(plus);
-        pl->setContentsMargins(0, 0, 0, 0);
-        pl->addWidget(Lucide::label(Lucide::kPlus, Home::kMuted, 16, plus),
-                      0, Qt::AlignCenter);
-    }
-    plus->onClick = [this] { showTemplateMarket(0); };
-    h->addWidget(plus, 0, Qt::AlignVCenter);
-
-    h->addSpacing(6);
-    auto* sep = new QFrame(bar);
-    sep->setFixedSize(1, 24);
-    sep->setStyleSheet(QString("background:%1;border:none;").arg(Home::kBorder));
-    h->addWidget(sep, 0, Qt::AlignVCenter);
-    h->addSpacing(6);
 
     auto trust = [&](const char* icon, const QString& color,
                      const QString& text) -> QWidget* {
@@ -1089,12 +1103,11 @@ QWidget* StartScreen::buildBottomBar() {
                            tr("All files are saved locally"));
     m_trustPrivate = trust(Lucide::kShieldCheck, Home::kAccentSoft,
                            tr("100% private & secure"));
+    h->addStretch();
 
     bar->setStyleSheet(QString(R"(
         QFrame#bottomBar { background:%1; border-top:1px solid %2; }
-        #quickPlus { background:%3; border:1px dashed %4; border-radius:9px; }
-        #quickPlus:hover { background:%5; }
-    )").arg(Home::kBg, Home::kBorderSoft, Home::kPanel, Home::kBorder, Home::kPanelHover));
+    )").arg(Home::kBg, Home::kBorderSoft));
     return bar;
 }
 
@@ -1228,7 +1241,7 @@ QWidget* StartScreen::buildRecentPanel() {
         auto* rh = new QHBoxLayout(rowf);
         rh->setContentsMargins(8, 0, 6, 0);
         rh->setSpacing(11);
-        rh->addWidget(badge(kind.letter, kind.color, 30, rowf));
+        rh->addWidget(fileBadge(kind, 30, rowf));
 
         auto* meta = new QVBoxLayout();
         meta->setSpacing(1);
@@ -1366,12 +1379,16 @@ void StartScreen::showRecentFileMenu(const QString& path, const QPoint& at) {
 }
 
 // ── Templates for You ────────────────────────────────────────────────────────
+// Four finished cards from the supplied sheet, one per template. The card is
+// the artwork: it already carries the label, the name and the kind, so nothing
+// is written under it and there are no carousel dots, since View all is the
+// way to the rest.
 QWidget* StartScreen::buildTemplatesPanel() {
     auto* panel = new QFrame(this);
     panel->setObjectName("panel");
     auto* v = new QVBoxLayout(panel);
-    v->setContentsMargins(16, 12, 16, 6);
-    v->setSpacing(7);
+    v->setContentsMargins(16, 12, 16, 12);
+    v->setSpacing(9);
 
     auto* head = new QHBoxLayout();
     head->addWidget(label600(tr("Templates for You"), 14, Home::kText, panel));
@@ -1388,76 +1405,30 @@ QWidget* StartScreen::buildTemplatesPanel() {
     v->addLayout(head);
 
     auto* grid = new QGridLayout();
-    grid->setSpacing(12);
-    const QVector<TemplateEntry> featured = featuredTemplates();
-    const qreal dpr = devicePixelRatio();
-    int i = 0;
-    for (const TemplateEntry& t : featured) {
-        auto* c = new ClickableFrame(panel);
-        c->setObjectName("tplCard");
-        c->setCursor(Qt::PointingHandCursor);
-        auto* cv = new QVBoxLayout(c);
-        cv->setContentsMargins(0, 0, 0, 0);
-        cv->setSpacing(0);
+    grid->setSpacing(11);
 
-        auto* thumb = new QLabel(c);
-        thumb->setFixedHeight(72);
-        thumb->setScaledContents(false);
-        thumb->setAlignment(Qt::AlignCenter);
-        thumb->setPixmap(TemplateArt::preview(t.name, t.type, QSize(190, 72), dpr));
-        thumb->setAttribute(Qt::WA_TransparentForMouseEvents);
-        thumb->setStyleSheet("background:transparent;");
-        cv->addWidget(thumb);
-
-        auto* foot = new QVBoxLayout();
-        foot->setContentsMargins(11, 7, 11, 8);
-        foot->setSpacing(1);
-        auto* name = label600(t.name, 12, Home::kText, c);
-        name->setAttribute(Qt::WA_TransparentForMouseEvents);
-        foot->addWidget(name);
-        auto* kindLabel = heading(t.type == DocumentType::Calc    ? tr("Spreadsheet")
-                                : t.type == DocumentType::Impress ? tr("Presentation")
-                                                                  : tr("Document"),
-                                  11, Home::kFaint, false, c);
-        kindLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
-        foot->addWidget(kindLabel);
-        cv->addLayout(foot);
-
-        const DocumentType type = t.type;
-        const QString name2 = t.name;
-        c->onClick = [this, type, name2] {
-            if (!launchLocked()) emit templateChosen(type, name2);
+    struct Card { const char* art; QString name; DocumentType type; };
+    const Card cards[] = {
+        { ":/assets/tpl-resume.jpg", QStringLiteral("Professional Resume"), DocumentType::Writer },
+        { ":/assets/tpl-budget.jpg", QStringLiteral("Monthly Budget"),      DocumentType::Calc },
+        { ":/assets/tpl-pitch.jpg",  QStringLiteral("Pitch Deck"),          DocumentType::Impress },
+        { ":/assets/tpl-report.jpg", QStringLiteral("Project Report"),      DocumentType::Writer },
+    };
+    for (int i = 0; i < 4; ++i) {
+        auto* c = new ArtCard(QString::fromLatin1(cards[i].art), 11, panel);
+        c->setToolTip(tr("Open the %1 template").arg(cards[i].name));
+        const DocumentType type = cards[i].type;
+        const QString name = cards[i].name;
+        c->onClick = [this, type, name] {
+            if (!launchLocked()) emit templateChosen(type, name);
         };
         grid->addWidget(c, i / 2, i % 2);
-        ++i;
     }
-    v->addLayout(grid);
-    v->addStretch();
-
-    // Carousel dots, matching the reference. They page through the catalogue
-    // four at a time, which is what the arrows would do.
-    {
-        auto* dots = new QHBoxLayout();
-        dots->setSpacing(6);
-        dots->addStretch();
-        for (int d = 0; d < 5; ++d) {
-            auto* dot = new ClickableFrame(panel);
-            dot->setFixedSize(6, 6);
-            dot->setCursor(Qt::PointingHandCursor);
-            dot->setStyleSheet(QString("background:%1;border-radius:3px;")
-                                   .arg(d == 0 ? Home::kAccent : QStringLiteral("#2C3346")));
-            dot->onClick = [this] { showTemplateMarket(0); };
-            dots->addWidget(dot);
-        }
-        dots->addStretch();
-        v->addLayout(dots);
-    }
+    v->addLayout(grid, 1);
 
     panel->setStyleSheet(QString(R"(
         QFrame#panel { background:%1; border:1px solid %2; border-radius:14px; }
-        #tplCard { background:%3; border:1px solid %2; border-radius:11px; }
-        #tplCard:hover { background:%4; border:1px solid %5; }
-    )").arg(Home::kPanel, Home::kBorder, Home::kPanelSoft, Home::kPanelHover, Home::kAccent));
+    )").arg(Home::kPanel, Home::kBorder));
     return panel;
 }
 
@@ -1484,7 +1455,14 @@ QWidget* StartScreen::buildToolsCard() {
     auto* v = new QVBoxLayout(p);
     v->setContentsMargins(16, 11, 16, 11);
     v->setSpacing(8);
-    v->addWidget(label600(tr("Tools"), 14, Home::kText, p));
+    {
+        auto* head = new QVBoxLayout();
+        head->setSpacing(1);
+        head->addWidget(label600(tr("Tools"), 14, Home::kText, p));
+        head->addWidget(heading(tr("Smart tools for everyday productivity"),
+                                10, Home::kFaint, false, p));
+        v->addLayout(head);
+    }
 
     auto* grid = new QGridLayout();
     grid->setSpacing(8);
@@ -1508,17 +1486,16 @@ QWidget* StartScreen::buildToolsCard() {
     for (const ToolTile& t : tiles) {
         auto* tile = new ClickableFrame(p);
         tile->setObjectName("toolTile");
-        tile->setFixedHeight(38);
+        tile->setFixedHeight(42);
         tile->setCursor(Qt::PointingHandCursor);
         tile->setToolTip(t.tip);
         auto* tl = new QHBoxLayout(tile);
-        tl->setContentsMargins(10, 0, 8, 0);
-        tl->setSpacing(9);
-        tl->addWidget(Lucide::label(t.icon, t.color, 16, tile));
-        auto* lab = new QLabel(t.label, tile);
-        lab->setStyleSheet(QString("color:%1;font:11px 'Segoe UI';background:transparent;")
-                               .arg(Home::kTextBody));
-        lab->setWordWrap(true);
+        tl->setContentsMargins(7, 0, 7, 0);
+        tl->setSpacing(8);
+        tl->addWidget(iconTile(t.icon, t.color, 24, tile));
+        auto* lab = new ElidedLabel(t.label, tile);
+        lab->setStyleSheet(QString("color:%1;font:600 10px 'Segoe UI';"
+                                   "background:transparent;").arg(Home::kTextBody));
         lab->setAttribute(Qt::WA_TransparentForMouseEvents);
         tl->addWidget(lab, 1);
         const Tool tool = t.tool;
@@ -1537,73 +1514,15 @@ QWidget* StartScreen::buildToolsCard() {
 }
 
 QWidget* StartScreen::buildAiCard() {
-    auto* p = new ClickableFrame(this);
-    p->setObjectName("aiPanel");
-    p->setCursor(Qt::PointingHandCursor);
-    p->setFixedHeight(104);
-
-    auto* h = new QHBoxLayout(p);
-    h->setContentsMargins(16, 12, 6, 12);
-    h->setSpacing(0);
-
-    auto* v = new QVBoxLayout();
-    v->setSpacing(5);
-
-    auto* titleRow = new QHBoxLayout();
-    titleRow->setSpacing(8);
-    auto* title = label600(tr("AI Assistant"), 15, Home::kText, p);
-    title->setAttribute(Qt::WA_TransparentForMouseEvents);
-    titleRow->addWidget(title);
-    auto* betaPill = new QLabel(QStringLiteral("BETA"), p);
-    betaPill->setAlignment(Qt::AlignCenter);
-    betaPill->setFixedSize(40, 17);
-    betaPill->setStyleSheet(QString("background:rgba(124,108,246,0.22);color:%1;"
-                                    "border-radius:5px;font:700 9px 'Segoe UI';"
-                                    "letter-spacing:1px;").arg(Home::kAccentSoft));
-    betaPill->setAttribute(Qt::WA_TransparentForMouseEvents);
-    titleRow->addWidget(betaPill);
-    titleRow->addStretch();
-    v->addLayout(titleRow);
-
-    auto* blurb = new QLabel(tr("Your copilot for documents."), p);
-    blurb->setStyleSheet(QString("color:%1;font:12px 'Segoe UI';background:transparent;")
-                             .arg(Home::kMuted));
-    blurb->setAttribute(Qt::WA_TransparentForMouseEvents);
-    v->addWidget(blurb);
-    v->addStretch();
-
-    auto* ask = new QPushButton(p);
-    ask->setObjectName("askAi");
-    ask->setCursor(Qt::PointingHandCursor);
-    ask->setFixedSize(168, 34);
-    {
-        auto* al = new QHBoxLayout(ask);
-        al->setContentsMargins(15, 0, 13, 0);
-        al->setSpacing(9);
-        auto* t = label600(tr("Ask AI Anything"), 12, "#FFFFFF", ask);
-        t->setAttribute(Qt::WA_TransparentForMouseEvents);
-        al->addWidget(t);
-        al->addStretch();
-        al->addWidget(Lucide::label(Lucide::kArrowRight, "#FFFFFF", 15, ask));
-    }
-    connect(ask, &QPushButton::clicked, this, &StartScreen::aiRequested);
-    v->addWidget(ask, 0, Qt::AlignLeft);
-
-    h->addLayout(v, 1);
-    h->addWidget(new AiOrb(p), 0, Qt::AlignVCenter);
-
-    p->onClick = [this] { emit aiRequested(); };
-    p->setStyleSheet(QString(R"(
-        QFrame#aiPanel { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,
-            stop:0 #191634, stop:0.6 #16182A, stop:1 #241B3A);
-            border:1px solid #322A5C; border-radius:14px; }
-        QFrame#aiPanel:hover { border:1px solid %1; }
-        QPushButton#askAi { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-            stop:0 #6D5BF0, stop:1 #9B6BF6); border:none; border-radius:10px; }
-        QPushButton#askAi:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-            stop:0 #7C6CF6, stop:1 #AC7DFF); }
-    )").arg(Home::kAccent));
-    return p;
+    // The supplied card, used as it was drawn. Everything it says (the beta
+    // tag, the button, the three promises) is in the picture, so laying widgets
+    // over it would only fight with it.
+    auto* card = new ArtCard(QStringLiteral(":/assets/ai-card.jpg"), 14, this);
+    card->setFixedHeight(126);
+    card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    card->setToolTip(tr("Open the assistant"));
+    card->onClick = [this] { emit aiRequested(); };
+    return card;
 }
 
 QWidget* StartScreen::buildQuickTips() {

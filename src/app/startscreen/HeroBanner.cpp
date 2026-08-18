@@ -29,8 +29,111 @@ constexpr int kRadius = 16;
 // colour; right of it the picture is at full strength.
 constexpr qreal kScrimEnd = 0.62;
 
-// Rings of the halo painted under the Create New button.
-constexpr int kGlowRings = 7;
+// The Create New button: the supplied neon pill, drawn as artwork rather than
+// rebuilt in a stylesheet, with a highlight that travels around its edge.
+//
+// The travelling segment is a linear gradient whose stops move with a phase,
+// clipped to a thin ring just inside the pill. It idles slowly and quietly;
+// under the pointer it speeds up, brightens, and the whole pill gets an
+// additive pass so it reads as the button gathering energy rather than as a
+// flashing border.
+class GlowButton : public QWidget {
+public:
+    explicit GlowButton(QWidget* parent) : QWidget(parent) {
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover, true);
+        m_art = QPixmap(QStringLiteral(":/assets/btn-create-new.png"));
+
+        m_tick = new QTimer(this);
+        m_tick->setInterval(33);                 // about 30 a second, plenty
+        connect(m_tick, &QTimer::timeout, this, [this] {
+            m_phase += m_hover ? 0.022 : 0.008;
+            if (m_phase > 1.0) m_phase -= 1.0;
+            if (m_hover && m_boost < 1.0) m_boost = qMin(1.0, m_boost + 0.12);
+            if (!m_hover && m_boost > 0.0) m_boost = qMax(0.0, m_boost - 0.09);
+            update();
+        });
+        m_tick->start();
+    }
+
+    std::function<void()> onClick;
+
+protected:
+    void enterEvent(QEnterEvent*) override { m_hover = true;  }
+    void leaveEvent(QEvent*) override      { m_hover = false; }
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton && onClick) { onClick(); e->accept(); return; }
+        QWidget::mousePressEvent(e);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+
+        if (m_art.isNull()) return;
+
+        const QSize want = size() * devicePixelRatio();
+        if (m_scaled.isNull() || m_scaled.size() != want) {
+            m_scaled = m_art.scaled(want, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            m_scaled.setDevicePixelRatio(devicePixelRatio());
+        }
+        const QSizeF drawn = m_scaled.deviceIndependentSize();
+        const QPointF at((width() - drawn.width()) / 2.0,
+                         (height() - drawn.height()) / 2.0);
+        p.drawPixmap(at, m_scaled);
+
+        // Under the pointer the artwork is drawn again additively, which lifts
+        // the neon without washing the white lettering out.
+        if (m_boost > 0.001) {
+            p.setCompositionMode(QPainter::CompositionMode_Plus);
+            p.setOpacity(0.30 * m_boost);
+            p.drawPixmap(at, m_scaled);
+            p.setOpacity(1.0);
+            p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        }
+
+        // ── The travelling highlight ────────────────────────────────────────
+        // The pill occupies the middle band of the artwork; the rest is bloom.
+        const QRectF pill(at.x() + drawn.width() * 0.055,
+                          at.y() + drawn.height() * 0.235,
+                          drawn.width() * 0.890,
+                          drawn.height() * 0.530);
+        const qreal radius = pill.height() / 2.0;
+
+        QPainterPath ring;
+        ring.addRoundedRect(pill, radius, radius);
+        QPainterPath inner;
+        inner.addRoundedRect(pill.adjusted(2.2, 2.2, -2.2, -2.2),
+                             radius - 2.2, radius - 2.2);
+        p.setClipPath(ring.subtracted(inner));
+
+        // Two passes travelling in opposite directions, so the pill never looks
+        // like a single dot chasing its tail.
+        for (int pass = 0; pass < 2; ++pass) {
+            const qreal phase = pass == 0 ? m_phase : 1.0 - m_phase;
+            QLinearGradient g(pill.topLeft(), pill.topRight());
+            QColor bright(255, 255, 255);
+            bright.setAlphaF(qBound(0.0, 0.30 + 0.55 * m_boost, 1.0));
+            QColor clear(255, 255, 255, 0);
+            const qreal w = 0.16;
+            g.setColorAt(qBound(0.0, phase - w, 1.0), clear);
+            g.setColorAt(qBound(0.0, phase, 1.0), bright);
+            g.setColorAt(qBound(0.0, phase + w, 1.0), clear);
+            p.fillRect(pill, g);
+        }
+        p.setClipping(false);
+    }
+
+    QSize sizeHint() const override { return { 208, 66 }; }
+
+private:
+    QPixmap m_art, m_scaled;
+    QTimer* m_tick { nullptr };
+    qreal m_phase { 0.0 };
+    qreal m_boost { 0.0 };   // eases in and out, so hover is not a hard switch
+    bool  m_hover { false };
+};
 
 } // namespace
 
@@ -63,33 +166,10 @@ HeroBanner::HeroBanner(QWidget* parent) : QFrame(parent) {
     rl->setContentsMargins(0, 0, 0, 0);
     rl->setSpacing(12);
 
-    auto* create = new QPushButton(row);
+    auto* create = new GlowButton(row);
     m_createBtn = create;
-    create->setObjectName("heroCreate");
-    create->setCursor(Qt::PointingHandCursor);
-    // Stated explicitly: a QPushButton takes its size from its text and icon,
-    // not from a layout placed inside it.
-    create->setFixedSize(184, 42);
-    {
-        // The plus, the label and the chevron are laid out inside the button so
-        // the chevron can sit hard right behind a hairline divider, as in the
-        // reference. The whole button opens the menu, chevron included.
-        auto* bl = new QHBoxLayout(create);
-        bl->setContentsMargins(16, 0, 14, 0);
-        bl->setSpacing(9);
-        bl->addWidget(Lucide::label(Lucide::kPlus, "#FFFFFF", 17, create));
-        auto* t = label600(QStringLiteral("Create New"), 14, "#FFFFFF", create);
-        t->setAttribute(Qt::WA_TransparentForMouseEvents);
-        bl->addWidget(t);
-        bl->addStretch();
-        auto* sep = new QFrame(create);
-        sep->setFixedSize(1, 20);
-        sep->setStyleSheet("background:rgba(255,255,255,0.28);border:none;");
-        sep->setAttribute(Qt::WA_TransparentForMouseEvents);
-        bl->addWidget(sep);
-        bl->addWidget(Lucide::label(Lucide::kChevronDown, "#FFFFFF", 16, create));
-    }
-    connect(create, &QPushButton::clicked, this, &HeroBanner::showCreateMenu);
+    create->setFixedSize(208, 66);
+    create->onClick = [this] { showCreateMenu(); };
     rl->addWidget(create);
 
     auto* open = new QPushButton(row);
@@ -114,15 +194,6 @@ HeroBanner::HeroBanner(QWidget* parent) : QFrame(parent) {
     v->addWidget(row);
 
     setStyleSheet(QString(R"(
-        QPushButton#heroCreate {
-            background:qlineargradient(x1:0,y1:0,x2:1,y2:1,
-                stop:0 #6D5BF0, stop:1 #8B6CF8);
-            border:none; border-radius:12px;
-        }
-        QPushButton#heroCreate:hover {
-            background:qlineargradient(x1:0,y1:0,x2:1,y2:1,
-                stop:0 #7C6CF6, stop:1 #9C7EFF);
-        }
         QPushButton#heroOpen {
             background:rgba(18,22,33,0.72);
             border:1px solid rgba(255,255,255,0.14);
@@ -268,22 +339,6 @@ void HeroBanner::paintEvent(QPaintEvent*) {
     v.setAlphaF(0.10);
     tint.setColorAt(1.0, v);
     p.fillRect(box, tint);
-
-    // A halo under Create New. Painted here, behind the button, rather than
-    // with a QGraphicsDropShadowEffect, which would also blur the label inside
-    // it and cost a full-widget render pass on every repaint.
-    if (m_createBtn) {
-        const QRectF b(m_createBtn->mapTo(this, QPoint(0, 0)), QSizeF(m_createBtn->size()));
-        p.setPen(Qt::NoPen);
-        for (int i = kGlowRings; i >= 1; --i) {
-            const qreal spread = i * 3.0;
-            QColor g(Home::kAccent);
-            g.setAlphaF(0.085 * (1.0 - qreal(i - 1) / kGlowRings));
-            p.setBrush(g);
-            p.drawRoundedRect(b.adjusted(-spread, -spread, spread, spread),
-                              12 + spread, 12 + spread);
-        }
-    }
 
     p.setClipping(false);
     p.setPen(QPen(QColor(Home::kBorder), 1));
