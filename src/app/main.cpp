@@ -1263,7 +1263,6 @@ public:
         // far enough from the tabs that it is never hit by accident, and on the
         // one row that is visible in every mode.
         m_useAi = new QToolButton(m_topBar);
-        m_useAi->setText(QStringLiteral(" Use AI"));
         m_useAi->setToolTip(QStringLiteral("Open Stasis  (Ctrl+A+I)"));
         m_useAi->setCursor(Qt::PointingHandCursor);
         m_useAi->setFixedHeight(ShellTabBar::kTabHeight);
@@ -1276,11 +1275,17 @@ public:
             if (!mk.isNull())
                 m_useAi->setIcon(QIcon(mk.scaledToHeight(15, Qt::SmoothTransformation)));
         }
+        // The same violet chip Home shows in its own top bar, so the button
+        // does not change shape depending on which tab you are looking at.
+        m_useAi->setText(QStringLiteral(" AI Assistant "));
         m_useAi->setStyleSheet(
-            "QToolButton { color:#C9CFDB; font:600 12px 'Segoe UI'; background:transparent;"
-            "  border:none; padding:0 12px; }"
-            "QToolButton:hover { color:#FFFFFF; background:rgba(124,92,255,0.20); }"
-            "QToolButton:pressed { background:rgba(124,92,255,0.32); }");
+            "QToolButton { color:#FFFFFF; font:600 12px 'Segoe UI';"
+            "  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "    stop:0 #6D5BF0, stop:1 #9B6BF6);"
+            "  border:none; border-radius:11px; padding:0 13px; margin:5px 4px; }"
+            "QToolButton:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "    stop:0 #7C6CF6, stop:1 #AC7DFF); }"
+            "QToolButton:pressed { background:#6455D8; }");
         connect(m_useAi, &QToolButton::clicked, this, &MainShell::toggleAiSidebar);
 
         m_controls = new WindowControls(this, m_topBar);
