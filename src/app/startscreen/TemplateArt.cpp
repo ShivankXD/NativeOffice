@@ -345,7 +345,15 @@ void paintDeck(QPainter& p, const QRectF& page, const QColor& accent, Rng& rng,
 
 } // namespace
 
-QPixmap preview(const QString& name, DocumentType type, QSize size, qreal dpr) {
+QPixmap preview(const QString& name, DocumentType type, QSize size, qreal dprIn) {
+    // Supersampled: at thumbnail size the hairlines, the ruled body and the
+    // donut all land between pixels, and drawing straight at the screen's own
+    // ratio left them looking like a low-resolution bitmap. Rendering at three
+    // times the size and scaling down smooths every edge for one small,
+    // one-off cost per card.
+    constexpr qreal kSuper = 3.0;
+    const qreal dpr = dprIn * kSuper;
+
     QPixmap pm(int(size.width() * dpr), int(size.height() * dpr));
     pm.setDevicePixelRatio(dpr);
     pm.fill(Qt::transparent);
@@ -398,7 +406,11 @@ QPixmap preview(const QString& name, DocumentType type, QSize size, qreal dpr) {
     }
 
     p.end();
-    return pm;
+
+    QPixmap out = pm.scaled(QSize(int(size.width() * dprIn), int(size.height() * dprIn)),
+                            Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    out.setDevicePixelRatio(dprIn);
+    return out;
 }
 
 } // namespace NativeOffice::TemplateArt
