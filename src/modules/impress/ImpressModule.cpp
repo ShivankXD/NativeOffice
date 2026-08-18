@@ -894,7 +894,15 @@ void ImpressModule::applyDeckTemplate(const QString& name) {
     };
 
     struct Pal { QString bg, bg2, title, body, accent; };
-    struct Sect { QString heading; QStringList bullets; };
+    // A section can carry a chart, which is what makes the pitch deck open
+    // looking like the card that offered it rather than as bullets alone.
+    struct Sect {
+        QString heading;
+        QStringList bullets;
+        ChartKind chartKind { ChartKind::Bar };
+        std::vector<QString> chartLabels;
+        std::vector<double>  chartValues;
+    };
     struct Deck { QString title, subtitle; Pal pal; QList<Sect> sections; };
 
     const Pal navy   { "#0F172A", "#1E293B", "#FFFFFF", "#CBD5E1", "#38BDF8" };
@@ -908,8 +916,11 @@ void ImpressModule::applyDeckTemplate(const QString& name) {
     decks["Pitch Deck"] = { "Business Pitch Deck", "one line that investors remember", navy, {
         { "The Problem",    { "What is broken today", "Who feels the pain and how often", "Cost of the status quo" } },
         { "The Solution",   { "Your product in one sentence", "Why now, and what changed", "Live demo" } },
-        { "Market Overview", { "TAM, SAM and SOM", "Who you sell to", "How you make money" } },
-        { "Growth",         { "Key metrics quarter on quarter", "Customers and pipeline", "Milestones hit" } },
+        { "Market Overview", { "TAM, SAM and SOM", "Who you sell to", "How you make money" },
+          ChartKind::Pie, { "Segment A", "Segment B", "Segment C" }, { 52, 31, 17 } },
+        { "Growth",         { "Key metrics quarter on quarter", "Customers and pipeline",
+                              "Milestones hit" },
+          ChartKind::Bar, { "Q1", "Q2", "Q3", "Q4" }, { 24, 38, 57, 82 } },
         { "The Ask",        { "Raising: amount and instrument", "Use of funds", "12-month plan" } } } };
     decks["Business Review"] = { "Quarterly Business Review", "Q_ 20__ · Team", blue, {
         { "Highlights",     { "Wins this quarter", "Revenue vs plan", "Team changes" } },
@@ -968,20 +979,34 @@ void ImpressModule::applyDeckTemplate(const QString& name) {
         d.background = QColor(p.bg);
         d.items.push_back(shp(60, 108, 66, 6, ShapeKind::Rectangle, p.accent));
         d.items.push_back(txt(60, 48, 840, 60, s.heading, 32, p.title, true, "left"));
+        const bool hasChart = !s.chartValues.empty();
         QString html, plain;
         for (const QString& b : s.bullets) {
-            html += QString("<p style=\"margin:0 0 14px 0; font-size:20pt; color:%1;\">•  %2</p>")
-                        .arg(p.body, b.toHtmlEscaped());
+            html += QString("<p style=\"margin:0 0 14px 0; font-size:%1pt; color:%2;\">•  %2</p>")
+                        .arg(hasChart ? 16 : 20).arg(p.body, b.toHtmlEscaped());
             plain += "• " + b + "\n";
         }
         SlideItem body;
         body.type = SlideItemType::TextBox;
-        body.rect = QRectF(80, 150, 800, 330);
+        body.rect = hasChart ? QRectF(60, 150, 400, 330)
+                             : QRectF(80, 150, 800, 330);
         body.text = plain.trimmed();
-        body.fontSize = 20;
+        body.fontSize = hasChart ? 16 : 20;
         body.penColor = QColor(p.body);
         body.html = html;
         d.items.push_back(body);
+
+        if (hasChart) {
+            SlideItem chart;
+            chart.type        = SlideItemType::Chart;
+            chart.rect        = QRectF(490, 145, 410, 320);
+            chart.chartKind   = s.chartKind;
+            chart.chartLabels = s.chartLabels;
+            chart.chartValues = s.chartValues;
+            chart.penColor    = QColor(p.accent);
+            chart.fillColor   = QColor(p.accent);
+            d.items.push_back(chart);
+        }
         slides.push_back(d);
     }
 
