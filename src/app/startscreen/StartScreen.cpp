@@ -1,54 +1,51 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// StartScreen.cpp — NativeOffice home dashboard (dark theme).
+// StartScreen.cpp — NativeOffice home dashboard.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "StartScreen.h"
+#include "ActivityCard.h"
+#include "FileSearch.h"
+#include "HeroBanner.h"
+#include "HomeKit.h"
+#include "LucideIcons.h"
+#include "TemplateArt.h"
+#include "TemplateMarket.h"
+
 #include "core/application/RecentFilesManager.h"
 #include "core/application/UpdateChecker.h"
 #include "core/auth/AuthManager.h"
 #include "core/theme/ThemeManager.h"
-#include "core/settings/UsageStats.h"
 #include "common/Avatars.h"
 #include "settings/SettingsTray.h"
-#include "LucideIcons.h"
 
-#include <QMessageBox>
+#include <QAction>
+#include <QApplication>
 #include <QCoreApplication>
-
-#include <QHBoxLayout>
-#include <QVBoxLayout>
+#include <QDateTime>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPushButton>
-#include <QToolButton>
-#include <QFrame>
-#include <QScrollArea>
-#include <QFileDialog>
-#include <QDir>
-#include <QFileInfo>
-#include <QDialog>
-#include <QStackedWidget>
-#include <QButtonGroup>
-#include <QMouseEvent>
-#include <QEnterEvent>
-#include <QSvgRenderer>
+#include <QMenu>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPixmap>
-#include <QTime>
-#include <QDateTime>
-#include <QTimer>
-#include <QSettings>
-#include <QSpinBox>
-#include <QCheckBox>
-#include <QFormLayout>
-#include <QDialogButtonBox>
-#include <QDesktopServices>
-#include <QUrl>
-#include <QMenu>
-#include <QAction>
 #include <QProcess>
-#include <QFile>
+#include <QRadialGradient>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QStyle>
+#include <QTimer>
+#include <QToolButton>
+#include <QUrl>
+#include <QVBoxLayout>
+
 #include <functional>
 #include <utility>
 
@@ -56,44 +53,9 @@ namespace NativeOffice {
 
 namespace {
 
-// ── A frame the whole of which responds to a left click. ──────────────────────
-class ClickableFrame : public QFrame {
-public:
-    using QFrame::QFrame;
-    std::function<void()> onClick;
-    // Right-click hook, given the click point in global coordinates. Recent
-    // rows use it for favourite / reveal / delete, which the list previously
-    // offered no way to reach.
-    std::function<void(const QPoint&)> onContextMenu;
-protected:
-    void enterEvent(QEnterEvent*) override { if (onClick) setCursor(Qt::PointingHandCursor); }
-    void mousePressEvent(QMouseEvent* e) override {
-        if (e->button() == Qt::RightButton && onContextMenu) {
-            onContextMenu(e->globalPosition().toPoint());
-            e->accept();
-            return;
-        }
-        // Consume the click when handled, so it doesn't bubble to a clickable
-        // ancestor (e.g. a template card inside the clickable templates panel).
-        if (e->button() == Qt::LeftButton && onClick) { onClick(); e->accept(); return; }
-        QFrame::mousePressEvent(e);
-    }
-};
-
-// A small rounded "app badge" label (a coloured square with a letter/glyph).
-QLabel* badge(const QString& text, const QString& color, int size = 30, QWidget* parent = nullptr) {
-    auto* b = new QLabel(text, parent);
-    b->setAlignment(Qt::AlignCenter);
-    b->setFixedSize(size, size);
-    b->setStyleSheet(QString("background:%1;border-radius:8px;color:#FFFFFF;"
-                             "font:700 %2px 'Segoe UI';").arg(color).arg(size <= 24 ? 11 : 14));
-    return b;
-}
-
-// The real, transparent brand mark at a crisp hi-dpi size (same
-// device-pixel-ratio trick as Avatars.h's roundAvatarPixmap()). The source
-// artwork is the full lockup (mark + wordmark + strapline); crop out just the
-// "N" mark, else the baked-in text turns to mush at UI sizes.
+// ── Brand mark ───────────────────────────────────────────────────────────────
+// The source artwork is the full lockup (mark + wordmark + strapline); crop out
+// just the "N" mark, else the baked-in text turns to mush at UI sizes.
 QLabel* logoMark(int h, QWidget* parent) {
     auto* l = new QLabel(parent);
     const qreal dpr = parent ? parent->devicePixelRatio() : 1.0;
@@ -112,35 +74,45 @@ QLabel* logoMark(int h, QWidget* parent) {
     return l;
 }
 
-QLabel* heading(const QString& text, int px, const QString& color, bool bold, QWidget* p = nullptr) {
-    auto* l = new QLabel(text, p);
-    l->setStyleSheet(QString("color:%1;font:%2 %3px 'Segoe UI';background:transparent;")
-                         .arg(color).arg(bold ? "700" : "400").arg(px));
-    return l;
-}
-
-// Render an inline SVG illustration into a transparent QLabel at the given
-// height (clicks pass through to the parent card).
-QLabel* svgArt(const char* svg, int h, QWidget* parent) {
-    const QByteArray data(svg);
-    QSvgRenderer r(data);
-    const QSize def = r.defaultSize();
-    const int w = (def.height() > 0) ? def.width() * h / def.height() : h;
-    QPixmap pm(w * 2, h * 2);                  // 2× for crispness on hi-dpi
-    pm.fill(Qt::transparent);
+// A rounded tile carrying a Lucide glyph rather than a letter — used where a
+// single letter would be wrong (PDF, Open File).
+QLabel* iconTile(const char* svg, const QString& colorHex, int size, QWidget* parent) {
+    const qreal dpr = parent ? parent->devicePixelRatio() : 1.0;
+    QPixmap pm = badgePixmap(QString(), colorHex, size, dpr);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
-    r.render(&p);
+    const int glyph = int(size * 0.54);
+    p.drawPixmap(QPointF((size - glyph) / 2.0, (size - glyph) / 2.0),
+                 Lucide::pixmap(svg, QStringLiteral("#FFFFFF"), glyph, dpr));
     p.end();
-    pm.setDevicePixelRatio(2.0);
     auto* l = new QLabel(parent);
     l->setPixmap(pm);
+    l->setFixedSize(size, size);
     l->setStyleSheet("background:transparent;");
     l->setAttribute(Qt::WA_TransparentForMouseEvents);
     return l;
 }
 
-// ── Illustrations for the four "create" tiles ────────────────────────────────
+// Faint document artwork behind a create card.
+QLabel* svgArtFaded(const char* svg, int h, qreal opacity, QWidget* parent) {
+    const qreal dpr = parent ? parent->devicePixelRatio() : 1.0;
+    const QPixmap src = svgPixmap(svg, h, dpr);
+    QPixmap out(src.size());
+    out.setDevicePixelRatio(dpr);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    p.setOpacity(opacity);
+    p.drawPixmap(0, 0, src);
+    p.end();
+    auto* l = new QLabel(parent);
+    l->setPixmap(out);
+    l->setFixedSize(out.deviceIndependentSize().toSize());
+    l->setStyleSheet("background:transparent;");
+    l->setAttribute(Qt::WA_TransparentForMouseEvents);
+    return l;
+}
+
+// ── Illustrations for the create tiles ───────────────────────────────────────
 constexpr const char* kArtDocument = R"SVG(
 <svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
   <rect x="46" y="14" width="70" height="90" rx="6" fill="#1b2740" stroke="#3b82f6" stroke-width="2"/>
@@ -150,7 +122,6 @@ constexpr const char* kArtDocument = R"SVG(
   <rect x="42" y="58" width="50" height="4" rx="2" fill="#6f93c8"/>
   <rect x="42" y="68" width="40" height="4" rx="2" fill="#6f93c8"/>
   <rect x="42" y="78" width="46" height="4" rx="2" fill="#6f93c8"/>
-  <rect x="42" y="88" width="30" height="4" rx="2" fill="#6f93c8"/>
 </svg>)SVG";
 
 constexpr const char* kArtSpreadsheet = R"SVG(
@@ -175,8 +146,16 @@ constexpr const char* kArtPresentation = R"SVG(
   <rect x="70" y="52" width="10" height="30" fill="#fdba74"/>
   <rect x="85" y="58" width="10" height="24" fill="#fb923c"/>
   <line x1="38" y1="82" x2="112" y2="82" stroke="#7c4a2b" stroke-width="1.5"/>
-  <rect x="71" y="90" width="8" height="9" fill="#7c4a2b"/>
-  <rect x="60" y="99" width="30" height="4" rx="2" fill="#7c4a2b"/>
+</svg>)SVG";
+
+constexpr const char* kArtPdf = R"SVG(
+<svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
+  <rect x="46" y="12" width="70" height="90" rx="6" fill="#3a1414" stroke="#f87171" stroke-width="2"/>
+  <rect x="56" y="28" width="50" height="4" rx="2" fill="#fca5a5"/>
+  <rect x="56" y="42" width="50" height="4" rx="2" fill="#c9807e"/>
+  <rect x="56" y="56" width="34" height="4" rx="2" fill="#c9807e"/>
+  <circle cx="60" cy="80" r="13" fill="none" stroke="#ef4444" stroke-width="4"/>
+  <path d="M60 80 v-13 a13 13 0 0 1 13 13 z" fill="#ef4444"/>
 </svg>)SVG";
 
 constexpr const char* kArtOpenFile = R"SVG(
@@ -184,50 +163,225 @@ constexpr const char* kArtOpenFile = R"SVG(
   <rect x="48" y="20" width="46" height="40" rx="4" fill="#2a2440" stroke="#a78bfa" stroke-width="2"/>
   <rect x="55" y="29" width="30" height="4" rx="2" fill="#c4b5fd"/>
   <rect x="55" y="39" width="30" height="3" rx="1.5" fill="#8b7bc0"/>
-  <rect x="55" y="47" width="22" height="3" rx="1.5" fill="#8b7bc0"/>
   <path d="M28 50 l6 -7 h22 l5 7 h33 v34 a3 3 0 0 1 -3 3 H31 a3 3 0 0 1 -3 -3 z"
         fill="#6d4ed6" stroke="#a78bfa" stroke-width="2" stroke-linejoin="round"/>
   <path d="M27 56 h90 l-9 30 a3 3 0 0 1 -3 2 H21 z"
         fill="#8b6df0" stroke="#a78bfa" stroke-width="1.5" stroke-linejoin="round"/>
 </svg>)SVG";
 
-constexpr const char* kArtPdf = R"SVG(
-<svg viewBox="0 0 150 110" xmlns="http://www.w3.org/2000/svg">
-  <rect x="46" y="12" width="70" height="90" rx="6" fill="#3a1414" stroke="#f87171" stroke-width="2"/>
-  <rect x="42" y="30" width="50" height="4" rx="2" fill="#fca5a5"/>
-  <rect x="42" y="44" width="50" height="4" rx="2" fill="#c9807e"/>
-  <rect x="42" y="58" width="34" height="4" rx="2" fill="#c9807e"/>
-  <rect x="55" y="70" width="34" height="18" rx="3" fill="#ef4444"/>
-  <path d="M64 74 v10 M60 78 h8" stroke="#3a1414" stroke-width="2" stroke-linecap="round"/>
-  <path d="M72 74 v10 h4 a4 4 0 0 0 0 -10 z" fill="none" stroke="#3a1414" stroke-width="2"/>
-</svg>)SVG";
+// ── Quick tips ───────────────────────────────────────────────────────────────
+struct Tip { QString body; };
+
+QVector<Tip> quickTips() {
+    // Rich text so a shortcut can be highlighted inside the sentence.
+    auto key = [](const QString& k) {
+        return QStringLiteral("<span style='color:%1;font-weight:600;'>%2</span>")
+            .arg(Home::kAccentSoft, k);
+    };
+    return {
+        { QStringLiteral("Press %1 to search every document on this computer without "
+                         "leaving Home.").arg(key(QStringLiteral("Ctrl + K"))) },
+        { QStringLiteral("%1 moves between open tabs, and %2 reopens the last tab you "
+                         "closed.").arg(key(QStringLiteral("Ctrl + Tab")),
+                                        key(QStringLiteral("Ctrl + Shift + T"))) },
+        { QStringLiteral("NativeOffice saves as you work, so there is no Save button to "
+                         "remember. Use %1 only when you want to choose the folder.")
+              .arg(key(QStringLiteral("Save As"))) },
+        { QStringLiteral("Open File reads .docx, .xlsx, .pptx, .csv, .pdf and .md, and "
+                         "picks the right editor for each one on its own.") },
+        { QStringLiteral("Right-click any recent file to star it, show it in Explorer, or "
+                         "take it off the list.") },
+        { QStringLiteral("%1 exports whatever you are working on straight to PDF, and %2 "
+                         "runs a real spell check in Writer.")
+              .arg(key(QStringLiteral("Ctrl + Shift + E")), key(QStringLiteral("F7"))) },
+    };
+}
+
+// A card that cycles through the tips on a timer, with clickable dots.
+class QuickTipsCard : public QFrame {
+public:
+    explicit QuickTipsCard(QWidget* parent) : QFrame(parent) {
+        setObjectName("sidePanel");
+        m_tips = quickTips();
+
+        auto* v = new QVBoxLayout(this);
+        v->setContentsMargins(18, 16, 18, 14);
+        v->setSpacing(11);
+
+        auto* head = new QHBoxLayout();
+        head->addWidget(label600(QStringLiteral("Quick Tips"), 14, Home::kText, this));
+        head->addStretch();
+        auto* close = new QToolButton(this);
+        close->setObjectName("tipClose");
+        close->setCursor(Qt::PointingHandCursor);
+        close->setFixedSize(20, 20);
+        close->setIcon(Lucide::icon(Lucide::kX, Home::kFaint, 13, devicePixelRatio()));
+        close->setToolTip(QStringLiteral("Hide tips for now"));
+        connect(close, &QToolButton::clicked, this, [this] { hide(); });
+        head->addWidget(close);
+        v->addLayout(head);
+
+        auto* body = new QHBoxLayout();
+        body->setSpacing(12);
+        auto* bulb = new QLabel(this);
+        bulb->setFixedSize(34, 34);
+        bulb->setAlignment(Qt::AlignCenter);
+        bulb->setPixmap(Lucide::pixmap(Lucide::kLightbulb, Home::kAmber, 17,
+                                       devicePixelRatio()));
+        bulb->setStyleSheet(QString("background:rgba(245,165,36,0.13);border-radius:10px;"));
+        body->addWidget(bulb, 0, Qt::AlignTop);
+
+        m_text = new QLabel(this);
+        m_text->setTextFormat(Qt::RichText);
+        m_text->setWordWrap(true);
+        m_text->setMinimumHeight(52);
+        m_text->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+        m_text->setStyleSheet(QString("color:%1;font:12px 'Segoe UI';background:transparent;")
+                                  .arg(Home::kTextBody));
+        body->addWidget(m_text, 1);
+        v->addLayout(body);
+
+        auto* dots = new QHBoxLayout();
+        dots->setSpacing(6);
+        dots->addStretch();
+        for (int i = 0; i < m_tips.size(); ++i) {
+            auto* d = new ClickableFrame(this);
+            d->setFixedSize(6, 6);
+            d->setCursor(Qt::PointingHandCursor);
+            d->onClick = [this, i] { showTip(i); m_timer->start(); };
+            m_dots.append(d);
+            dots->addWidget(d);
+        }
+        dots->addStretch();
+        v->addLayout(dots);
+
+        m_timer = new QTimer(this);
+        m_timer->setInterval(10'000);
+        connect(m_timer, &QTimer::timeout, this,
+                [this] { showTip((m_index + 1) % m_tips.size()); });
+        m_timer->start();
+        showTip(0);
+
+        setStyleSheet(QString(R"(
+            QFrame#sidePanel { background:%1; border:1px solid %2; border-radius:14px; }
+            QToolButton#tipClose { background:transparent; border:none; }
+            QToolButton#tipClose:hover { background:%3; border-radius:6px; }
+        )").arg(Home::kPanel, Home::kBorder, Home::kPanelHover));
+    }
+
+private:
+    void showTip(int index) {
+        m_index = index;
+        m_text->setText(m_tips[index].body);
+        for (int i = 0; i < m_dots.size(); ++i)
+            m_dots[i]->setStyleSheet(
+                QString("background:%1;border-radius:3px;")
+                    .arg(i == index ? Home::kAccent : QStringLiteral("#2C3346")));
+    }
+
+    QVector<Tip>              m_tips;
+    QLabel*                   m_text  { nullptr };
+    QVector<ClickableFrame*>  m_dots;
+    QTimer*                   m_timer { nullptr };
+    int                       m_index { 0 };
+};
+
+// The glowing orb on the AI card, painted rather than shipped as an image.
+class AiOrb : public QWidget {
+public:
+    explicit AiOrb(QWidget* parent) : QWidget(parent) {
+        setFixedSize(112, 112);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QPointF c(width() / 2.0, height() / 2.0);
+        const qreal r = width() * 0.30;
+
+        // Outer glow.
+        QRadialGradient glow(c, width() / 2.0);
+        QColor g(Home::kAccent);
+        g.setAlphaF(0.38); glow.setColorAt(0.0, g);
+        g.setAlphaF(0.10); glow.setColorAt(0.55, g);
+        g.setAlphaF(0.0);  glow.setColorAt(1.0, g);
+        p.setPen(Qt::NoPen);
+        p.setBrush(glow);
+        p.drawEllipse(rect());
+
+        // Orbit rings.
+        p.setBrush(Qt::NoBrush);
+        for (int i = 0; i < 2; ++i) {
+            QColor ring(Home::kAccentSoft);
+            ring.setAlphaF(0.42 - 0.16 * i);
+            p.setPen(QPen(ring, 1.4));
+            p.save();
+            p.translate(c);
+            p.rotate(i == 0 ? -22 : 34);
+            p.drawEllipse(QRectF(-r * 1.72, -r * 0.55, r * 3.44, r * 1.10));
+            p.restore();
+        }
+
+        // The sphere.
+        QRadialGradient body(QPointF(c.x() - r * 0.35, c.y() - r * 0.4), r * 1.8);
+        body.setColorAt(0.0, QColor(0xC9, 0xBC, 0xFF));
+        body.setColorAt(0.5, QColor(Home::kAccent));
+        body.setColorAt(1.0, QColor(0x38, 0x2C, 0x78));
+        p.setPen(Qt::NoPen);
+        p.setBrush(body);
+        p.drawEllipse(c, r, r);
+
+        // Specular highlight.
+        QRadialGradient spec(QPointF(c.x() - r * 0.38, c.y() - r * 0.46), r * 0.7);
+        QColor white(255, 255, 255);
+        white.setAlphaF(0.55); spec.setColorAt(0.0, white);
+        white.setAlphaF(0.0);  spec.setColorAt(1.0, white);
+        p.setBrush(spec);
+        p.drawEllipse(QPointF(c.x() - r * 0.3, c.y() - r * 0.36), r * 0.55, r * 0.45);
+
+        // Sparks.
+        p.setBrush(QColor(0xE4, 0xDD, 0xFF));
+        p.drawEllipse(QPointF(c.x() + r * 1.55, c.y() - r * 0.85), 2.2, 2.2);
+        p.drawEllipse(QPointF(c.x() - r * 1.62, c.y() + r * 0.72), 1.7, 1.7);
+        p.drawEllipse(QPointF(c.x() + r * 1.15, c.y() + r * 1.32), 1.4, 1.4);
+    }
+};
+
+// A quote for the footer strip; changes with the day rather than every repaint.
+struct Quote { const char* text; const char* who; };
+constexpr Quote kQuotes[] = {
+    { "Simplicity is the ultimate sophistication.", "Leonardo da Vinci" },
+    { "The best way out is always through.",        "Robert Frost" },
+    { "Well begun is half done.",                   "Aristotle" },
+    { "Make it work, make it right, make it fast.", "Kent Beck" },
+    { "Order and simplification are the first steps toward mastery.", "Thomas Mann" },
+    { "What we do now echoes in eternity.",         "Marcus Aurelius" },
+    { "Clutter is the enemy of clarity.",           "Edward Tufte" },
+};
 
 } // namespace
 
+// ─────────────────────────────────────────────────────────────────────────────
 StartScreen::StartScreen(AppController* controller, QWidget* parent)
-    : QWidget(parent), m_controller(controller)
-{
+    : QWidget(parent), m_controller(controller) {
     setObjectName("startScreen");
     buildUi();
 }
 
-// While the startup update scan is running, launch actions are suppressed so
-// the user can't open an editor before we know whether an update is pending.
 bool StartScreen::launchLocked() const {
     return UpdateChecker::instance().isScanning();
 }
 
-// Compact update-status pill, shown at the top-right of the home page only.
-// Mirrors UpdateChecker: a spinner while scanning/downloading, a short notice
-// when up to date or offline, and — when an update is ready — a clickable
-// "Restart to update" pill.
+// ── Update pill ──────────────────────────────────────────────────────────────
 QWidget* StartScreen::buildUpdateBanner() {
     auto* pill = new ClickableFrame(this);
     pill->setObjectName("updatePill");
     m_updateBanner = pill;
-    pill->setFixedHeight(30);
+    pill->setFixedHeight(28);
     auto* h = new QHBoxLayout(pill);
-    h->setContentsMargins(12, 0, 12, 0);
+    h->setContentsMargins(11, 0, 11, 0);
     h->setSpacing(7);
 
     m_updateSpin = new QLabel(pill);
@@ -237,14 +391,12 @@ QWidget* StartScreen::buildUpdateBanner() {
     m_updateText = new QLabel(pill);
     h->addWidget(m_updateText);
 
-    // Spinner animation.
     m_spinTimer = new QTimer(this);
     connect(m_spinTimer, &QTimer::timeout, this, [this] {
         static const char* frames[] = { "◜", "◝", "◞", "◟" };
         m_updateSpin->setText(QString::fromUtf8(frames[m_spinPhase++ & 3]));
     });
 
-    // React to state + progress changes for the app's lifetime.
     auto& u = UpdateChecker::instance();
     connect(&u, &UpdateChecker::stateChanged, this, [this] { refreshUpdateBanner(); });
     connect(&u, &UpdateChecker::downloadProgress, this, [this](int pct) {
@@ -261,16 +413,15 @@ void StartScreen::refreshUpdateBanner() {
     const S s = UpdateChecker::instance().state();
     auto* pill = static_cast<ClickableFrame*>(m_updateBanner);
 
-    // Idle/Failed aren't worth showing; everything else is user-relevant.
     const bool show = s != S::Idle && s != S::Failed;
     m_updateBanner->setVisible(show);
     if (!show) { m_spinTimer->stop(); pill->onClick = nullptr; return; }
 
     QString text;
     switch (s) {
-    case S::Scanning:        text = tr("Scanning for updates"); break;
-    case S::UpToDate:        text = tr("You're on the latest version"); break;
-    case S::Offline:         text = tr("Offline — update check unavailable"); break;
+    case S::Scanning:        text = tr("Checking updates"); break;
+    case S::UpToDate:        text = tr("Up to date"); break;
+    case S::Offline:         text = tr("Offline"); break;
     case S::UpdateAvailable: text = tr("Preparing update"); break;
     case S::Downloading:     text = tr("Installing update"); break;
     case S::ReadyToRestart:  text = tr("Restart to update"); break;
@@ -279,22 +430,26 @@ void StartScreen::refreshUpdateBanner() {
     m_updateText->setText(text);
 
     const bool ready = s == S::ReadyToRestart;
-    // A ready update turns the pill into a blue call-to-action button.
     if (ready) {
         pill->onClick = [] { UpdateChecker::instance().relaunchForUpdate(); };
-        pill->setStyleSheet("QFrame#updatePill { background:#1D4ED8;"
-                            " border:1px solid #2E5BE0; border-radius:15px; }");
-        m_updateText->setStyleSheet("background:transparent;color:#FFFFFF;font:700 12px 'Segoe UI';");
+        pill->setStyleSheet(QString("QFrame#updatePill { background:%1;"
+                                    " border:1px solid %2; border-radius:14px; }")
+                                .arg(Home::kAccent, Home::kAccentSoft));
+        m_updateText->setStyleSheet("background:transparent;color:#FFFFFF;"
+                                    "font:700 11px 'Segoe UI';");
     } else {
         pill->onClick = nullptr;
         pill->setCursor(Qt::ArrowCursor);
-        pill->setStyleSheet("QFrame#updatePill { background:#161B26;"
-                            " border:1px solid #263042; border-radius:15px; }");
-        m_updateText->setStyleSheet("background:transparent;color:#C7CEDC;font:600 12px 'Segoe UI';");
+        pill->setStyleSheet(QString("QFrame#updatePill { background:%1;"
+                                    " border:1px solid %2; border-radius:14px; }")
+                                .arg(Home::kPanelSoft, Home::kBorder));
+        m_updateText->setStyleSheet(QString("background:transparent;color:%1;"
+                                            "font:600 11px 'Segoe UI';").arg(Home::kMuted));
     }
 
     const bool spinning = s == S::Scanning || s == S::UpdateAvailable || s == S::Downloading;
-    m_updateSpin->setStyleSheet("background:transparent;color:#C7CEDC;font:700 12px 'Segoe UI';");
+    m_updateSpin->setStyleSheet(QString("background:transparent;color:%1;"
+                                        "font:700 11px 'Segoe UI';").arg(Home::kMuted));
     if (spinning) {
         m_updateSpin->show();
         if (!m_spinTimer->isActive()) m_spinTimer->start(90);
@@ -309,17 +464,15 @@ void StartScreen::refreshUpdateBanner() {
 void StartScreen::openFileDialog() {
     if (launchLocked()) return;
     const QString path = QFileDialog::getOpenFileName(
-        this, "Open Document", QDir::homePath(),
-        "All Supported Files (*.docx *.noff *.html *.txt *.csv *.tsv "
-        "*.pptx *.odp *.xlsx *.ods);;All Files (*)");
+        this, tr("Open File"), QDir::homePath(), supportedFilesFilter());
     if (!path.isEmpty()) emit fileOpenRequested(path);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 void StartScreen::buildUi() {
     auto* root = new QHBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
-
     root->addWidget(buildSidebar());
 
     auto* right = new QWidget(this);
@@ -328,7 +481,6 @@ void StartScreen::buildUi() {
     rl->setSpacing(0);
     rl->addWidget(buildTopBar());
 
-    // Scrollable body so the dashboard works on small windows.
     auto* scroll = new QScrollArea(right);
     scroll->setObjectName("bodyScroll");
     scroll->setWidgetResizable(true);
@@ -336,212 +488,379 @@ void StartScreen::buildUi() {
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     auto* body = new QWidget(scroll);
+    body->setObjectName("bodyPane");
     auto* bl = new QHBoxLayout(body);
-    bl->setContentsMargins(36, 28, 36, 28);
-    bl->setSpacing(24);
+    bl->setContentsMargins(26, 17, 24, 16);
+    bl->setSpacing(18);
     bl->addWidget(buildCenterColumn(), 1);
     bl->addWidget(buildRightColumn());
     scroll->setWidget(body);
 
     rl->addWidget(scroll, 1);
+    rl->addWidget(buildBottomBar());
     root->addWidget(right, 1);
 
-    setStyleSheet(R"(
-        QWidget#startScreen { background:#0D1117; }
+    setStyleSheet(QString(R"(
+        QWidget#startScreen { background:%1; }
+        QWidget#bodyPane { background:transparent; }
         QScrollArea#bodyScroll { background:transparent; }
         QScrollBar:vertical { background:transparent; width:10px; margin:2px; }
-        QScrollBar::handle:vertical { background:#2A3240; border-radius:5px; min-height:30px; }
+        QScrollBar::handle:vertical { background:#2A3244; border-radius:5px; min-height:30px; }
         QScrollBar::add-line, QScrollBar::sub-line { height:0; }
-    )");
+    )").arg(Home::kBg));
 
-    // Dev-only capture hook (PrintWindow drops pixmap content on this
-    // machine): set NATIVEOFFICE_HOME_GRAB to a .png path to have the home
-    // screen grab itself shortly after startup.
+    // Dev-only capture hook (PrintWindow drops pixmap content on this machine):
+    // set NATIVEOFFICE_HOME_GRAB to a .png path to have the home screen grab
+    // itself shortly after startup.
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB")) {
         const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_HOME_GRAB");
-        const bool grabSettings = qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_SETTINGS");
-        if (grabSettings)
+        // NATIVEOFFICE_HOME_SHOW names a surface to open before the grab, so a
+        // review can see the trays, popups and dialogs offscreen rather than
+        // only the page behind them.
+        const QString show = qEnvironmentVariable("NATIVEOFFICE_HOME_SHOW");
+        const bool grabSettings = qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_SETTINGS")
+                                  || !show.isEmpty();
+        if (!show.isEmpty()) {
+            QTimer::singleShot(4500, this, [this, show] {
+                if      (show == QLatin1String("profile"))   showProfileTray();
+                else if (show == QLatin1String("settings"))  showSettingsDialog();
+                else if (show == QLatin1String("templates")) showTemplateMarket(0);
+                else if (show == QLatin1String("shortcuts")) showShortcutsDialog();
+                else if (show == QLatin1String("whatsnew"))  showWhatsNewDialog();
+                else if (show == QLatin1String("activity")) {
+                    auto* win = new ActivityWindow(ActivityLog::Range::Week, window());
+                    win->setAttribute(Qt::WA_DeleteOnClose);
+                    win->setModal(true);
+                    win->show();
+                } else if (show == QLatin1String("notifications")) {
+                    showNotificationsPopup(m_search);
+                } else if (show == QLatin1String("createmenu")) {
+                    m_hero->openCreateMenu();
+                } else if (show == QLatin1String("search")) {
+                    m_search->setFocus();
+                    m_search->setText(qEnvironmentVariable("NATIVEOFFICE_HOME_QUERY",
+                                                           QStringLiteral("doc")));
+                }
+                else if (show.startsWith(QLatin1String("tool:"))) {
+                    const QString which = show.mid(5);
+                    const Tool t = which == QLatin1String("qr")       ? Tool::QrCode
+                                 : which == QLatin1String("compress") ? Tool::CompressPdf
+                                 : which == QLatin1String("ocr")      ? Tool::Ocr
+                                 : which == QLatin1String("toword")   ? Tool::PdfToWord
+                                 : which == QLatin1String("image")    ? Tool::ImageResizer
+                                                                      : Tool::MarkdownEditor;
+                    emit toolRequested(t);
+                }
+            });
+        } else if (grabSettings) {
             QTimer::singleShot(4500, this, [this] { showSettingsDialog(); });
-        QTimer::singleShot(6000, this, [this, grabPath, grabSettings] {
-            QWidget* target = grabSettings ? window() : this;
+        }
+        // NATIVEOFFICE_HOME_GRAB_FULL captures the scrolled body at its natural
+        // height instead of the visible slice, so a review can see the panels
+        // that sit below the fold on a short screen.
+        const bool grabFull = qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB_FULL");
+        QTimer::singleShot(6000, this, [this, grabPath, grabSettings, grabFull, scroll] {
+            // A dialog opened by NATIVEOFFICE_HOME_SHOW is its own top-level
+            // window, so grabbing the main window would capture the page behind
+            // it. Prefer whatever modal is actually in front.
+            QWidget* target = QApplication::activePopupWidget();
+            if (!target) target = QApplication::activeModalWidget();
+            if (!target) {
+                target = grabSettings ? window()
+                       : grabFull     ? scroll->widget()
+                                      : static_cast<QWidget*>(this);
+            }
             target->grab().save(grabPath, "PNG");
         });
     }
 }
 
-// ── Left sidebar ──────────────────────────────────────────────────────────────
+void StartScreen::resizeEvent(QResizeEvent* e) {
+    QWidget::resizeEvent(e);
+    if (m_searchPopup && m_searchPopup->isVisible()) m_searchPopup->showUnder();
+}
+
+bool StartScreen::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == m_search && event->type() == QEvent::KeyPress && m_searchPopup
+        && m_searchPopup->isVisible()) {
+        const int key = static_cast<QKeyEvent*>(event)->key();
+        if (key == Qt::Key_Down || key == Qt::Key_Up || key == Qt::Key_Escape)
+            return m_searchPopup->handleKey(key);
+    }
+    if (watched == m_search && event->type() == QEvent::FocusIn && m_searchPopup) {
+        FileIndex::instance().ensureStarted();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+// ── Left sidebar ─────────────────────────────────────────────────────────────
 QWidget* StartScreen::buildSidebar() {
     auto* bar = new QWidget(this);
     bar->setObjectName("sidebar");
-    bar->setFixedWidth(230);
+    bar->setFixedWidth(236);
     auto* v = new QVBoxLayout(bar);
-    v->setContentsMargins(14, 18, 14, 18);
-    v->setSpacing(4);
+    v->setContentsMargins(14, 18, 14, 14);
+    v->setSpacing(3);
 
-    // Logo — two-tone wordmark ("Office" in the logo's violet) beside a
-    // larger brand mark.
+    // ── Brand lockup ────────────────────────────────────────────────────────
     auto* logoRow = new QWidget(bar);
     auto* lh = new QHBoxLayout(logoRow);
-    lh->setContentsMargins(4, 0, 0, 10); lh->setSpacing(11);
-    lh->addWidget(logoMark(40, logoRow));
+    lh->setContentsMargins(6, 0, 0, 12);
+    lh->setSpacing(11);
+    lh->addWidget(logoMark(38, logoRow), 0, Qt::AlignVCenter);
+    auto* words = new QVBoxLayout();
+    words->setSpacing(1);
     auto* brand = new QLabel(logoRow);
     brand->setTextFormat(Qt::RichText);
-    brand->setText("<span style='color:#F0F2F7;'>Native</span>"
-                   "<span style='color:#8B7CF7;'>Office</span>");
-    brand->setStyleSheet("background:transparent; font:700 20px 'Segoe UI';");
-    lh->addWidget(brand);
+    brand->setText(QStringLiteral("<span style='color:%1;'>Native</span>"
+                                  "<span style='color:%2;'>Office</span>")
+                       .arg(Home::kText, Home::kAccentSoft));
+    brand->setStyleSheet("background:transparent; font:700 18px 'Segoe UI';");
+    words->addWidget(brand);
+    words->addWidget(heading(tr("Work native. Create freely."), 10, Home::kFaint, false, logoRow));
+    lh->addLayout(words);
     lh->addStretch();
     v->addWidget(logoRow);
-    v->addSpacing(8);
 
-    struct Nav { const char* icon; QString label; int action; };  // action: -1 none, 0 home, see below
-    const Nav items[] = {
-        {Lucide::kHome,         "Home",      0},
-        {Lucide::kFileText,     "Documents", 1},
-        {Lucide::kTable,        "Sheets",    2},
-        {Lucide::kPresentation, "Slides",    3},
-        {Lucide::kDownload,     "PDF",       5},
-        {Lucide::kFolderOpen,   "Templates", 4},
-        {Lucide::kStar,         "Favorites", 6},
-        {Lucide::kTrash,        "Recycle Bin", 7},
+    struct Nav { const char* icon; QString label; int action; };
+    const Nav primary[] = {
+        { Lucide::kHome,         tr("Home"),      0 },
+        { Lucide::kFileText,     tr("Documents"), 1 },
+        { Lucide::kTable,        tr("Sheets"),    2 },
+        { Lucide::kPresentation, tr("Slides"),    3 },
+        { Lucide::kDownload,     tr("PDF"),       5 },
     };
-    for (const Nav& n : items) {
+    const Nav secondary[] = {
+        { Lucide::kFolderOpen, tr("Templates"),   4 },
+        { Lucide::kTrash,      tr("Recycle Bin"), 7 },
+    };
+
+    auto addNav = [&](const Nav& n) {
         auto* item = new ClickableFrame(bar);
-        item->setObjectName(n.action == 0 ? "navItemActive" : "navItem");
+        const bool active = n.action == 0;
+        item->setObjectName(active ? "navItemActive" : "navItem");
         auto* il = new QHBoxLayout(item);
-        il->setContentsMargins(12, 0, 12, 0); il->setSpacing(12);
+        il->setContentsMargins(12, 0, 12, 0);
+        il->setSpacing(12);
         item->setFixedHeight(40);
-        auto* ic = Lucide::label(n.icon, n.action == 0 ? "#FFFFFF" : "#9AA4B8", 16, item);
+        il->addWidget(Lucide::label(n.icon, active ? "#FFFFFF" : Home::kMuted, 16, item));
         auto* tx = new QLabel(n.label, item);
-        tx->setStyleSheet(QString("background:transparent;font:13px 'Segoe UI';color:%1;")
-                              .arg(n.action == 0 ? "#FFFFFF" : "#AEB6C6"));
-        il->addWidget(ic); il->addWidget(tx); il->addStretch();
+        tx->setStyleSheet(QString("background:transparent;font:%1 13px 'Segoe UI';color:%2;")
+                              .arg(active ? "600" : "400", active ? "#FFFFFF" : Home::kTextBody));
+        tx->setAttribute(Qt::WA_TransparentForMouseEvents);
+        il->addWidget(tx);
+        il->addStretch();
+        if (active) {
+            auto* dot = new QLabel(item);
+            dot->setFixedSize(6, 6);
+            dot->setStyleSheet(QString("background:%1;border-radius:3px;").arg(Home::kAccentSoft));
+            il->addWidget(dot);
+        }
         const int action = n.action;
-        item->onClick = [this, action]{
-            // Home and the two list views are navigation, not launches, so the
-            // update-scan lock must not swallow them.
-            if (action != 0 && action != 6 && action != 7 && launchLocked()) return;
+        item->onClick = [this, action] {
+            if (action != 0 && action != 7 && launchLocked()) return;
             switch (action) {
             case 1: emit newDocumentRequested(DocumentType::Writer);  break;
             case 2: emit newDocumentRequested(DocumentType::Calc);    break;
             case 3: emit newDocumentRequested(DocumentType::Impress); break;
-            case 4: showTemplatesDialog(0); break;
+            case 4: showTemplateMarket(0); break;
             case 5: emit newDocumentRequested(DocumentType::Pdf);     break;
-            case 0: m_favoritesOnly = false; refreshRecentPanel();    break;
-            case 6: m_favoritesOnly = true;  refreshRecentPanel();    break;
-            case 7: openRecycleBin();                                 break;
+            case 7: openRecycleBin(); break;
             default: break;
             }
         };
         v->addWidget(item);
-    }
+    };
+
+    for (const Nav& n : primary) addNav(n);
+
+    auto* rule = new QFrame(bar);
+    rule->setFixedHeight(1);
+    rule->setStyleSheet(QString("background:%1;border:none;").arg(Home::kBorderSoft));
+    v->addSpacing(10);
+    v->addWidget(rule);
+    v->addSpacing(10);
+
+    for (const Nav& n : secondary) addNav(n);
     v->addStretch();
 
     // ── Public-beta notice ──────────────────────────────────────────────────
-    // A small red BETA pill with a short note, so users know this isn't the
-    // final release and how to report problems.
     {
-        auto* betaBox = new QWidget(bar);
-        auto* bv = new QVBoxLayout(betaBox);
-        bv->setContentsMargins(4, 10, 4, 2);
-        bv->setSpacing(6);
-
-        auto* pill = new QLabel("BETA", betaBox);
+        auto* betaRow = new QWidget(bar);
+        auto* bh = new QHBoxLayout(betaRow);
+        bh->setContentsMargins(6, 0, 4, 6);
+        bh->setSpacing(8);
+        auto* pill = new QLabel(QStringLiteral("BETA"), betaRow);
         pill->setAlignment(Qt::AlignCenter);
-        pill->setFixedSize(54, 22);
+        pill->setFixedSize(48, 20);
         pill->setStyleSheet("background:#E5484D;color:#FFFFFF;border-radius:6px;"
-                            "font:700 11px 'Segoe UI';letter-spacing:1px;");
-        bv->addWidget(pill, 0, Qt::AlignLeft);
-
-        auto* note = new QLabel(betaBox);
+                            "font:700 10px 'Segoe UI';letter-spacing:1px;");
+        bh->addWidget(pill);
+        auto* note = new QLabel(betaRow);
         note->setTextFormat(Qt::RichText);
-        note->setWordWrap(true);
         note->setOpenExternalLinks(true);
-        note->setText("Public beta — not the final product. Found an issue? "
-                      "Email <a href='mailto:contact@nativeoffice.online' "
-                      "style='color:#8B7CF7;text-decoration:none;'>"
-                      "contact@nativeoffice.online</a>.");
-        note->setStyleSheet("color:#7B8494;font:11px 'Segoe UI';background:transparent;");
-        bv->addWidget(note);
-
-        v->addWidget(betaBox);
+        note->setText(QStringLiteral("<a href='mailto:contact@nativeoffice.online' "
+                                     "style='color:%1;text-decoration:none;'>Report an issue</a>")
+                          .arg(Home::kFaint));
+        note->setStyleSheet("font:11px 'Segoe UI';background:transparent;");
+        bh->addWidget(note);
+        bh->addStretch();
+        v->addWidget(betaRow);
     }
 
-    // Version label — so a user can see at a glance which build they're on
-    // (handy for confirming an auto-update actually changed the version).
+    // ── Account row ─────────────────────────────────────────────────────────
+    // Replaces the old storage meter and the always-there upgrade card: the
+    // plan lives behind this row, which is also where the account lives.
     {
-        auto* ver = new QLabel("Version " + QCoreApplication::applicationVersion(), bar);
-        ver->setObjectName("versionLabel");
-        ver->setStyleSheet("color:#5A6373;font:11px 'Segoe UI';background:transparent;"
-                            "padding:8px 4px 2px 4px;");
+        auto* card = new ClickableFrame(bar);
+        card->setObjectName("accountRow");
+        card->setFixedHeight(58);
+        card->setCursor(Qt::PointingHandCursor);
+        auto* ah = new QHBoxLayout(card);
+        ah->setContentsMargins(10, 0, 10, 0);
+        ah->setSpacing(10);
+
+        auto* pic = new QLabel(card);
+        pic->setFixedSize(34, 34);
+        pic->setAttribute(Qt::WA_TransparentForMouseEvents);
+        pic->setStyleSheet("background:transparent;");
+        ah->addWidget(pic);
+
+        auto* col = new QVBoxLayout();
+        col->setSpacing(1);
+        auto* who  = label600(QString(), 12, Home::kText, card);
+        auto* plan = heading(QString(), 11, Home::kFaint, false, card);
+        who->setAttribute(Qt::WA_TransparentForMouseEvents);
+        plan->setAttribute(Qt::WA_TransparentForMouseEvents);
+        col->addWidget(who);
+        col->addWidget(plan);
+        ah->addLayout(col, 1);
+        ah->addWidget(Lucide::label(Lucide::kChevronDown, Home::kFaint, 14, card));
+
+        auto refresh = [pic, who, plan, card] {
+            auto& auth = AuthManager::instance();
+            pic->setPixmap(roundAvatarPixmap(34, card->devicePixelRatio()));
+            QString name = auth.displayName();
+            if (name.isEmpty()) name = QStringLiteral("Signed out");
+            who->setText(name);
+            plan->setText(auth.premiumActive() ? auth.premiumPlanLabel()
+                                               : QStringLiteral("Free Plan"));
+        };
+        refresh();
+        connect(&AuthManager::instance(), &AuthManager::profileChanged, card, refresh);
+        card->onClick = [this, card] { showPlanPopup(card); };
+        v->addWidget(card);
+    }
+
+    {
+        auto* ver = new QLabel(tr("Version ") + QCoreApplication::applicationVersion(), bar);
+        ver->setStyleSheet(QString("color:%1;font:10px 'Segoe UI';background:transparent;"
+                                   "padding:7px 6px 0 6px;").arg(Home::kFaint));
         v->addWidget(ver, 0, Qt::AlignLeft);
     }
 
-    bar->setStyleSheet(R"(
-        QWidget#sidebar { background:#0A0D13; border-right:1px solid #1B212C; }
-        #navItem { background:transparent; border-radius:8px; }
-        #navItem:hover { background:#161C28; }
-        #navItemActive { background:#17233B; border-radius:8px; }
-    )");
+    bar->setStyleSheet(QString(R"(
+        QWidget#sidebar { background:%1; border-right:1px solid %2; }
+        #navItem { background:transparent; border-radius:9px; }
+        #navItem:hover { background:%3; }
+        #navItemActive { background:#211E3A; border-radius:9px; }
+        #accountRow { background:%4; border:1px solid %2; border-radius:12px; }
+        #accountRow:hover { background:%3; }
+    )").arg(Home::kSidebar, Home::kBorderSoft, Home::kPanelHover, Home::kPanel));
     return bar;
 }
 
-// ── Top bar ───────────────────────────────────────────────────────────────────
+// ── Top bar ──────────────────────────────────────────────────────────────────
 QWidget* StartScreen::buildTopBar() {
     auto* bar = new QWidget(this);
     bar->setObjectName("topBar");
-    bar->setFixedHeight(64);
-    // Three sections with equal-stretch outer halves so the clock lands on the
-    // bar's true midline regardless of how wide the search box or icon
-    // cluster are: [search … stretch] [clock] [stretch … icons].
+    bar->setFixedHeight(74);
     auto* h = new QHBoxLayout(bar);
-    h->setContentsMargins(28, 0, 24, 0); h->setSpacing(16);
+    h->setContentsMargins(26, 0, 22, 0);
+    h->setSpacing(16);
 
-    // Equal minimum widths give both halves identical size hints, so the
-    // equal stretch factors keep them the same width at every window size —
-    // which pins the clock to the bar's true midline.
+    // Equal minimum widths give both halves identical size hints, so the equal
+    // stretch factors keep the clock on the bar's true midline.
     auto* leftBox = new QWidget(bar);
-    leftBox->setMinimumWidth(420);
+    leftBox->setMinimumWidth(432);
     auto* leftL = new QHBoxLayout(leftBox);
-    leftL->setContentsMargins(0, 0, 0, 0); leftL->setSpacing(16);
+    leftL->setContentsMargins(0, 0, 0, 0);
+    leftL->setSpacing(16);
 
     auto* rightBox = new QWidget(bar);
-    rightBox->setMinimumWidth(420);
+    rightBox->setMinimumWidth(432);
     auto* rightL = new QHBoxLayout(rightBox);
-    rightL->setContentsMargins(0, 0, 0, 0); rightL->setSpacing(16);
+    rightL->setContentsMargins(0, 0, 0, 0);
+    rightL->setSpacing(10);
 
-    auto* search = new QLineEdit(bar);
-    search->setObjectName("searchBox");
-    search->setPlaceholderText("   Search files, templates, tools…");
-    search->setFixedHeight(40);
-    search->setFixedWidth(320);
-    auto* kbd = new QLabel("Ctrl + K", search);
-    kbd->setStyleSheet("background:#1B2230;border-radius:5px;color:#8A93A6;"
-                       "font:11px 'Segoe UI';padding:2px 8px;");
-    auto* sl = new QHBoxLayout(search);
-    sl->setContentsMargins(0, 0, 8, 0); sl->addStretch(); sl->addWidget(kbd);
+    // ── Search ──────────────────────────────────────────────────────────────
+    m_search = new QLineEdit(bar);
+    m_search->setObjectName("searchBox");
+    m_search->setPlaceholderText(tr("Search files, templates, tools…"));
+    m_search->setFixedHeight(40);
+    m_search->setFixedWidth(360);
+    m_search->setTextMargins(30, 0, 62, 0);
 
-    leftL->addWidget(search);
+    auto* glass = Lucide::label(Lucide::kSearch, Home::kMuted, 15, m_search);
+    glass->move(11, 12);
+    auto* kbd = new QLabel(QStringLiteral("Ctrl + K"), m_search);
+    kbd->setStyleSheet(QString("background:%1;border-radius:5px;color:%2;"
+                               "font:10px 'Segoe UI';padding:3px 7px;")
+                           .arg(Home::kPanelSoft, Home::kMuted));
+    kbd->setAttribute(Qt::WA_TransparentForMouseEvents);
+    kbd->adjustSize();
+
+    m_searchPopup = new SearchPopup(m_search, this);
+    connect(m_searchPopup, &SearchPopup::fileChosen, this, [this](const QString& path) {
+        m_search->clear();
+        if (!launchLocked()) emit fileOpenRequested(path);
+    });
+    connect(m_search, &QLineEdit::textChanged, this, [this](const QString& text) {
+        if (!m_searchPopup) return;
+        if (text.trimmed().isEmpty() && !m_searchPopup->isVisible()) return;
+        if (!m_searchPopup->isVisible()) m_searchPopup->showUnder();
+        m_searchPopup->setQuery(text);
+    });
+    // Arrow keys and Enter belong to the result list while it is open.
+    m_search->installEventFilter(this);
+    connect(m_search, &QLineEdit::returnPressed, this, [this] {
+        if (m_searchPopup) m_searchPopup->handleKey(Qt::Key_Return);
+    });
+
+    leftL->addWidget(m_search);
     leftL->addStretch();
     h->addWidget(leftBox, 1);
 
-    // Live clock — sits between the two equal-width halves, i.e. centered.
-    auto* clock = new QLabel(bar);
-    clock->setObjectName("liveClock");
-    clock->setAlignment(Qt::AlignCenter);
-    auto refreshClock = [clock]() {
-        clock->setText(QDateTime::currentDateTime().toString("ddd, MMM d · h:mm AP"));
+    // ── Date over time, as in the reference ─────────────────────────────────
+    auto* clockBox = new QWidget(bar);
+    auto* cv = new QVBoxLayout(clockBox);
+    cv->setContentsMargins(0, 0, 0, 0);
+    cv->setSpacing(1);
+    auto* dateLabel = new QLabel(clockBox);
+    dateLabel->setAlignment(Qt::AlignCenter);
+    dateLabel->setStyleSheet(QString("background:transparent;color:%1;"
+                                     "font:12px 'Segoe UI';").arg(Home::kMuted));
+    auto* timeLabel = new QLabel(clockBox);
+    timeLabel->setAlignment(Qt::AlignCenter);
+    timeLabel->setStyleSheet(QString("background:transparent;color:%1;"
+                                     "font:600 19px 'Segoe UI';").arg(Home::kText));
+    cv->addWidget(dateLabel);
+    cv->addWidget(timeLabel);
+    auto refreshClock = [dateLabel, timeLabel] {
+        const QDateTime now = QDateTime::currentDateTime();
+        dateLabel->setText(now.toString(QStringLiteral("dddd, MMM d")));
+        timeLabel->setText(now.toString(QStringLiteral("h:mm AP")));
     };
     refreshClock();
-    auto* clockTimer = new QTimer(clock);
-    connect(clockTimer, &QTimer::timeout, clock, refreshClock);
+    auto* clockTimer = new QTimer(clockBox);
+    connect(clockTimer, &QTimer::timeout, clockBox, refreshClock);
     clockTimer->start(1000);
+    h->addWidget(clockBox, 0);
 
-    h->addWidget(clock, 0);
-
+    // ── Right cluster ───────────────────────────────────────────────────────
     auto iconBtn = [&](const char* svg, std::function<void()> cb) {
         auto* b = new QToolButton(bar);
-        b->setIcon(Lucide::icon(svg, "#AEB6C6", 17, bar->devicePixelRatio()));
+        b->setIcon(Lucide::icon(svg, Home::kTextBody, 17, bar->devicePixelRatio()));
         b->setIconSize(QSize(17, 17));
         b->setObjectName("topIcon");
         b->setCursor(Qt::PointingHandCursor);
@@ -550,229 +869,421 @@ QWidget* StartScreen::buildTopBar() {
         return b;
     };
     rightL->addStretch();
-    // Compact update-status pill, top-right of the home page.
     rightL->addWidget(buildUpdateBanner(), 0, Qt::AlignVCenter);
+
+    // AI Assistant chip — the same violet pill as the reference.
+    // A QPushButton sizes itself from its text and icon, not from a layout put
+    // inside it, so the chip needs its width stated or it collapses to a square.
+    auto* ai = new QPushButton(bar);
+    ai->setObjectName("aiChip");
+    ai->setCursor(Qt::PointingHandCursor);
+    ai->setFixedSize(164, 38);
+    {
+        auto* al = new QHBoxLayout(ai);
+        al->setContentsMargins(14, 0, 12, 0);
+        al->setSpacing(8);
+        al->addWidget(Lucide::label(Lucide::kSparkles, "#FFFFFF", 15, ai));
+        auto* t = label600(tr("AI Assistant"), 13, "#FFFFFF", ai);
+        t->setAttribute(Qt::WA_TransparentForMouseEvents);
+        al->addWidget(t);
+        al->addWidget(Lucide::label(Lucide::kChevronDown, "#D9D2FF", 13, ai));
+    }
+    connect(ai, &QPushButton::clicked, this, &StartScreen::aiRequested);
+    rightL->addWidget(ai);
+
     auto* bellBtn = iconBtn(Lucide::kBell, nullptr);
     connect(bellBtn, &QToolButton::clicked, this,
             [this, bellBtn] { showNotificationsPopup(bellBtn); });
     rightL->addWidget(bellBtn);
-    rightL->addWidget(iconBtn(Lucide::kSettings, [this]{ showSettingsDialog(); }));
+    rightL->addWidget(iconBtn(Lucide::kSettings, [this] { showSettingsDialog(); }));
 
-    // Account avatar — the real profile photo (cached by AuthManager), with a
-    // coloured-initial fallback. Clicking it opens Settings → Account.
     auto* avatar = new QToolButton(bar);
     avatar->setObjectName("avatarBtn");
     avatar->setCursor(Qt::PointingHandCursor);
     avatar->setFixedSize(38, 38);
     avatar->setIconSize(QSize(38, 38));
     avatar->setStyleSheet("QToolButton#avatarBtn { border:none; background:transparent; }");
-    auto refreshAvatar = [avatar]() {
+    auto refreshAvatar = [avatar] {
         auto& auth = AuthManager::instance();
-        avatar->setIcon(QIcon(roundAvatarPixmap(
-            38, avatar->devicePixelRatio())));
+        avatar->setIcon(QIcon(roundAvatarPixmap(38, avatar->devicePixelRatio())));
         avatar->setToolTip(auth.userEmail().isEmpty()
                                ? QStringLiteral("Account")
                                : auth.userName() + QStringLiteral("\n") + auth.userEmail());
     };
     refreshAvatar();
-    connect(&AuthManager::instance(), &AuthManager::profileChanged,
-            avatar, refreshAvatar);
-    connect(avatar, &QToolButton::clicked, this, [this]{ showProfileTray(); });
+    connect(&AuthManager::instance(), &AuthManager::profileChanged, avatar, refreshAvatar);
+    connect(avatar, &QToolButton::clicked, this, [this] { showProfileTray(); });
     rightL->addWidget(avatar);
     h->addWidget(rightBox, 1);
 
-    bar->setStyleSheet(R"(
-        QWidget#topBar { background:#0D1117; border-bottom:1px solid #1B212C; }
-        QLineEdit#searchBox { background:#161B26; border:1px solid #232A38;
-            border-radius:10px; color:#C7CEDC; padding-left:10px; font:13px 'Segoe UI'; }
-        QLabel#liveClock { background:transparent; color:#AEB6C6; font:600 13px 'Segoe UI'; }
-        QToolButton#topIcon { background:#161B26; border:1px solid #232A38; border-radius:10px;
-            color:#AEB6C6; font:15px 'Segoe UI Emoji'; }
-        QToolButton#topIcon:hover { background:#1E2737; }
-    )");
+    // The keyboard hint sits at the right inside the field.
+    kbd->move(m_search->width() - kbd->width() - 10, 11);
+
+    bar->setStyleSheet(QString(R"(
+        QWidget#topBar { background:%1; border-bottom:1px solid %2; }
+        QLineEdit#searchBox { background:%3; border:1px solid %2; border-radius:11px;
+            color:%4; font:13px 'Segoe UI'; }
+        QLineEdit#searchBox:focus { border:1px solid %5; background:%6; }
+        QToolButton#topIcon { background:%3; border:1px solid %2; border-radius:11px; }
+        QToolButton#topIcon:hover { background:%7; }
+        QPushButton#aiChip {
+            background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #6D5BF0, stop:1 #9B6BF6);
+            border:none; border-radius:11px; }
+        QPushButton#aiChip:hover {
+            background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7C6CF6, stop:1 #AC7DFF); }
+    )").arg(Home::kBg, Home::kBorderSoft, Home::kPanel, Home::kTextBody,
+            Home::kAccent, Home::kPanelSoft, Home::kPanelHover));
     return bar;
 }
 
-// ── Center column ─────────────────────────────────────────────────────────────
+// ── Bottom strip ─────────────────────────────────────────────────────────────
+QWidget* StartScreen::buildBottomBar() {
+    auto* bar = new QFrame(this);
+    bar->setObjectName("bottomBar");
+    bar->setFixedHeight(62);
+    auto* h = new QHBoxLayout(bar);
+    h->setContentsMargins(26, 0, 26, 12);
+    h->setSpacing(18);
+
+    // Quote of the day.
+    const Quote& q = kQuotes[QDate::currentDate().dayOfYear()
+                             % int(sizeof(kQuotes) / sizeof(kQuotes[0]))];
+    h->addWidget(Lucide::label(Lucide::kQuote, Home::kFaint, 15, bar), 0, Qt::AlignVCenter);
+    auto* quote = new QLabel(bar);
+    quote->setTextFormat(Qt::RichText);
+    quote->setText(QStringLiteral("<span style='color:%1;'>&ldquo;%2&rdquo;</span>"
+                                  "<span style='color:%3;'>&nbsp;&nbsp;— %4</span>")
+                       .arg(Home::kTextBody, QString::fromUtf8(q.text),
+                            Home::kFaint, QString::fromUtf8(q.who)));
+    quote->setStyleSheet("background:transparent;font:12px 'Segoe UI';");
+    h->addWidget(quote, 0, Qt::AlignVCenter);
+    h->addStretch();
+
+    // Quick access.
+    h->addWidget(label600(tr("Quick Access"), 12, Home::kTextBody, bar), 0, Qt::AlignVCenter);
+
+    struct Quick { QString letter; const char* glyph; QString color; int action; QString tip; };
+    const Quick quicks[] = {
+        { QStringLiteral("W"), nullptr, Home::kWriter,  1, tr("New document") },
+        { QStringLiteral("S"), nullptr, Home::kCalc,    2, tr("New spreadsheet") },
+        { QStringLiteral("P"), nullptr, Home::kImpress, 3, tr("New presentation") },
+        { QString(), Lucide::kFileText, Home::kPdf,     4, tr("Open the PDF workspace") },
+        { QString(), Lucide::kFolderOpen, Home::kMarkdown, 0, tr("Open a file") },
+    };
+    for (const Quick& qk : quicks) {
+        auto* b = new ClickableFrame(bar);
+        b->setFixedSize(34, 34);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setToolTip(qk.tip);
+        auto* bl = new QHBoxLayout(b);
+        bl->setContentsMargins(0, 0, 0, 0);
+        bl->addWidget(qk.glyph ? iconTile(qk.glyph, qk.color, 34, b)
+                               : badge(qk.letter, qk.color, 34, b));
+        const int action = qk.action;
+        b->onClick = [this, action] {
+            if (launchLocked()) return;
+            switch (action) {
+            case 1: emit newDocumentRequested(DocumentType::Writer);  break;
+            case 2: emit newDocumentRequested(DocumentType::Calc);    break;
+            case 3: emit newDocumentRequested(DocumentType::Impress); break;
+            case 4: emit newDocumentRequested(DocumentType::Pdf);     break;
+            default: openFileDialog(); break;
+            }
+        };
+        h->addWidget(b, 0, Qt::AlignVCenter);
+    }
+
+    auto* plus = new ClickableFrame(bar);
+    plus->setObjectName("quickPlus");
+    plus->setFixedSize(34, 34);
+    plus->setCursor(Qt::PointingHandCursor);
+    plus->setToolTip(tr("Browse templates"));
+    {
+        auto* pl = new QHBoxLayout(plus);
+        pl->setContentsMargins(0, 0, 0, 0);
+        pl->addWidget(Lucide::label(Lucide::kPlus, Home::kMuted, 16, plus),
+                      0, Qt::AlignCenter);
+    }
+    plus->onClick = [this] { showTemplateMarket(0); };
+    h->addWidget(plus, 0, Qt::AlignVCenter);
+
+    h->addSpacing(6);
+    auto* sep = new QFrame(bar);
+    sep->setFixedSize(1, 24);
+    sep->setStyleSheet(QString("background:%1;border:none;").arg(Home::kBorder));
+    h->addWidget(sep, 0, Qt::AlignVCenter);
+    h->addSpacing(6);
+
+    auto trust = [&](const char* icon, const QString& color, const QString& text) {
+        auto* w = new QWidget(bar);
+        auto* wl = new QHBoxLayout(w);
+        wl->setContentsMargins(0, 0, 0, 0);
+        wl->setSpacing(8);
+        wl->addWidget(Lucide::label(icon, color, 15, w));
+        wl->addWidget(heading(text, 12, Home::kMuted, false, w));
+        h->addWidget(w, 0, Qt::AlignVCenter);
+    };
+    trust(Lucide::kCircleCheck, Home::kGreen, tr("All files are saved locally"));
+    trust(Lucide::kShieldCheck, Home::kAccentSoft, tr("100% private & secure"));
+
+    bar->setStyleSheet(QString(R"(
+        QFrame#bottomBar { background:%1; border-top:1px solid %2; }
+        #quickPlus { background:%3; border:1px dashed %4; border-radius:9px; }
+        #quickPlus:hover { background:%5; }
+    )").arg(Home::kBg, Home::kBorderSoft, Home::kPanel, Home::kBorder, Home::kPanelHover));
+    return bar;
+}
+
+// ── Center column ────────────────────────────────────────────────────────────
 QWidget* StartScreen::buildCenterColumn() {
     auto* col = new QWidget(this);
     auto* v = new QVBoxLayout(col);
-    v->setContentsMargins(0, 0, 0, 0); v->setSpacing(22);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(14);
 
-    // Welcome row + Import button
-    auto* welcome = new QWidget(col);
-    auto* wl = new QHBoxLayout(welcome);
-    wl->setContentsMargins(0, 0, 0, 0); wl->setSpacing(8);
-    auto* wcol = new QVBoxLayout(); wcol->setSpacing(4);
-    // Greeting uses the signed-in account's first name and refreshes when the
-    // profile syncs (the home page is built before sign-in completes).
-    auto* greetLabel = heading(QString(), 26, "#F0F2F7", true, welcome);
-    auto refreshGreeting = [greetLabel]() {
-        QString who = AuthManager::instance().displayName();
-        if (who.isEmpty()) who = QStringLiteral("there");
-        const int hr = QTime::currentTime().hour();
-        greetLabel->setText(
-              hr < 5  ? QString("Burning the midnight oil, %1 🌙").arg(who)
-            : hr < 12 ? QString("Good morning, %1 ☀️").arg(who)
-            : hr < 17 ? QString("Good afternoon, %1 👋").arg(who)
-                      : QString("Good evening, %1 🌆").arg(who));
-    };
-    refreshGreeting();
-    connect(&AuthManager::instance(), &AuthManager::profileChanged,
-            greetLabel, refreshGreeting);
-    wcol->addWidget(greetLabel);
-    wcol->addWidget(heading("What would you like to create today?", 14, "#8A93A6", false, welcome));
-    wl->addLayout(wcol); wl->addStretch();
-    auto* importBtn = new QPushButton("⤒  Import File", welcome);
-    importBtn->setObjectName("importBtn");
-    importBtn->setCursor(Qt::PointingHandCursor);
-    importBtn->setFixedHeight(40);
-    connect(importBtn, &QPushButton::clicked, this, &StartScreen::openFileDialog);
-    wl->addWidget(importBtn, 0, Qt::AlignTop);
-    v->addWidget(welcome);
+    m_hero = new HeroBanner(col);
+    connect(m_hero, &HeroBanner::openFileRequested, this, &StartScreen::openFileDialog);
+    connect(m_hero, &HeroBanner::createRequested, this, [this](HeroBanner::Create what) {
+        if (launchLocked()) return;
+        switch (what) {
+        case HeroBanner::Create::Document:     emit newDocumentRequested(DocumentType::Writer);  break;
+        case HeroBanner::Create::Spreadsheet:  emit newDocumentRequested(DocumentType::Calc);    break;
+        case HeroBanner::Create::Presentation: emit newDocumentRequested(DocumentType::Impress); break;
+        case HeroBanner::Create::Markdown:     emit toolRequested(Tool::MarkdownEditor);         break;
+        }
+    });
+    v->addWidget(m_hero);
 
     v->addWidget(buildCreateCards());
 
     auto* row = new QWidget(col);
     auto* rl = new QHBoxLayout(row);
-    rl->setContentsMargins(0, 0, 0, 0); rl->setSpacing(20);
+    rl->setContentsMargins(0, 0, 0, 0);
+    rl->setSpacing(16);
     m_recentRowLayout = rl;
     m_recentPanel = buildRecentPanel();
     rl->addWidget(m_recentPanel, 1);
     rl->addWidget(buildTemplatesPanel(), 1);
     v->addWidget(row);
     v->addStretch();
-
-    col->setStyleSheet(R"(
-        QPushButton#importBtn { background:#161B26; border:1px solid #2A3344; border-radius:10px;
-            color:#D7DCE6; font:13px 'Segoe UI'; padding:0 16px; }
-        QPushButton#importBtn:hover { background:#1E2737; }
-    )");
     return col;
 }
 
 QWidget* StartScreen::buildCreateCards() {
     auto* w = new QWidget(this);
     auto* g = new QHBoxLayout(w);
-    g->setContentsMargins(0, 0, 0, 0); g->setSpacing(18);
+    g->setContentsMargins(0, 0, 0, 0);
+    g->setSpacing(14);
 
-    struct Card { QString letter, title, sub, color, grad1, grad2; int action; const char* art; };
-    const Card cards[] = {
-        {"W","Document","Create a new document","#2563EB","#21314f","#16203a", 1, kArtDocument},
-        {"S","Spreadsheet","Create a new spreadsheet","#16A34A","#16352a","#102a20", 2, kArtSpreadsheet},
-        {"P","Presentation","Create a new presentation","#EA580C","#3a2418","#2a1810", 3, kArtPresentation},
-        {"P","PDF","Merge, split & compress PDFs","#DC2626","#3a1414","#2a1010", 4, kArtPdf},
-        {"📁","Open File","Browse and open files","#7C5CFC","#2a2440","#1d1a33", 0, kArtOpenFile},
+    struct Card {
+        QString letter; const char* glyph; QString title, sub, color, tint;
+        int action; const char* art;
     };
+    const Card cards[] = {
+        { QStringLiteral("W"), nullptr, tr("Document"),     tr("Write, edit and\nformat with style"),
+          Home::kWriter,  QStringLiteral("rgba(47,111,228,0.13)"),  1, kArtDocument },
+        { QStringLiteral("S"), nullptr, tr("Spreadsheet"),  tr("Analyse, calculate\nand visualise"),
+          Home::kCalc,    QStringLiteral("rgba(29,167,91,0.13)"),   2, kArtSpreadsheet },
+        { QStringLiteral("P"), nullptr, tr("Presentation"), tr("Design, present\nand impress"),
+          Home::kImpress, QStringLiteral("rgba(238,108,31,0.13)"),  3, kArtPresentation },
+        { QString(), Lucide::kFileText, tr("PDF"),          tr("Merge, convert\nand secure"),
+          Home::kPdf,     QStringLiteral("rgba(224,69,63,0.13)"),   4, kArtPdf },
+        { QString(), Lucide::kFolderOpen, tr("Open File"),  tr("Browse and open\nany file"),
+          Home::kMarkdown, QStringLiteral("rgba(124,92,252,0.13)"), 0, kArtOpenFile },
+    };
+
     for (const Card& c : cards) {
         auto* card = new ClickableFrame(w);
         card->setObjectName("createCard");
-        card->setMinimumHeight(200);
+        card->setMinimumHeight(150);
+        card->setStyleSheet(QString(
+            "#createCard { background:qlineargradient(x1:0,y1:0,x2:0.4,y2:1,"
+            "  stop:0 %1, stop:1 rgba(18,21,31,0.0));"
+            "  border:1px solid %2; border-radius:15px; }"
+            "#createCard:hover { border:1px solid %3; }")
+            .arg(c.tint, Home::kBorder, c.color));
+
         auto* cv = new QVBoxLayout(card);
-        cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(0);
+        cv->setContentsMargins(15, 13, 15, 12);
+        cv->setSpacing(0);
 
-        auto* thumb = new QFrame(card);
-        thumb->setFixedHeight(120);
-        thumb->setStyleSheet(QString("background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            "stop:0 %1, stop:1 %2);border-top-left-radius:14px;border-top-right-radius:14px;")
-            .arg(c.grad1, c.grad2));
-        auto* tv = new QVBoxLayout(thumb);
-        tv->setContentsMargins(16, 16, 16, 16);
-        tv->addWidget(badge(c.letter, c.color, 40, thumb), 0, Qt::AlignLeft | Qt::AlignTop);
-        tv->addStretch();
-        // Illustration anchored bottom-right of the thumbnail.
-        tv->addWidget(svgArt(c.art, 82, thumb), 0, Qt::AlignRight | Qt::AlignBottom);
-        cv->addWidget(thumb);
+        // Icon tile with the faint document art floating behind it, to the right.
+        auto* topRow = new QHBoxLayout();
+        topRow->setContentsMargins(0, 0, 0, 0);
+        topRow->addWidget(c.glyph ? iconTile(c.glyph, c.color, 40, card)
+                                  : badge(c.letter, c.color, 40, card),
+                          0, Qt::AlignTop | Qt::AlignLeft);
+        topRow->addStretch();
+        topRow->addWidget(svgArtFaded(c.art, 56, 0.55, card), 0, Qt::AlignTop | Qt::AlignRight);
+        cv->addLayout(topRow);
+        cv->addStretch();
 
-        auto* foot = new QWidget(card);
-        auto* fl = new QVBoxLayout(foot);
-        fl->setContentsMargins(16, 12, 16, 14); fl->setSpacing(3);
-        fl->addWidget(heading(c.title, 15, "#EAEDF3", true, foot));
-        fl->addWidget(heading(c.sub, 12, "#8A93A6", false, foot));
-        cv->addWidget(foot);
+        auto* title = label600(c.title, 14, Home::kText, card);
+        title->setAttribute(Qt::WA_TransparentForMouseEvents);
+        cv->addWidget(title);
+        cv->addSpacing(3);
+
+        auto* footRow = new QHBoxLayout();
+        footRow->setContentsMargins(0, 0, 0, 0);
+        auto* sub = new QLabel(c.sub, card);
+        sub->setStyleSheet(QString("color:%1;font:11px 'Segoe UI';background:transparent;")
+                               .arg(Home::kMuted));
+        sub->setAttribute(Qt::WA_TransparentForMouseEvents);
+        footRow->addWidget(sub, 0, Qt::AlignBottom);
+        footRow->addStretch();
+
+        auto* go = new QLabel(card);
+        go->setFixedSize(26, 26);
+        go->setAlignment(Qt::AlignCenter);
+        go->setPixmap(Lucide::pixmap(Lucide::kArrowRight, Home::kTextBody, 14,
+                                     card->devicePixelRatio()));
+        go->setStyleSheet(QString("background:%1;border:1px solid %2;border-radius:13px;")
+                              .arg(Home::kPanelSoft, Home::kBorder));
+        go->setAttribute(Qt::WA_TransparentForMouseEvents);
+        footRow->addWidget(go, 0, Qt::AlignBottom);
+        cv->addLayout(footRow);
 
         const int action = c.action;
-        card->onClick = [this, action]{
+        card->onClick = [this, action] {
             if (launchLocked()) return;
-            if (action == 0) openFileDialog();
-            else emit newDocumentRequested(action == 1 ? DocumentType::Writer
-                                          : action == 2 ? DocumentType::Calc
-                                          : action == 3 ? DocumentType::Impress
-                                                        : DocumentType::Pdf);
+            switch (action) {
+            case 1: emit newDocumentRequested(DocumentType::Writer);  break;
+            case 2: emit newDocumentRequested(DocumentType::Calc);    break;
+            case 3: emit newDocumentRequested(DocumentType::Impress); break;
+            case 4: emit newDocumentRequested(DocumentType::Pdf);     break;
+            default: openFileDialog(); break;
+            }
         };
         g->addWidget(card, 1);
     }
-    w->setStyleSheet(R"(
-        #createCard { background:#141A24; border:1px solid #222A38; border-radius:14px; }
-        #createCard:hover { border:1px solid #3B82F6; background:#161D29; }
-    )");
     return w;
 }
 
+// ── Recent files ─────────────────────────────────────────────────────────────
 QWidget* StartScreen::buildRecentPanel() {
     auto* panel = new QFrame(this);
     panel->setObjectName("panel");
     auto* v = new QVBoxLayout(panel);
-    v->setContentsMargins(18, 16, 18, 16); v->setSpacing(12);
+    v->setContentsMargins(18, 16, 16, 14);
+    v->setSpacing(8);
 
     auto* head = new QHBoxLayout();
-    head->addWidget(heading("Recent Files", 15, "#EAEDF3", true, panel));
+    head->addWidget(label600(tr("Recent Files"), 14, Home::kText, panel));
     head->addStretch();
     auto* browse = new ClickableFrame(panel);
+    browse->setCursor(Qt::PointingHandCursor);
     auto* bl = new QHBoxLayout(browse);
-    bl->setContentsMargins(0, 0, 0, 0);
-    bl->addWidget(heading("Browse…", 12, "#3B82F6", false, browse));
-    browse->onClick = [this]{ openFileDialog(); };
+    bl->setContentsMargins(6, 2, 2, 2);
+    auto* browseLabel = heading(tr("View all"), 12, Home::kAccentSoft, false, browse);
+    browseLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    bl->addWidget(browseLabel);
+    browse->onClick = [this] { openFileDialog(); };
     head->addWidget(browse);
     v->addLayout(head);
+    v->addSpacing(2);
 
-    // Real recent files from the manager, filtered to starred ones when the
-    // sidebar's Favorites entry is active.
     auto& mgr = RecentFilesManager::instance();
-    std::vector<RecentFileEntry> entries;
-    for (const auto& e : mgr.recentFiles()) {
-        if (m_favoritesOnly && !mgr.isFavorite(e.path)) continue;
-        entries.push_back(e);
-    }
+    const std::vector<RecentFileEntry> entries = mgr.recentFiles();
+
     if (entries.empty()) {
-        v->addWidget(heading(m_favoritesOnly
-                                 ? "No favourites yet — right-click a recent file and "
-                                   "choose Add to Favorites."
-                                 : "No recent files yet — create or open one to get started.",
-                             12, "#6B7280", false, panel));
+        // First run: say what would put something here rather than leaving a
+        // blank rectangle.
+        auto* empty = new QWidget(panel);
+        auto* el = new QVBoxLayout(empty);
+        el->setContentsMargins(0, 22, 0, 22);
+        el->setSpacing(9);
+        auto* icon = Lucide::label(Lucide::kClock, Home::kFaint, 26, empty);
+        el->addWidget(icon, 0, Qt::AlignHCenter);
+        auto* line = heading(tr("Nothing here yet"), 13, Home::kTextBody, false, empty);
+        line->setAlignment(Qt::AlignCenter);
+        el->addWidget(line);
+        auto* hint = heading(tr("Create or open a file and it will show up here."),
+                             11, Home::kFaint, false, empty);
+        hint->setAlignment(Qt::AlignCenter);
+        hint->setWordWrap(true);
+        el->addWidget(hint);
+        v->addWidget(empty);
+        v->addStretch();
     }
+
     int shown = 0;
     for (const auto& e : entries) {
         if (shown++ >= 5) break;
+        const FileKind kind = fileKindForModule(e.type);
+
         auto* rowf = new ClickableFrame(panel);
         rowf->setObjectName("recentRow");
-        rowf->setFixedHeight(48);
+        rowf->setFixedHeight(46);
         auto* rh = new QHBoxLayout(rowf);
-        rh->setContentsMargins(8, 0, 8, 0); rh->setSpacing(12);
-        const QString col = e.type == "Calc" ? "#16A34A" : e.type == "Impress" ? "#EA580C" : "#2563EB";
-        const QString ltr = e.type == "Calc" ? "S" : e.type == "Impress" ? "P" : "W";
-        rh->addWidget(badge(ltr, col, 30, rowf));
-        auto* meta = new QVBoxLayout(); meta->setSpacing(1);
-        meta->addWidget(heading(e.name, 13, "#DCE1EA", false, rowf));
-        meta->addWidget(heading(e.type, 11, "#7B8494", false, rowf));
-        rh->addLayout(meta); rh->addStretch();
-        if (mgr.isFavorite(e.path)) {
-            auto* star = heading(QStringLiteral("★"), 13, "#F59E0B", false, rowf);
-            rh->addWidget(star);
-        }
-        rh->addWidget(heading(e.lastOpened.toString("MMM d, hh:mm"), 11, "#7B8494", false, rowf));
+        rh->setContentsMargins(8, 0, 6, 0);
+        rh->setSpacing(11);
+        rh->addWidget(badge(kind.letter, kind.color, 30, rowf));
+
+        auto* meta = new QVBoxLayout();
+        meta->setSpacing(1);
+        auto* name = label600(e.name, 12, Home::kText, rowf);
+        name->setAttribute(Qt::WA_TransparentForMouseEvents);
+        meta->addWidget(name);
+        QString subText = kind.module;
+        if (mgr.isFavorite(e.path)) subText += QStringLiteral("  ·  ★ Favourite");
+        auto* sub = heading(subText, 11, Home::kFaint, false, rowf);
+        sub->setAttribute(Qt::WA_TransparentForMouseEvents);
+        meta->addWidget(sub);
+        rh->addLayout(meta, 1);
+
+        const QDateTime when = e.lastOpened;
+        const QString whenText =
+            when.date() == QDate::currentDate()
+                ? tr("Today, %1").arg(when.toString(QStringLiteral("hh:mm")))
+            : when.date() == QDate::currentDate().addDays(-1)
+                ? tr("Yesterday, %1").arg(when.toString(QStringLiteral("hh:mm")))
+                : when.toString(QStringLiteral("MMM d, hh:mm"));
+        auto* stamp = heading(whenText, 11, Home::kFaint, false, rowf);
+        stamp->setAttribute(Qt::WA_TransparentForMouseEvents);
+        rh->addWidget(stamp);
+
+        auto* more = new ClickableFrame(rowf);
+        more->setFixedSize(24, 24);
+        more->setCursor(Qt::PointingHandCursor);
+        auto* ml = new QHBoxLayout(more);
+        ml->setContentsMargins(0, 0, 0, 0);
+        ml->addWidget(Lucide::label(Lucide::kMoreVertical, Home::kFaint, 14, more),
+                      0, Qt::AlignCenter);
         const QString path = e.path;
-        rowf->onClick = [this, path]{ if (launchLocked()) return; emit fileOpenRequested(path); };
+        more->onClick = [this, more, path] {
+            showRecentFileMenu(path, more->mapToGlobal(QPoint(0, more->height())));
+        };
+        rh->addWidget(more);
+
+        rowf->onClick = [this, path] { if (!launchLocked()) emit fileOpenRequested(path); };
         rowf->onContextMenu = [this, path](const QPoint& at) { showRecentFileMenu(path, at); };
         v->addWidget(rowf);
     }
-    v->addStretch();
 
-    panel->setStyleSheet(R"(
-        QFrame#panel { background:#12161F; border:1px solid #202836; border-radius:14px; }
-        #recentRow { background:transparent; border-radius:8px; }
-        #recentRow:hover { background:#1A2230; }
-    )");
+    if (!entries.empty()) {
+        v->addStretch();
+        auto* all = new ClickableFrame(panel);
+        all->setObjectName("recentRow");
+        all->setFixedHeight(38);
+        all->setCursor(Qt::PointingHandCursor);
+        auto* al = new QHBoxLayout(all);
+        al->setContentsMargins(8, 0, 8, 0);
+        al->setSpacing(10);
+        al->addWidget(Lucide::label(Lucide::kFolderOpen, Home::kAccentSoft, 15, all));
+        auto* t = label600(tr("Browse all files"), 12, Home::kAccentSoft, all);
+        t->setAttribute(Qt::WA_TransparentForMouseEvents);
+        al->addWidget(t);
+        al->addStretch();
+        al->addWidget(Lucide::label(Lucide::kArrowRight, Home::kAccentSoft, 14, all));
+        all->onClick = [this] { openFileDialog(); };
+        v->addWidget(all);
+    }
+
+    panel->setStyleSheet(QString(R"(
+        QFrame#panel { background:%1; border:1px solid %2; border-radius:14px; }
+        #recentRow { background:transparent; border-radius:9px; }
+        #recentRow:hover { background:%3; }
+    )").arg(Home::kPanel, Home::kBorder, Home::kPanelHover));
     return panel;
 }
 
@@ -791,13 +1302,9 @@ void StartScreen::refreshRecentPanel() {
 }
 
 void StartScreen::openRecycleBin() {
-    // The sidebar entry existed with nothing behind it. Deleting a document
-    // from the recent list puts it in the Windows Recycle Bin, so this opens
-    // exactly where those files went.
-    if (!QProcess::startDetached("explorer.exe", { "shell:RecycleBinFolder" })) {
-        QMessageBox::information(this, "Recycle Bin",
-            "Could not open the Recycle Bin.");
-    }
+    if (!QProcess::startDetached("explorer.exe", { "shell:RecycleBinFolder" }))
+        QMessageBox::information(this, tr("Recycle Bin"),
+                                 tr("Could not open the Recycle Bin."));
 }
 
 void StartScreen::showRecentFileMenu(const QString& path, const QPoint& at) {
@@ -808,11 +1315,12 @@ void StartScreen::showRecentFileMenu(const QString& path, const QPoint& at) {
     QMenu menu(this);
     menu.setStyleSheet(ThemeManager::inputDialogStyleSheet());
 
-    QAction* favAct    = menu.addAction(fav ? "Remove from Favorites" : "Add to Favorites");
-    QAction* revealAct = menu.addAction("Open file location");
+    QAction* favAct    = menu.addAction(fav ? tr("Remove from Favourites")
+                                            : tr("Add to Favourites"));
+    QAction* revealAct = menu.addAction(tr("Open file location"));
     menu.addSeparator();
-    QAction* forgetAct = menu.addAction("Remove from list");
-    QAction* deleteAct = menu.addAction("Delete file…");
+    QAction* forgetAct = menu.addAction(tr("Remove from list"));
+    QAction* deleteAct = menu.addAction(tr("Delete file…"));
 
     QAction* chosen = menu.exec(at);
     if (!chosen) return;
@@ -828,14 +1336,14 @@ void StartScreen::showRecentFileMenu(const QString& path, const QPoint& at) {
         mgr.removeFile(path);
         refreshRecentPanel();
     } else if (chosen == deleteAct) {
-        if (QMessageBox::question(this, "Delete File",
-                QString("Move \"%1\" to the Recycle Bin?").arg(name),
+        if (QMessageBox::question(this, tr("Delete File"),
+                tr("Move \"%1\" to the Recycle Bin?").arg(name),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
             return;
         QFile f(path);
         if (f.exists() && !f.moveToTrash()) {
-            QMessageBox::warning(this, "Delete Failed",
-                QString("Could not delete \"%1\".\n\n%2").arg(name, f.errorString()));
+            QMessageBox::warning(this, tr("Delete Failed"),
+                tr("Could not delete \"%1\".\n\n%2").arg(name, f.errorString()));
             return;
         }
         mgr.setFavorite(path, false);
@@ -844,168 +1352,252 @@ void StartScreen::showRecentFileMenu(const QString& path, const QPoint& at) {
     }
 }
 
+// ── Templates for You ────────────────────────────────────────────────────────
 QWidget* StartScreen::buildTemplatesPanel() {
-    auto* panel = new ClickableFrame(this);
+    auto* panel = new QFrame(this);
     panel->setObjectName("panel");
     auto* v = new QVBoxLayout(panel);
-    v->setContentsMargins(18, 16, 18, 16); v->setSpacing(12);
+    v->setContentsMargins(18, 16, 18, 12);
+    v->setSpacing(10);
 
     auto* head = new QHBoxLayout();
-    head->addWidget(heading("Templates for You", 15, "#EAEDF3", true, panel));
+    head->addWidget(label600(tr("Templates for You"), 14, Home::kText, panel));
     head->addStretch();
-    auto* viewAllTpl = new ClickableFrame(panel);
-    auto* vaL = new QHBoxLayout(viewAllTpl);
-    vaL->setContentsMargins(0, 0, 0, 0);
-    vaL->addWidget(heading("View all", 12, "#3B82F6", false, viewAllTpl));
-    viewAllTpl->onClick = [this]{ showTemplatesDialog(0); };
-    head->addWidget(viewAllTpl);
+    auto* viewAll = new ClickableFrame(panel);
+    viewAll->setCursor(Qt::PointingHandCursor);
+    auto* vaL = new QHBoxLayout(viewAll);
+    vaL->setContentsMargins(6, 2, 2, 2);
+    auto* vaLabel = heading(tr("View all"), 12, Home::kAccentSoft, false, viewAll);
+    vaLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    vaL->addWidget(vaLabel);
+    viewAll->onClick = [this] { showTemplateMarket(0); };
+    head->addWidget(viewAll);
     v->addLayout(head);
 
     auto* grid = new QGridLayout();
     grid->setSpacing(12);
-    struct T { QString title, sub, grad1, grad2; DocumentType type; };
-    const T ts[] = {
-        {"Professional Resume","Document","#2a2440","#1d1a33", DocumentType::Writer},
-        {"Monthly Budget","Spreadsheet","#16352a","#102a20", DocumentType::Calc},
-        {"Pitch Deck","Presentation","#3a2418","#2a1810", DocumentType::Impress},
-        {"Project Report","Document","#21314f","#16203a", DocumentType::Writer},
-    };
+    const QVector<TemplateEntry> featured = featuredTemplates();
+    const qreal dpr = devicePixelRatio();
     int i = 0;
-    for (const T& t : ts) {
+    for (const TemplateEntry& t : featured) {
         auto* c = new ClickableFrame(panel);
         c->setObjectName("tplCard");
-        c->setMinimumHeight(120);
+        c->setCursor(Qt::PointingHandCursor);
         auto* cv = new QVBoxLayout(c);
-        cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(0);
-        auto* thumb = new QFrame(c);
+        cv->setContentsMargins(0, 0, 0, 0);
+        cv->setSpacing(0);
+
+        auto* thumb = new QLabel(c);
         thumb->setFixedHeight(78);
-        thumb->setStyleSheet(QString("background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            "stop:0 %1,stop:1 %2);border-top-left-radius:10px;border-top-right-radius:10px;")
-            .arg(t.grad1, t.grad2));
-        auto* tv = new QHBoxLayout(thumb);
-        tv->setContentsMargins(10, 4, 10, 2);
-        tv->addStretch();
-        tv->addWidget(svgArt(t.type == DocumentType::Calc ? kArtSpreadsheet
-                           : t.type == DocumentType::Impress ? kArtPresentation
-                           : kArtDocument, 64, thumb), 0, Qt::AlignRight | Qt::AlignVCenter);
+        thumb->setScaledContents(false);
+        thumb->setAlignment(Qt::AlignCenter);
+        thumb->setPixmap(TemplateArt::preview(t.name, t.type, QSize(190, 78), dpr));
+        thumb->setAttribute(Qt::WA_TransparentForMouseEvents);
+        thumb->setStyleSheet("background:transparent;");
         cv->addWidget(thumb);
-        auto* foot = new QVBoxLayout(); foot->setContentsMargins(10, 8, 10, 8); foot->setSpacing(1);
-        foot->addWidget(heading(t.title, 12, "#E2E6EE", true, c));
-        foot->addWidget(heading(t.sub, 11, "#7B8494", false, c));
+
+        auto* foot = new QVBoxLayout();
+        foot->setContentsMargins(11, 7, 11, 8);
+        foot->setSpacing(1);
+        auto* name = label600(t.name, 12, Home::kText, c);
+        name->setAttribute(Qt::WA_TransparentForMouseEvents);
+        foot->addWidget(name);
+        auto* kindLabel = heading(t.type == DocumentType::Calc    ? tr("Spreadsheet")
+                                : t.type == DocumentType::Impress ? tr("Presentation")
+                                                                  : tr("Document"),
+                                  11, Home::kFaint, false, c);
+        kindLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+        foot->addWidget(kindLabel);
         cv->addLayout(foot);
+
         const DocumentType type = t.type;
-        const QString name = t.title;
-        c->onClick = [this, type, name]{ if (launchLocked()) return; emit templateChosen(type, name); };
+        const QString name2 = t.name;
+        c->onClick = [this, type, name2] {
+            if (!launchLocked()) emit templateChosen(type, name2);
+        };
         grid->addWidget(c, i / 2, i % 2);
         ++i;
     }
     v->addLayout(grid);
     v->addStretch();
 
-    // Clicking anywhere on the panel header area opens the gallery too.
-    panel->onClick = [this]{ showTemplatesDialog(0); };
+    // Carousel dots, matching the reference. They page through the catalogue
+    // four at a time, which is what the arrows would do.
+    {
+        auto* dots = new QHBoxLayout();
+        dots->setSpacing(6);
+        dots->addStretch();
+        for (int d = 0; d < 5; ++d) {
+            auto* dot = new ClickableFrame(panel);
+            dot->setFixedSize(6, 6);
+            dot->setCursor(Qt::PointingHandCursor);
+            dot->setStyleSheet(QString("background:%1;border-radius:3px;")
+                                   .arg(d == 0 ? Home::kAccent : QStringLiteral("#2C3346")));
+            dot->onClick = [this] { showTemplateMarket(0); };
+            dots->addWidget(dot);
+        }
+        dots->addStretch();
+        v->addLayout(dots);
+    }
 
-    panel->setStyleSheet(R"(
-        QFrame#panel { background:#12161F; border:1px solid #202836; border-radius:14px; }
-        #tplCard { background:#161B26; border:1px solid #232B3A; border-radius:10px; }
-        #tplCard:hover { border:1px solid #3B82F6; }
-    )");
+    panel->setStyleSheet(QString(R"(
+        QFrame#panel { background:%1; border:1px solid %2; border-radius:14px; }
+        #tplCard { background:%3; border:1px solid %2; border-radius:11px; }
+        #tplCard:hover { background:%4; border:1px solid %5; }
+    )").arg(Home::kPanel, Home::kBorder, Home::kPanelSoft, Home::kPanelHover, Home::kAccent));
     return panel;
 }
 
-// ── Right column (Get Started, Activity, Sync) ────────────────────────────────
+// ── Right column ─────────────────────────────────────────────────────────────
 QWidget* StartScreen::buildRightColumn() {
     auto* col = new QWidget(this);
-    col->setFixedWidth(300);
+    col->setFixedWidth(322);
     auto* v = new QVBoxLayout(col);
-    v->setContentsMargins(0, 0, 0, 0); v->setSpacing(20);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(14);
 
-    auto makePanel = [&](const QString& title) {
-        auto* p = new QFrame(col);
-        p->setObjectName("sidePanel");
-        auto* pv = new QVBoxLayout(p);
-        pv->setContentsMargins(18, 16, 18, 16); pv->setSpacing(12);
-        if (!title.isEmpty()) pv->addWidget(heading(title, 14, "#E6E9F0", true, p));
-        return std::make_pair(p, pv);
-    };
-    // valueOut hands back the right-hand label so a caller can update the value
-    // in place later, instead of having to rebuild the whole panel.
-    auto twoCol = [&](QWidget* parent, const char* icon, const QString& left,
-                      const QString& right, const QString& rightColor,
-                      std::function<void()> onClick = nullptr,
-                      QLabel** valueOut = nullptr) -> QWidget* {
-        auto* row = new ClickableFrame(parent);
-        row->setObjectName(onClick ? "sideRowLink" : "sideRow");
-        if (onClick) {
-            row->setCursor(Qt::PointingHandCursor);
-            row->onClick = std::move(onClick);
-        }
-        auto* h = new QHBoxLayout(row); h->setContentsMargins(6, 4, 6, 4); h->setSpacing(10);
-        h->addWidget(Lucide::label(icon, "#9AA4B8", 14, row));
-        h->addWidget(heading(left, 12, "#C3CAD8", false, row));
-        h->addStretch();
-        auto* value = heading(right, 12, rightColor, false, row);
-        if (valueOut) *valueOut = value;
-        h->addWidget(value);
-        return row;
-    };
-
-    // Get Started
-    { auto [p, pv] = makePanel("Get Started");
-      pv->addWidget(twoCol(p, Lucide::kPlay, "Take a tour", "3 min", "#7B8494"));
-      pv->addWidget(twoCol(p, Lucide::kKeyboard, "Keyboard shortcuts", "View all", "#3B82F6",
-                           [this] { showShortcutsDialog(); }));
-      pv->addWidget(twoCol(p, Lucide::kSparkles, "What's new", "See updates", "#3B82F6",
-                           [this] { showWhatsNewDialog(); }));
-      v->addWidget(p); }
-
-    // Your Activity
-    // Real counters. These three rows used to be two copies of the recent-files
-    // count plus a hardcoded dash for time spent, so the numbers never differed
-    // and the timer never moved.
-    { auto [p, pv] = makePanel("Your Activity");
-      auto& usage = UsageStats::instance();
-      QLabel* opened = nullptr;
-      QLabel* edited = nullptr;
-      QLabel* spent  = nullptr;
-      pv->addWidget(twoCol(p, Lucide::kFileText, "Documents opened",
-                           QString::number(usage.documentsOpened()), "#E6E9F0", {}, &opened));
-      pv->addWidget(twoCol(p, Lucide::kPencil, "Files edited",
-                           QString::number(usage.filesEdited()), "#E6E9F0", {}, &edited));
-      pv->addWidget(twoCol(p, Lucide::kTimer, "Time spent",
-                           usage.formattedTotal(), "#E6E9F0", {}, &spent));
-      // The panel is long-lived, so refresh in place on the one-minute tick
-      // rather than only when Home is rebuilt.
-      connect(&usage, &UsageStats::changed, p, [&usage, opened, edited, spent] {
-          if (opened) opened->setText(QString::number(usage.documentsOpened()));
-          if (edited) edited->setText(QString::number(usage.filesEdited()));
-          if (spent)  spent->setText(usage.formattedTotal());
-      });
-      v->addWidget(p); }
-
-    // Tools
-    { auto [p, pv] = makePanel("Tools");
-      pv->addWidget(twoCol(p, Lucide::kImage, "Image Resizer", "Open", "#3B82F6",
-                           [this] { if (launchLocked()) return; emit imageResizerRequested(); }));
-      pv->addWidget(twoCol(p, Lucide::kCode, "Markdown Editor", "Open", "#3B82F6",
-                           [this] { if (launchLocked()) return; emit markdownEditorRequested(); }));
-      v->addWidget(p); }
-
+    v->addWidget(new ActivityCard(col));
+    v->addWidget(buildToolsCard());
+    v->addWidget(buildAiCard());
+    v->addWidget(buildQuickTips());
     v->addStretch();
-    col->setStyleSheet(R"(
-        QFrame#sidePanel { background:#12161F; border:1px solid #202836; border-radius:14px; }
-        #sideRow { background:transparent; }
-        #sideRowLink { background:transparent; border-radius:8px; }
-        #sideRowLink:hover { background:#161C28; }
-    )");
     return col;
 }
 
-// ── Settings ── a right-side slide-in tray overlaying the home screen ────────────
+QWidget* StartScreen::buildToolsCard() {
+    auto* p = new QFrame(this);
+    p->setObjectName("sidePanel");
+    auto* v = new QVBoxLayout(p);
+    v->setContentsMargins(18, 16, 18, 16);
+    v->setSpacing(11);
+    v->addWidget(label600(tr("Tools"), 14, Home::kText, p));
+
+    auto* grid = new QGridLayout();
+    grid->setSpacing(9);
+
+    struct ToolTile { const char* icon; QString label; QString color; Tool tool; QString tip; };
+    const ToolTile tiles[] = {
+        { Lucide::kImage,       tr("Image Resizer"),     Home::kImageKind, Tool::ImageResizer,
+          tr("Resize, convert and compress pictures") },
+        { Lucide::kCode,        tr("Markdown Editor"),   Home::kMarkdown,  Tool::MarkdownEditor,
+          tr("Write markdown with a live preview") },
+        { Lucide::kQrCode,      tr("QR Code Generator"), Home::kAccent,    Tool::QrCode,
+          tr("Make a QR code for a link, Wi-Fi or contact") },
+        { Lucide::kFileArchive, tr("Compress PDF"),      Home::kPdf,       Tool::CompressPdf,
+          tr("Shrink a PDF without touching image quality") },
+        { Lucide::kScanText,    tr("OCR / Scan"),        Home::kCalc,      Tool::Ocr,
+          tr("Make a scanned PDF searchable") },
+        { Lucide::kFileDown,    tr("PDF to Word"),       Home::kWriter,    Tool::PdfToWord,
+          tr("Rebuild a PDF as an editable document") },
+    };
+    int i = 0;
+    for (const ToolTile& t : tiles) {
+        auto* tile = new ClickableFrame(p);
+        tile->setObjectName("toolTile");
+        tile->setFixedHeight(46);
+        tile->setCursor(Qt::PointingHandCursor);
+        tile->setToolTip(t.tip);
+        auto* tl = new QHBoxLayout(tile);
+        tl->setContentsMargins(10, 0, 8, 0);
+        tl->setSpacing(9);
+        tl->addWidget(Lucide::label(t.icon, t.color, 16, tile));
+        auto* lab = new QLabel(t.label, tile);
+        lab->setStyleSheet(QString("color:%1;font:11px 'Segoe UI';background:transparent;")
+                               .arg(Home::kTextBody));
+        lab->setWordWrap(true);
+        lab->setAttribute(Qt::WA_TransparentForMouseEvents);
+        tl->addWidget(lab, 1);
+        const Tool tool = t.tool;
+        tile->onClick = [this, tool] { if (!launchLocked()) emit toolRequested(tool); };
+        grid->addWidget(tile, i / 2, i % 2);
+        ++i;
+    }
+    v->addLayout(grid);
+
+    p->setStyleSheet(QString(R"(
+        QFrame#sidePanel { background:%1; border:1px solid %2; border-radius:14px; }
+        #toolTile { background:%3; border:1px solid %2; border-radius:10px; }
+        #toolTile:hover { background:%4; border:1px solid %5; }
+    )").arg(Home::kPanel, Home::kBorder, Home::kPanelSoft, Home::kPanelHover, Home::kAccent));
+    return p;
+}
+
+QWidget* StartScreen::buildAiCard() {
+    auto* p = new ClickableFrame(this);
+    p->setObjectName("aiPanel");
+    p->setCursor(Qt::PointingHandCursor);
+    p->setFixedHeight(164);
+
+    auto* h = new QHBoxLayout(p);
+    h->setContentsMargins(18, 16, 8, 16);
+    h->setSpacing(0);
+
+    auto* v = new QVBoxLayout();
+    v->setSpacing(8);
+
+    auto* titleRow = new QHBoxLayout();
+    titleRow->setSpacing(8);
+    auto* title = label600(tr("AI Assistant"), 15, Home::kText, p);
+    title->setAttribute(Qt::WA_TransparentForMouseEvents);
+    titleRow->addWidget(title);
+    auto* betaPill = new QLabel(QStringLiteral("BETA"), p);
+    betaPill->setAlignment(Qt::AlignCenter);
+    betaPill->setFixedSize(40, 17);
+    betaPill->setStyleSheet(QString("background:rgba(124,108,246,0.22);color:%1;"
+                                    "border-radius:5px;font:700 9px 'Segoe UI';"
+                                    "letter-spacing:1px;").arg(Home::kAccentSoft));
+    betaPill->setAttribute(Qt::WA_TransparentForMouseEvents);
+    titleRow->addWidget(betaPill);
+    titleRow->addStretch();
+    v->addLayout(titleRow);
+
+    auto* blurb = new QLabel(tr("Your creative copilot for\ndocuments, data and ideas."), p);
+    blurb->setStyleSheet(QString("color:%1;font:12px 'Segoe UI';background:transparent;")
+                             .arg(Home::kMuted));
+    blurb->setAttribute(Qt::WA_TransparentForMouseEvents);
+    v->addWidget(blurb);
+    v->addStretch();
+
+    auto* ask = new QPushButton(p);
+    ask->setObjectName("askAi");
+    ask->setCursor(Qt::PointingHandCursor);
+    ask->setFixedSize(176, 38);
+    {
+        auto* al = new QHBoxLayout(ask);
+        al->setContentsMargins(15, 0, 13, 0);
+        al->setSpacing(9);
+        auto* t = label600(tr("Ask AI Anything"), 12, "#FFFFFF", ask);
+        t->setAttribute(Qt::WA_TransparentForMouseEvents);
+        al->addWidget(t);
+        al->addStretch();
+        al->addWidget(Lucide::label(Lucide::kArrowRight, "#FFFFFF", 15, ask));
+    }
+    connect(ask, &QPushButton::clicked, this, &StartScreen::aiRequested);
+    v->addWidget(ask, 0, Qt::AlignLeft);
+
+    h->addLayout(v, 1);
+    h->addWidget(new AiOrb(p), 0, Qt::AlignVCenter);
+
+    p->onClick = [this] { emit aiRequested(); };
+    p->setStyleSheet(QString(R"(
+        QFrame#aiPanel { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,
+            stop:0 #191634, stop:0.6 #16182A, stop:1 #241B3A);
+            border:1px solid #322A5C; border-radius:14px; }
+        QFrame#aiPanel:hover { border:1px solid %1; }
+        QPushButton#askAi { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+            stop:0 #6D5BF0, stop:1 #9B6BF6); border:none; border-radius:10px; }
+        QPushButton#askAi:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+            stop:0 #7C6CF6, stop:1 #AC7DFF); }
+    )").arg(Home::kAccent));
+    return p;
+}
+
+QWidget* StartScreen::buildQuickTips() {
+    return new QuickTipsCard(this);
+}
+
+// ── Settings / profile ───────────────────────────────────────────────────────
 void StartScreen::showSettingsDialog() {
-    // Parent to the top-level window so the tray overlays the whole app and is
-    // sized from a stable, full-size widget (the StartScreen page inside the
-    // stack can momentarily report a smaller rect during startup).
     if (!m_settingsTray) m_settingsTray = new SettingsTray(window());
     m_settingsTray->openTray(SettingsTray::Settings);
 }
@@ -1015,12 +1607,117 @@ void StartScreen::showProfileTray() {
     m_settingsTray->openTray(SettingsTray::Profile);
 }
 
-// ── Notifications ── dropdown anchored under the bell icon ────────────────────
+// The sidebar account row: plan status, upgrade pitch, and the way into the
+// profile. This is where the old always-on "Upgrade to Pro" card went.
+void StartScreen::showPlanPopup(QWidget* anchor) {
+    auto& auth = AuthManager::instance();
+    const bool premium = auth.premiumActive();
+
+    auto* pop = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
+    pop->setObjectName("planPop");
+    pop->setAttribute(Qt::WA_DeleteOnClose);
+    pop->setAttribute(Qt::WA_StyledBackground, true);
+    pop->setFixedWidth(286);
+
+    auto* v = new QVBoxLayout(pop);
+    v->setContentsMargins(16, 15, 16, 14);
+    v->setSpacing(10);
+
+    auto* headRow = new QHBoxLayout();
+    headRow->setSpacing(10);
+    auto* crown = new QLabel(pop);
+    crown->setFixedSize(34, 34);
+    crown->setAlignment(Qt::AlignCenter);
+    crown->setPixmap(Lucide::pixmap(Lucide::kCrown, "#F5C453", 18, devicePixelRatio()));
+    crown->setStyleSheet("background:rgba(245,196,83,0.15);border-radius:10px;");
+    headRow->addWidget(crown);
+    auto* headCol = new QVBoxLayout();
+    headCol->setSpacing(1);
+    headCol->addWidget(label600(premium ? auth.premiumPlanLabel()
+                                        : tr("NativeOffice Pro"), 13, Home::kText, pop));
+    headCol->addWidget(heading(premium ? tr("Thank you for supporting the app.")
+                                       : tr("Unlock the full power"),
+                               11, Home::kFaint, false, pop));
+    headRow->addLayout(headCol, 1);
+    v->addLayout(headRow);
+
+    if (!premium) {
+        const QStringList perks = {
+            tr("No export watermark"),
+            tr("Advanced PDF tools"),
+            tr("Premium export defaults"),
+            tr("Priority support"),
+        };
+        for (const QString& perk : perks) {
+            auto* row = new QWidget(pop);
+            auto* rl = new QHBoxLayout(row);
+            rl->setContentsMargins(2, 0, 0, 0);
+            rl->setSpacing(9);
+            rl->addWidget(Lucide::label(Lucide::kCircleCheck, Home::kGreen, 14, row));
+            rl->addWidget(heading(perk, 12, Home::kTextBody, false, row));
+            rl->addStretch();
+            v->addWidget(row);
+        }
+
+        auto* upgrade = new QPushButton(tr("Upgrade to Pro"), pop);
+        upgrade->setObjectName("upgradeBtn");
+        upgrade->setCursor(Qt::PointingHandCursor);
+        upgrade->setFixedHeight(38);
+        connect(upgrade, &QPushButton::clicked, pop, [pop] {
+            AuthManager::instance().openPremiumPage();
+            pop->close();
+        });
+        v->addWidget(upgrade);
+    }
+
+    auto* rule = new QFrame(pop);
+    rule->setFixedHeight(1);
+    rule->setStyleSheet(QString("background:%1;border:none;").arg(Home::kBorder));
+    v->addWidget(rule);
+
+    auto linkRow = [&](const char* icon, const QString& text, std::function<void()> cb) {
+        auto* row = new ClickableFrame(pop);
+        row->setObjectName("planRow");
+        row->setFixedHeight(34);
+        row->setCursor(Qt::PointingHandCursor);
+        auto* rl = new QHBoxLayout(row);
+        rl->setContentsMargins(8, 0, 8, 0);
+        rl->setSpacing(10);
+        rl->addWidget(Lucide::label(icon, Home::kMuted, 15, row));
+        auto* lab = heading(text, 12, Home::kTextBody, false, row);
+        lab->setAttribute(Qt::WA_TransparentForMouseEvents);
+        rl->addWidget(lab);
+        rl->addStretch();
+        row->onClick = [pop, cb] { pop->close(); cb(); };
+        v->addWidget(row);
+    };
+    linkRow(Lucide::kUser, tr("Profile and account"), [this] { showProfileTray(); });
+    linkRow(Lucide::kSettings, tr("Settings"), [this] { showSettingsDialog(); });
+    linkRow(Lucide::kKeyboard, tr("Keyboard shortcuts"), [this] { showShortcutsDialog(); });
+    linkRow(Lucide::kSparkles, tr("What's new"), [this] { showWhatsNewDialog(); });
+
+    pop->setStyleSheet(QString(R"(
+        QFrame#planPop { background:%1; border:1px solid %2; border-radius:14px; }
+        #planRow { background:transparent; border-radius:8px; }
+        #planRow:hover { background:%3; }
+        QPushButton#upgradeBtn { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+            stop:0 #E0A93B, stop:1 #F0C558); border:none; border-radius:9px;
+            color:#221A05; font:700 12px 'Segoe UI'; }
+        QPushButton#upgradeBtn:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+            stop:0 #EFBA4C, stop:1 #FFD76D); }
+    )").arg(Home::kPanel, Home::kBorder, Home::kPanelHover));
+
+    pop->ensurePolished();
+    pop->layout()->activate();
+    pop->adjustSize();
+    pop->move(anchor->mapToGlobal(QPoint(0, -pop->height() - 8)));
+    pop->show();
+}
+
+// ── Notifications ────────────────────────────────────────────────────────────
 void StartScreen::showNotificationsPopup(QWidget* anchor) {
-    // Toggle behaviour without flicker: a Qt::Popup dismisses itself on the very
-    // press that opens the bell again, so the button's release would otherwise
-    // re-open it (open → close → open flash). If a popup is live, or one was
-    // just dismissed by this same click, do nothing.
+    // Toggle without flicker: a Qt::Popup dismisses itself on the very press
+    // that opens the bell again, so the release would otherwise re-open it.
     if (m_notifPopup) { m_notifPopup->close(); return; }
     if (QDateTime::currentMSecsSinceEpoch() - m_notifClosedMs < 250) return;
 
@@ -1028,85 +1725,138 @@ void StartScreen::showNotificationsPopup(QWidget* anchor) {
     pop->setObjectName("notifPop");
     pop->setAttribute(Qt::WA_DeleteOnClose);
     pop->setAttribute(Qt::WA_StyledBackground, true);
-    pop->setFixedWidth(360);
+    pop->setFixedWidth(392);
     m_notifPopup = pop;
     connect(pop, &QObject::destroyed, this,
             [this] { m_notifClosedMs = QDateTime::currentMSecsSinceEpoch(); });
 
     auto* v = new QVBoxLayout(pop);
-    v->setContentsMargins(14, 12, 14, 12);
-    v->setSpacing(4);
-    v->addWidget(heading("Notifications", 14, "#F0F2F7", true, pop));
+    v->setContentsMargins(8, 8, 8, 10);
+    v->setSpacing(2);
+
+    // Header strip.
+    auto* head = new QWidget(pop);
+    auto* hl = new QHBoxLayout(head);
+    hl->setContentsMargins(10, 6, 6, 8);
+    hl->setSpacing(9);
+    hl->addWidget(Lucide::label(Lucide::kBell, Home::kAccentSoft, 16, head));
+    hl->addWidget(label600(tr("Notifications"), 14, Home::kText, head));
+    hl->addStretch();
+    auto* count = new QLabel(pop);
+    count->setAlignment(Qt::AlignCenter);
+    count->setFixedHeight(20);
+    count->setStyleSheet(QString("background:rgba(124,108,246,0.18);color:%1;"
+                                 "border-radius:6px;padding:0 8px;"
+                                 "font:700 10px 'Segoe UI';").arg(Home::kAccentSoft));
+    hl->addWidget(count);
+    v->addWidget(head);
+
+    auto* rule = new QFrame(pop);
+    rule->setFixedHeight(1);
+    rule->setStyleSheet(QString("background:%1;border:none;").arg(Home::kBorderSoft));
+    v->addWidget(rule);
     v->addSpacing(4);
 
-    auto item = [&](const char* icon, const QString& title, const QString& body,
-                    const QString& url) {
-        auto* row = new ClickableFrame(pop);
+    auto* scroll = new QScrollArea(pop);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setMaximumHeight(430);
+    auto* list = new QWidget(scroll);
+    list->setObjectName("notifList");
+    auto* lv = new QVBoxLayout(list);
+    lv->setContentsMargins(0, 0, 6, 0);
+    lv->setSpacing(3);
+
+    int items = 0;
+    auto item = [&](const char* icon, const QString& tint, const QString& title,
+                    const QString& body, const QString& when, const QString& url) {
+        ++items;
+        auto* row = new ClickableFrame(list);
         row->setObjectName("notifItem");
-        auto* hl = new QHBoxLayout(row);
-        hl->setContentsMargins(10, 8, 10, 8);
-        hl->setSpacing(10);
-        hl->addWidget(Lucide::label(icon, "#8B7CF7", 16, row), 0, Qt::AlignTop);
+        auto* rl = new QHBoxLayout(row);
+        rl->setContentsMargins(10, 10, 10, 10);
+        rl->setSpacing(11);
+
+        auto* dot = new QLabel(row);
+        dot->setFixedSize(32, 32);
+        dot->setAlignment(Qt::AlignCenter);
+        dot->setPixmap(Lucide::pixmap(icon, tint, 16, devicePixelRatio()));
+        QColor c(tint);
+        dot->setStyleSheet(QString("background:rgba(%1,%2,%3,0.14);border-radius:10px;")
+                               .arg(c.red()).arg(c.green()).arg(c.blue()));
+        dot->setAttribute(Qt::WA_TransparentForMouseEvents);
+        rl->addWidget(dot, 0, Qt::AlignTop);
+
         auto* tv = new QVBoxLayout();
-        tv->setSpacing(2);
-        tv->addWidget(heading(title, 12, "#E6E9F0", true, row));
-        auto* b = heading(body, 11, "#9AA4B8", false, row);
+        tv->setSpacing(3);
+        auto* topRow = new QHBoxLayout();
+        topRow->setSpacing(8);
+        auto* t = label600(title, 12, Home::kText, row);
+        t->setAttribute(Qt::WA_TransparentForMouseEvents);
+        topRow->addWidget(t, 1);
+        auto* stamp = heading(when, 10, Home::kFaint, false, row);
+        stamp->setAttribute(Qt::WA_TransparentForMouseEvents);
+        topRow->addWidget(stamp, 0, Qt::AlignTop);
+        tv->addLayout(topRow);
+        auto* b = heading(body, 11, Home::kMuted, false, row);
         b->setWordWrap(true);
+        b->setAttribute(Qt::WA_TransparentForMouseEvents);
         tv->addWidget(b);
-        hl->addLayout(tv, 1);
+        rl->addLayout(tv, 1);
+
         if (!url.isEmpty()) {
             row->setCursor(Qt::PointingHandCursor);
-            row->onClick = [pop, url] {
-                QDesktopServices::openUrl(QUrl(url));
-                pop->close();
-            };
+            row->onClick = [pop, url] { QDesktopServices::openUrl(QUrl(url)); pop->close(); };
         }
-        v->addWidget(row);
+        lv->addWidget(row);
     };
 
-    // Newest first. These are the two releases that changed how the app looks
-    // and behaves rather than what it can do, so they are worth explaining
-    // here: someone who updates and finds their title bar missing should be
-    // able to read why without leaving the app.
-    item(Lucide::kRepeat, "1.6.5: Your work saves itself",
-         "Autosave is on in Writer, Sheets, Slides, PDF and Markdown. Every "
-         "change is written back on its own, so closing a saved document no "
-         "longer asks whether to keep it. Save and Save As are still in the "
-         "File menu, and the brand bar shows when the last autosave happened.",
-         QString());
-    item(Lucide::kPresentation, "1.6.4: A taller workspace",
-         "The Windows title bar is gone and the tab strip has taken its place "
-         "at the top, so the ribbon and page start higher in every mode. Tabs "
-         "scroll when there are many, and Ctrl+W, Ctrl+T, Ctrl+Tab and "
-         "Ctrl+Shift+T all work.",
-         QString());
-    item(Lucide::kSparkles, "Editing is now free for everyone",
-         "No more read-only mode. Free exports carry a small "
-         "\"Made with NativeOffice\" mark; Premium removes it and unlocks the new "
-         "Premium Settings.",
-         QStringLiteral("https://nativeoffice.online/premium"));
-    item(Lucide::kStar, "Our family is growing",
-         "The NativeOffice community is increasing day by day — "
-         "thanks for being part of this family!",
-         QString());
-    item(Lucide::kHelp, "Queries or feature requests?",
-         "We'd love to hear from you — mail us at contact@nativeoffice.online.",
-         QStringLiteral("mailto:contact@nativeoffice.online"));
-    item(Lucide::kFileText, "Privacy Policy",
-         "Read how NativeOffice handles your data.",
-         QStringLiteral("https://nativeoffice.online/privacy"));
-    item(Lucide::kFileText, "Terms of Service",
-         "The terms that govern your use of NativeOffice.",
-         QStringLiteral("https://nativeoffice.online/terms"));
+    item(Lucide::kSparkles, Home::kAccentSoft, tr("A brand new Home"),
+         tr("The dashboard has been rebuilt: a greeting that follows the time of day, "
+            "search that really searches your files, an activity graph with history, "
+            "and six tools a click away."),
+         tr("Now"), QString());
+    item(Lucide::kRepeat, Home::kGreen, tr("Your work saves itself"),
+         tr("Autosave is on in Writer, Sheets, Slides, PDF and Markdown. Save and Save As "
+            "are still in the File menu when you want to choose a folder."),
+         QStringLiteral("1.6.5"), QString());
+    item(Lucide::kPresentation, Home::kImpress, tr("A taller workspace"),
+         tr("The Windows title bar is gone and the tab strip took its place, so the ribbon "
+            "and page start higher in every mode."),
+         QStringLiteral("1.6.4"), QString());
+    item(Lucide::kCrown, Home::kAmber, tr("Editing is free for everyone"),
+         tr("No read-only mode. Free exports carry a small \"Made with NativeOffice\" mark; "
+            "Premium removes it."),
+         QString(), QStringLiteral("https://nativeoffice.online/premium"));
+    item(Lucide::kStar, Home::kBlue, tr("Our family is growing"),
+         tr("The NativeOffice community grows every day. Thanks for being part of it."),
+         QString(), QString());
+    item(Lucide::kHelp, Home::kMuted, tr("Questions or feature requests?"),
+         tr("We would love to hear from you at contact@nativeoffice.online."),
+         QString(), QStringLiteral("mailto:contact@nativeoffice.online"));
+    item(Lucide::kShieldCheck, Home::kAccentSoft, tr("Privacy Policy and Terms"),
+         tr("How NativeOffice handles your data, and the terms that govern its use."),
+         QString(), QStringLiteral("https://nativeoffice.online/privacy"));
 
-    pop->setStyleSheet(R"(
-        QFrame#notifPop { background:#12161F; border:1px solid #2A3344; border-radius:12px; }
-        #notifItem { background:transparent; border-radius:8px; }
-        #notifItem:hover { background:#161C28; }
-    )");
+    count->setText(QString::number(items));
+    lv->addStretch();
+    scroll->setWidget(list);
+    v->addWidget(scroll, 1);
+
+    pop->setStyleSheet(QString(R"(
+        QFrame#notifPop { background:%1; border:1px solid %2; border-radius:14px; }
+        QWidget#notifList { background:transparent; }
+        QScrollArea { background:transparent; }
+        #notifItem { background:%3; border:1px solid transparent; border-radius:10px; }
+        #notifItem:hover { background:%4; border:1px solid %2; }
+        QScrollBar:vertical { background:transparent; width:8px; margin:2px; }
+        QScrollBar::handle:vertical { background:#2A3244; border-radius:4px; min-height:26px; }
+        QScrollBar::add-line, QScrollBar::sub-line { height:0; }
+    )").arg(Home::kPanel, Home::kBorder, Home::kPanelSoft, Home::kPanelHover));
+
     // Compute the final size BEFORE showing so the popup doesn't pop in at one
-    // size and resize on screen (the word-wrapped rows need the layout activated
-    // first, otherwise adjustSize uses a stale height).
+    // size and resize on screen.
     pop->ensurePolished();
     pop->layout()->activate();
     pop->adjustSize();
@@ -1116,21 +1866,31 @@ void StartScreen::showNotificationsPopup(QWidget* anchor) {
     pop->show();
 }
 
-// ── Keyboard shortcuts ── the ones the app actually implements ────────────────
+// ── Templates ────────────────────────────────────────────────────────────────
+void StartScreen::showTemplateMarket(int category) {
+    TemplateMarket market(this, category);
+    connect(&market, &TemplateMarket::templateChosen, this,
+            [this](DocumentType type, const QString& name) {
+                if (!launchLocked()) emit templateChosen(type, name);
+            });
+    market.exec();
+}
+
+// ── Keyboard shortcuts ───────────────────────────────────────────────────────
 void StartScreen::showShortcutsDialog() {
     QDialog dlg(this);
-    dlg.setWindowTitle("Keyboard Shortcuts");
-    dlg.resize(680, 640);
-    dlg.setStyleSheet(R"(
-        QDialog { background:#0D1117; }
+    dlg.setWindowTitle(tr("Keyboard Shortcuts"));
+    dlg.resize(700, 660);
+    dlg.setStyleSheet(QString(R"(
+        QDialog { background:%1; }
         QScrollArea { background:transparent; border:none; }
         QScrollArea > QWidget > QWidget { background:transparent; }
-    )");
+    )").arg(Home::kBg));
 
     auto* root = new QVBoxLayout(&dlg);
     root->setContentsMargins(24, 20, 24, 16);
     root->setSpacing(12);
-    root->addWidget(heading("Keyboard Shortcuts", 20, "#F0F2F7", true, &dlg));
+    root->addWidget(heading(tr("Keyboard Shortcuts"), 20, Home::kText, true, &dlg));
 
     auto* scroll = new QScrollArea(&dlg);
     scroll->setWidgetResizable(true);
@@ -1141,7 +1901,7 @@ void StartScreen::showShortcutsDialog() {
 
     auto section = [&](const QString& title) {
         pv->addSpacing(10);
-        pv->addWidget(heading(title, 14, "#8B7CF7", true, page));
+        pv->addWidget(heading(title, 14, Home::kAccentSoft, true, page));
         pv->addSpacing(2);
     };
     auto row = [&](const QString& keys, const QString& what) {
@@ -1150,77 +1910,83 @@ void StartScreen::showShortcutsDialog() {
         h->setContentsMargins(0, 2, 0, 2);
         h->setSpacing(14);
         auto* chip = new QLabel(keys, r);
-        chip->setStyleSheet("background:#1B2230; color:#C3CAD8; border-radius:5px;"
-                            "padding:3px 10px; font:600 11px 'Segoe UI';");
-        chip->setFixedWidth(150);
+        chip->setStyleSheet(QString("background:%1; color:%2; border-radius:5px;"
+                                    "padding:3px 10px; font:600 11px 'Segoe UI';")
+                                .arg(Home::kPanelSoft, Home::kTextBody));
+        chip->setFixedWidth(155);
         chip->setAlignment(Qt::AlignCenter);
         h->addWidget(chip);
-        h->addWidget(heading(what, 12, "#AEB6C6", false, r));
+        h->addWidget(heading(what, 12, Home::kMuted, false, r));
         h->addStretch();
         pv->addWidget(r);
     };
 
-    section("Everywhere");
-    row("Ctrl + N",           "New document");
-    row("Ctrl + O",           "Open a file");
-    row("Ctrl + S",           "Save");
-    row("Ctrl + Shift + S",   "Save As");
-    row("Ctrl + Z",           "Undo");
-    row("Ctrl + Y",           "Redo");
-    row("Ctrl + X / C / V",   "Cut / Copy / Paste");
-    row("Ctrl + A",           "Select all");
-    row("Ctrl + W",           "Close document");
+    section(tr("Everywhere"));
+    row("Ctrl + K",           tr("Search your files from Home"));
+    row("Ctrl + N",           tr("New document"));
+    row("Ctrl + O",           tr("Open a file"));
+    row("Ctrl + S",           tr("Save"));
+    row("Ctrl + Shift + S",   tr("Save As"));
+    row("Ctrl + Z / Y",       tr("Undo / redo"));
+    row("Ctrl + X / C / V",   tr("Cut / copy / paste"));
+    row("Ctrl + A",           tr("Select all"));
+    row("Ctrl + T / W",       tr("New tab / close tab"));
+    row("Ctrl + Tab",         tr("Next tab"));
+    row("Ctrl + Shift + T",   tr("Reopen the last closed tab"));
 
-    section("Writer (Documents)");
-    row("Ctrl + B / I / U",   "Bold / Italic / Underline");
-    row("Ctrl + F",           "Find");
-    row("Ctrl + H",           "Find and replace");
-    row("Ctrl + P",           "Print");
-    row("F7",                 "Spelling check");
-    row("Ctrl + ] / [",       "Grow / shrink font size");
-    row("Ctrl + L / E / R / J", "Align left / center / right / justify");
-    row("Ctrl + 1 / 5 / 2",   "Line spacing 1.0 / 1.5 / 2.0");
-    row("Ctrl + Alt + 1-3",   "Apply Heading 1–3");
-    row("Ctrl + Shift + N",   "Back to Normal style");
-    row("Ctrl + Shift + L",   "Bulleted list");
-    row("Ctrl + M",           "Increase indent (Shift to decrease)");
-    row("Ctrl + K",           "Insert hyperlink");
-    row("Ctrl + Enter",       "Page break");
-    row("Ctrl + Space",       "Clear formatting");
-    row("Shift + F3",         "Change case");
-    row("Ctrl + Shift + E",   "Export to PDF");
+    section(tr("Writer (Documents)"));
+    row("Ctrl + B / I / U",   tr("Bold / italic / underline"));
+    row("Ctrl + F",           tr("Find"));
+    row("Ctrl + H",           tr("Find and replace"));
+    row("Ctrl + P",           tr("Print"));
+    row("F7",                 tr("Spelling check"));
+    row("Ctrl + ] / [",       tr("Grow / shrink font size"));
+    row("Ctrl + L / E / R / J", tr("Align left / center / right / justify"));
+    row("Ctrl + 1 / 5 / 2",   tr("Line spacing 1.0 / 1.5 / 2.0"));
+    row("Ctrl + Alt + 1-3",   tr("Apply Heading 1 to 3"));
+    row("Ctrl + Shift + N",   tr("Back to Normal style"));
+    row("Ctrl + Shift + L",   tr("Bulleted list"));
+    row("Ctrl + M",           tr("Increase indent (Shift to decrease)"));
+    row("Ctrl + K",           tr("Insert hyperlink"));
+    row("Ctrl + Enter",       tr("Page break"));
+    row("Ctrl + Space",       tr("Clear formatting"));
+    row("Shift + F3",         tr("Change case"));
+    row("Ctrl + Shift + F",   tr("Focus mode"));
+    row("Ctrl + Shift + E",   tr("Export to PDF"));
 
-    section("Sheets (Spreadsheets)");
-    row("Ctrl + B / I / U",   "Bold / Italic / Underline");
-    row("Ctrl + D",           "Fill down");
-    row("Ctrl + R",           "Fill right");
-    row("Delete",             "Clear selected cells");
+    section(tr("Sheets (Spreadsheets)"));
+    row("Ctrl + B / I / U",   tr("Bold / italic / underline"));
+    row("Ctrl + D",           tr("Fill down"));
+    row("Ctrl + R",           tr("Fill right"));
+    row("Delete",             tr("Clear selected cells"));
 
-    section("Slides (Presentations)");
-    row("F5",                 "Start slide show");
-    row("Shift + F5",         "Slide show from current slide");
-    row("Esc",                "Exit slide show");
-    row("→ / Space",          "Next slide");
-    row("← / Backspace",      "Previous slide");
-    row("B",                  "Black screen during show");
-    row("Ctrl + M",           "New slide");
-    row("Delete",             "Delete selected object");
-    row("Ctrl + Shift + E",   "Export to PDF");
+    section(tr("Slides (Presentations)"));
+    row("F5",                 tr("Start slide show"));
+    row("Shift + F5",         tr("Slide show from current slide"));
+    row("Esc",                tr("Exit slide show"));
+    row("→ / Space",          tr("Next slide"));
+    row("← / Backspace",      tr("Previous slide"));
+    row("B",                  tr("Black screen during show"));
+    row("Ctrl + M",           tr("New slide"));
+    row("Delete",             tr("Delete selected object"));
+    row("Ctrl + Shift + E",   tr("Export to PDF"));
 
-    section("PDF");
-    row("Ctrl + F",           "Find in document");
-    row("Ctrl + P",           "Print");
-    row("Esc",                "Exit read mode");
+    section(tr("PDF"));
+    row("Ctrl + F",           tr("Find in document"));
+    row("Ctrl + P",           tr("Print"));
+    row("Esc",                tr("Exit read mode"));
 
     pv->addStretch();
     scroll->setWidget(page);
     root->addWidget(scroll, 1);
 
-    auto* closeBtn = new QPushButton("Close", &dlg);
+    auto* closeBtn = new QPushButton(tr("Close"), &dlg);
     closeBtn->setCursor(Qt::PointingHandCursor);
-    closeBtn->setStyleSheet("QPushButton { background:#6D5BE8; color:#FFFFFF; border:none;"
-                            "border-radius:8px; padding:8px 22px; font:600 12px 'Segoe UI'; }"
-                            "QPushButton:hover { background:#7E6DF0; }");
+    closeBtn->setStyleSheet(QString("QPushButton { background:%1; color:#FFFFFF; border:none;"
+                                    "border-radius:8px; padding:8px 22px;"
+                                    "font:600 12px 'Segoe UI'; }"
+                                    "QPushButton:hover { background:%2; }")
+                                .arg(Home::kAccent, Home::kAccentSoft));
     connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
     auto* br = new QHBoxLayout();
     br->addStretch();
@@ -1230,179 +1996,65 @@ void StartScreen::showShortcutsDialog() {
     dlg.exec();
 }
 
-// ── What's new ── recent release highlights ───────────────────────────────────
+// ── What's new ───────────────────────────────────────────────────────────────
 void StartScreen::showWhatsNewDialog() {
     QDialog dlg(this);
-    dlg.setWindowTitle("What's New");
-    dlg.resize(520, 480);
-    dlg.setStyleSheet("QDialog { background:#0D1117; }");
+    dlg.setWindowTitle(tr("What's New"));
+    dlg.resize(540, 500);
+    dlg.setStyleSheet(QString("QDialog { background:%1; }").arg(Home::kBg));
 
     auto* root = new QVBoxLayout(&dlg);
     root->setContentsMargins(24, 20, 24, 16);
     root->setSpacing(14);
-    root->addWidget(heading("What's New in NativeOffice", 20, "#F0F2F7", true, &dlg));
+    root->addWidget(heading(tr("What's New in NativeOffice"), 20, Home::kText, true, &dlg));
 
     auto item = [&](const char* icon, const QString& title, const QString& body) {
         auto* card = new QFrame(&dlg);
         card->setObjectName("newsCard");
-        card->setStyleSheet("#newsCard { background:#12161F; border:1px solid #202836;"
-                            "border-radius:10px; }");
+        card->setStyleSheet(QString("#newsCard { background:%1; border:1px solid %2;"
+                                    "border-radius:11px; }").arg(Home::kPanel, Home::kBorder));
         auto* h = new QHBoxLayout(card);
         h->setContentsMargins(14, 12, 14, 12);
         h->setSpacing(12);
-        h->addWidget(Lucide::label(icon, "#8B7CF7", 18, card), 0, Qt::AlignTop);
+        h->addWidget(Lucide::label(icon, Home::kAccentSoft, 18, card), 0, Qt::AlignTop);
         auto* tv = new QVBoxLayout();
         tv->setSpacing(3);
-        tv->addWidget(heading(title, 13, "#E6E9F0", true, card));
-        auto* b = heading(body, 12, "#9AA4B8", false, card);
+        tv->addWidget(label600(title, 13, Home::kText, card));
+        auto* b = heading(body, 12, Home::kMuted, false, card);
         b->setWordWrap(true);
         tv->addWidget(b);
         h->addLayout(tv, 1);
         root->addWidget(card);
     };
 
-    item(Lucide::kDownload, "PDF editor has arrived",
-         "A full PDF workspace: view, edit, annotate, fill forms, protect with "
-         "passwords, sign, convert and OCR — right inside NativeOffice.");
-    item(Lucide::kKeyboard, "Full keyboard shortcut suite",
-         "Familiar shortcuts now work across Writer, Sheets, Slides and PDF. "
-         "See “Keyboard shortcuts” in Get Started for the full list.");
-    item(Lucide::kSparkles, "A fresh, unified look",
-         "New logo tray in every editor, a clean white theme with violet "
-         "accents, and your Free/Premium plan badge at a glance.");
-    item(Lucide::kTimer, "Coming soon: Image Resizer",
-         "Resize and compress images without leaving NativeOffice. "
-         "It’s on the way!");
+    item(Lucide::kHome, tr("A completely new Home"),
+         tr("A greeting band that changes with the time of day, working search across "
+            "your own files, an activity graph with real history, and a tools shelf."));
+    item(Lucide::kQrCode, tr("Three more tools"),
+         tr("QR Code Generator, Compress PDF, OCR and PDF to Word now have pages of "
+            "their own, straight from the Tools card."));
+    item(Lucide::kFolderOpen, tr("A template marketplace"),
+         tr("Every template in one browsable place, with a preview of the document you "
+            "are about to open rather than a generic icon."));
+    item(Lucide::kRepeat, tr("Your work saves itself"),
+         tr("Autosave is on everywhere. Save As is still there when you want to choose "
+            "where a document lives."));
 
     root->addStretch();
 
-    auto* closeBtn = new QPushButton("Nice!", &dlg);
+    auto* closeBtn = new QPushButton(tr("Nice!"), &dlg);
     closeBtn->setCursor(Qt::PointingHandCursor);
-    closeBtn->setStyleSheet("QPushButton { background:#6D5BE8; color:#FFFFFF; border:none;"
-                            "border-radius:8px; padding:8px 24px; font:600 12px 'Segoe UI'; }"
-                            "QPushButton:hover { background:#7E6DF0; }");
+    closeBtn->setStyleSheet(QString("QPushButton { background:%1; color:#FFFFFF; border:none;"
+                                    "border-radius:8px; padding:8px 24px;"
+                                    "font:600 12px 'Segoe UI'; }"
+                                    "QPushButton:hover { background:%2; }")
+                                .arg(Home::kAccent, Home::kAccentSoft));
     connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
     auto* br = new QHBoxLayout();
     br->addStretch();
     br->addWidget(closeBtn);
     root->addLayout(br);
 
-    dlg.exec();
-}
-
-// ── Templates gallery dialog ──────────────────────────────────────────────────
-void StartScreen::showTemplatesDialog(int initialCategory) {
-    QDialog dlg(this);
-    dlg.setObjectName("tplDialog");
-    dlg.setWindowTitle("Templates");
-    dlg.resize(820, 620);
-    auto* root = new QVBoxLayout(&dlg);
-    root->setContentsMargins(24, 20, 24, 20); root->setSpacing(16);
-
-    root->addWidget(heading("Choose a Template", 20, "#F0F2F7", true, &dlg));
-
-    // Category selector.
-    auto* catRow = new QHBoxLayout(); catRow->setSpacing(10);
-    auto* catGroup = new QButtonGroup(&dlg);
-    catGroup->setExclusive(true);
-    const QStringList cats = { "📄  Word Templates", "▦  Spreadsheet Templates", "▤  PowerPoint Templates" };
-    for (int i = 0; i < cats.size(); ++i) {
-        auto* b = new QToolButton(&dlg);
-        b->setText(cats[i]); b->setCheckable(true); b->setCursor(Qt::PointingHandCursor);
-        b->setObjectName("catBtn"); b->setFixedHeight(38);
-        catGroup->addButton(b, i);
-        catRow->addWidget(b);
-    }
-    catRow->addStretch();
-    root->addLayout(catRow);
-
-    auto* stack = new QStackedWidget(&dlg);
-    root->addWidget(stack, 1);
-
-    struct Cat { DocumentType type; QString accent; QStringList names; };
-    const Cat data[] = {
-        { DocumentType::Writer, "#2563EB",
-          {"Blank Document","Professional Resume","Modern Resume","Cover Letter",
-           "Business Letter","Project Report","Meeting Notes","Newsletter",
-           "Invoice Letter","To-Do List","Academic Essay","Press Release"} },
-        { DocumentType::Calc, "#16A34A",
-          {"Blank Spreadsheet","Monthly Budget","Invoice","Expense Tracker",
-           "Sales Dashboard","Inventory List","Loan Calculator","Timesheet",
-           "Grade Book","Habit Tracker","Attendance Sheet","Savings Goal"} },
-        { DocumentType::Impress, "#EA580C",
-          {"Blank Presentation","Pitch Deck","Business Review","Project Plan",
-           "Portfolio","Marketing Plan","Company Profile","Product Roadmap",
-           "Training Deck"} },
-    };
-    for (const Cat& cat : data) {
-        auto* pageScroll = new QScrollArea(stack);
-        pageScroll->setWidgetResizable(true);
-        pageScroll->setFrameShape(QFrame::NoFrame);
-        pageScroll->setStyleSheet("background:transparent;");
-        auto* page = new QWidget(pageScroll);
-        auto* pv = new QVBoxLayout(page);
-        pv->setContentsMargins(0, 4, 6, 0); pv->setSpacing(0);
-        auto* grid = new QGridLayout();
-        grid->setSpacing(14);
-        int i = 0;
-        for (const QString& name : cat.names) {
-            auto* c = new ClickableFrame(page);
-            c->setObjectName("galleryCard");
-            c->setMinimumSize(160, 140);
-            auto* cv = new QVBoxLayout(c);
-            cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(0);
-            auto* thumb = new QFrame(c);
-            thumb->setFixedHeight(96);
-            // Qt parses 8-digit hex as #AARGGBB, so the alpha goes FIRST —
-            // appending it ("#2563EB"+"33") silently shifted the channels and
-            // painted the Word thumbs green.
-            thumb->setStyleSheet(QString("background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-                "stop:0 %1,stop:1 #11151d);border-top-left-radius:10px;border-top-right-radius:10px;")
-                .arg("#33" + cat.accent.mid(1)));   // translucent accent
-            auto* tl = new QHBoxLayout(thumb); tl->setContentsMargins(12, 10, 12, 6);
-            tl->addWidget(badge(cat.type == DocumentType::Calc ? "S"
-                              : cat.type == DocumentType::Impress ? "P" : "W",
-                              cat.accent, 28, thumb), 0, Qt::AlignLeft | Qt::AlignTop);
-            tl->addStretch();
-            tl->addWidget(svgArt(cat.type == DocumentType::Calc ? kArtSpreadsheet
-                               : cat.type == DocumentType::Impress ? kArtPresentation
-                               : kArtDocument, 74, thumb), 0, Qt::AlignRight | Qt::AlignBottom);
-            cv->addWidget(thumb);
-            auto* lbl = heading(name, 12, "#E2E6EE", false, c);
-            lbl->setWordWrap(true);
-            lbl->setContentsMargins(10, 8, 10, 10);
-            cv->addWidget(lbl);
-            const DocumentType type = cat.type;
-            const bool blank = name.startsWith("Blank");
-            const QString tplName = name;
-            c->onClick = [this, type, blank, tplName, &dlg]{
-                if (launchLocked()) return;
-                if (blank) emit newDocumentRequested(type);
-                else       emit templateChosen(type, tplName);
-                dlg.accept();
-            };
-            grid->addWidget(c, i / 4, i % 4);
-            ++i;
-        }
-        pv->addLayout(grid);
-        pv->addStretch();
-        pageScroll->setWidget(page);
-        stack->addWidget(pageScroll);
-    }
-
-    connect(catGroup, &QButtonGroup::idClicked, stack, &QStackedWidget::setCurrentIndex);
-    catGroup->button(qBound(0, initialCategory, 2))->setChecked(true);
-    stack->setCurrentIndex(qBound(0, initialCategory, 2));
-
-    dlg.setStyleSheet(R"(
-        QDialog#tplDialog { background:#0D1117; }
-        QToolButton#catBtn { background:#161B26; border:1px solid #232A38; border-radius:9px;
-            color:#AEB6C6; font:12px 'Segoe UI'; padding:0 16px; }
-        QToolButton#catBtn:hover { background:#1E2737; }
-        QToolButton#catBtn:checked { background:#17233B; border:1px solid #3B82F6; color:#FFFFFF; }
-        #galleryCard { background:#141A24; border:1px solid #232B3A; border-radius:10px; }
-        #galleryCard:hover { border:1px solid #3B82F6; background:#161D29; }
-    )");
     dlg.exec();
 }
 

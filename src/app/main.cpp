@@ -16,6 +16,8 @@
 #include "startscreen/SplashScreen.h"
 #include "tools/ImageResizer.h"
 #include "tools/MarkdownEditor.h"
+#include "tools/QrCodeGenerator.h"
+#include "tools/PdfToolPage.h"
 #include "auth/LoginGate.h"
 #include "auth/InstanceGuard.h"
 #include "core/common/BrandBar.h"
@@ -347,7 +349,11 @@ static class CalcWindow*   createCalcWindow(const QString& filePath = {});
 static class ImpressWindow* createImpressWindow(const QString& filePath = {});
 static class PdfWindow*    createPdfWindow(const QString& filePath = {});
 static class ImageResizerWindow* createImageResizerWindow();
-static class MarkdownEditorWindow* createMarkdownEditorWindow();
+static class MarkdownEditorWindow* createMarkdownEditorWindow(const QString& filePath = {});
+static class QrCodeWindow*   createQrCodeWindow();
+static class PdfToolWindow*  createPdfToolWindow(NativeOffice::PdfToolPage::Job job);
+// One entry point for every tool tile on the Home screen.
+static EditorWindow* createToolWindow(NativeOffice::StartScreen::Tool tool);
 
 // Adds an editor window as a new tab in the main shell (defined after MainShell).
 static void presentEditor(EditorWindow* win);
@@ -821,14 +827,97 @@ public:
     QString currentDocPath()  const override { return {}; }
     bool    docDirty()        const override { return false; }
 
+    // Home → Open File routes .md here instead of into Writer.
+    void loadFile(const QString& path) {
+        if (!m_md->loadFromFile(path)) return;
+        setBaseName(QFileInfo(path).completeBaseName());
+        NativeOffice::RecentFilesManager::instance().addFile(path, "Markdown");
+    }
+
 private:
     NativeOffice::MarkdownEditorWidget* m_md { nullptr };
 };
 
-static MarkdownEditorWindow* createMarkdownEditorWindow() {
+static MarkdownEditorWindow* createMarkdownEditorWindow(const QString& filePath) {
     auto* win = new MarkdownEditorWindow;
+    if (!filePath.isEmpty()) win->loadFile(filePath);
     fitWindowToScreen(win);
     return win;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QrCodeWindow — the QR Code Generator tool tab (Home → Tools). Like the other
+// tools it owns no document, so closing never prompts.
+// ─────────────────────────────────────────────────────────────────────────────
+class QrCodeWindow : public EditorWindow {
+    Q_OBJECT
+public:
+    explicit QrCodeWindow(QWidget* parent = nullptr) : EditorWindow(parent) {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setMinimumSize(900, 620);
+        resize(1120, 760);
+        setWindowTitle("QR Code Generator");
+        setCentralWidget(new NativeOffice::QrCodeGeneratorWidget(this));
+    }
+
+    bool    requestClose()          override { return true; }
+    QString docKindName()     const override { return QStringLiteral("QR Code Generator"); }
+    QString currentDocPath()  const override { return {}; }
+    bool    docDirty()        const override { return false; }
+    bool    autoSaveEnabled() const override { return false; }
+};
+
+static QrCodeWindow* createQrCodeWindow() {
+    auto* win = new QrCodeWindow;
+    fitWindowToScreen(win);
+    return win;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PdfToolWindow — Compress PDF / OCR / PDF to Word. One wrapper, three jobs;
+// each opens a file, runs it, and writes the result where the user chooses.
+// ─────────────────────────────────────────────────────────────────────────────
+class PdfToolWindow : public EditorWindow {
+    Q_OBJECT
+public:
+    explicit PdfToolWindow(NativeOffice::PdfToolPage::Job job, QWidget* parent = nullptr)
+        : EditorWindow(parent), m_title(NativeOffice::PdfToolPage::jobTitle(job)) {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setMinimumSize(820, 560);
+        resize(1040, 700);
+        setWindowTitle(m_title);
+        setCentralWidget(new NativeOffice::PdfToolPage(job, this));
+    }
+
+    bool    requestClose()          override { return true; }
+    QString docKindName()     const override { return m_title; }
+    QString currentDocPath()  const override { return {}; }
+    bool    docDirty()        const override { return false; }
+    bool    autoSaveEnabled() const override { return false; }
+
+private:
+    QString m_title;
+};
+
+static PdfToolWindow* createPdfToolWindow(NativeOffice::PdfToolPage::Job job) {
+    auto* win = new PdfToolWindow(job);
+    fitWindowToScreen(win);
+    return win;
+}
+
+// Maps a Home tool tile onto its window.
+static EditorWindow* createToolWindow(NativeOffice::StartScreen::Tool tool) {
+    using Tool = NativeOffice::StartScreen::Tool;
+    using Job  = NativeOffice::PdfToolPage::Job;
+    switch (tool) {
+    case Tool::ImageResizer:   return createImageResizerWindow();
+    case Tool::MarkdownEditor: return createMarkdownEditorWindow();
+    case Tool::QrCode:         return createQrCodeWindow();
+    case Tool::CompressPdf:    return createPdfToolWindow(Job::Compress);
+    case Tool::Ocr:            return createPdfToolWindow(Job::Ocr);
+    case Tool::PdfToWord:      break;
+    }
+    return createPdfToolWindow(Job::ToWord);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1257,6 +1346,7 @@ public:
             m_stack->setCurrentIndex(i);
             ensureTabVisible(i);
             syncAiMode();
+            syncAiButtonVisibility();
         });
         connect(m_bar, &QTabBar::tabCloseRequested,
                 this, &MainShell::handleTabClose);
@@ -1325,7 +1415,22 @@ public:
         }
     }
 
+    // A Home tab carries its own "AI Assistant" chip in its top bar, so the
+    // strip's copy would be a second button for the same thing two rows apart.
+    // It shows only where Home's does not: inside an editor.
+    void syncAiButtonVisibility() {
+        if (!m_useAi) return;
+        const int i = m_bar->currentIndex();
+        const bool onHome = i >= 0 && i < m_stack->count()
+                            && qobject_cast<NativeOffice::StartScreen*>(m_stack->widget(i));
+        m_useAi->setVisible(!onHome);
+    }
+
 public slots:
+    // Opening the assistant from a Home card / chip. Same gate as the strip's
+    // own button, so the consent notice is never bypassed.
+    void requestAiSidebar() { toggleAiSidebar(); }
+
     // ── Stasis assistant ─────────────────────────────────────────────────────
     // Use AI is a gate before it is a toggle. Until the notice has been
     // accepted the panel does not open at all, and every press re-asks rather
@@ -1432,6 +1537,8 @@ public slots:
         m_bar->setTabButton(idx, QTabBar::RightSide, nullptr);
         m_bar->setTabButton(idx, QTabBar::LeftSide,  nullptr);
         m_bar->setCurrentIndex(idx);
+        // currentChanged does not fire when the index is already 0.
+        syncAiButtonVisibility();
     }
 
     // Open a fresh Home page in a new tab (the "+" action).
@@ -2534,6 +2641,13 @@ static EditorWindow* createWindowForPath(const QString& path) {
     if (path.endsWith(".pdf", Qt::CaseInsensitive))
         return createPdfWindow(path);
 
+    // Markdown belongs to the Markdown Editor, not Writer: FileRouter classifies
+    // it as plain text, which used to open it as a document and throw away the
+    // live preview and the source pane the file is written for.
+    if (path.endsWith(".md", Qt::CaseInsensitive)
+        || path.endsWith(".markdown", Qt::CaseInsensitive))
+        return createMarkdownEditorWindow(path);
+
     const auto fileType = NativeOffice::FileRouter::detectFileType(path);
 
     switch (fileType) {
@@ -2681,10 +2795,13 @@ int main(int argc, char* argv[]) {
                          s, [](NativeOffice::DocumentType type, const QString& name) {
             openFromTemplate(type, name);
         });
-        QObject::connect(s, &NativeOffice::StartScreen::imageResizerRequested,
-                         s, [] { presentEditor(createImageResizerWindow()); });
-        QObject::connect(s, &NativeOffice::StartScreen::markdownEditorRequested,
-                         s, [] { presentEditor(createMarkdownEditorWindow()); });
+        QObject::connect(s, &NativeOffice::StartScreen::toolRequested,
+                         s, [](NativeOffice::StartScreen::Tool tool) {
+            presentEditor(createToolWindow(tool));
+        });
+        QObject::connect(s, &NativeOffice::StartScreen::aiRequested, s, [] {
+            if (g_shell) g_shell->requestAiSidebar();
+        });
         return s;
     };
 
@@ -2710,10 +2827,12 @@ int main(int argc, char* argv[]) {
                          s, [s, &shell](NativeOffice::DocumentType type, const QString& name) {
             shell.presentInHomeTab(s, createWindowForTemplate(type, name));
         });
-        QObject::connect(s, &NativeOffice::StartScreen::imageResizerRequested,
-                         s, [s, &shell] { shell.presentInHomeTab(s, createImageResizerWindow()); });
-        QObject::connect(s, &NativeOffice::StartScreen::markdownEditorRequested,
-                         s, [s, &shell] { shell.presentInHomeTab(s, createMarkdownEditorWindow()); });
+        QObject::connect(s, &NativeOffice::StartScreen::toolRequested,
+                         s, [s, &shell](NativeOffice::StartScreen::Tool tool) {
+            shell.presentInHomeTab(s, createToolWindow(tool));
+        });
+        QObject::connect(s, &NativeOffice::StartScreen::aiRequested,
+                         s, [&shell] { shell.requestAiSidebar(); });
         QObject::connect(s, &NativeOffice::StartScreen::settingsRequested,
                          &controller, &NativeOffice::AppController::openSettings);
         return s;

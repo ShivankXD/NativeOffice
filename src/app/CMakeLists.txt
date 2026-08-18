@@ -8,6 +8,17 @@ qt_add_executable(NativeOffice
     startscreen/StartScreen.cpp
     startscreen/StartScreen.h
     startscreen/LucideIcons.h
+    startscreen/HomeKit.h
+    startscreen/HeroBanner.cpp
+    startscreen/HeroBanner.h
+    startscreen/FileSearch.cpp
+    startscreen/FileSearch.h
+    startscreen/ActivityCard.cpp
+    startscreen/ActivityCard.h
+    startscreen/TemplateArt.cpp
+    startscreen/TemplateArt.h
+    startscreen/TemplateMarket.cpp
+    startscreen/TemplateMarket.h
     startscreen/SidebarWidget.cpp
     startscreen/SidebarWidget.h
     startscreen/TemplateBarWidget.cpp
@@ -26,6 +37,12 @@ qt_add_executable(NativeOffice
     tools/ImageResizer.h
     tools/MarkdownEditor.cpp
     tools/MarkdownEditor.h
+    tools/QrEncoder.cpp
+    tools/QrEncoder.h
+    tools/QrCodeGenerator.cpp
+    tools/QrCodeGenerator.h
+    tools/PdfToolPage.cpp
+    tools/PdfToolPage.h
     ai/AiSheetAgent.cpp
     ai/AiSheetAgent.h
     ai/AiDeckTheme.cpp

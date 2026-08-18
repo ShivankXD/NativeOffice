@@ -1,14 +1,33 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
 // StartScreen.h
-// The NativeOffice home dashboard — a modern dark-themed launcher (logo + search
-// bar, left navigation, create cards, quick actions, recent files, a
-// "Templates for You" gallery, and activity/sync panels).
+// The NativeOffice home dashboard.
 //
-// Emits three signals the app wires to AppController:
-//   • newDocumentRequested(type) – create a blank doc in Writer/Calc/Impress
-//   • fileOpenRequested(path)     – open an existing file
-//   • settingsRequested()         – open settings
+//  ┌────────────┬──────────────────────────────────────────┬──────────────┐
+//  │ brand      │ search        date / time      AI  🔔 ⚙ 👤              │
+//  ├────────────┼──────────────────────────────────────────┴──────────────┤
+//  │ Home       │  ╔═══ Good evening, Shivank ═══ photo ═══╗ │ Your Activity│
+//  │ Documents  │  ║ Create New ▾   Open File              ║ │ Tools        │
+//  │ Sheets     │  ╚═══════════════════════════════════════╝ │ AI Assistant │
+//  │ Slides     │  [Document][Sheet][Slides][PDF][Open File] │ Quick Tips   │
+//  │ PDF        │  ┌ Recent Files ─┐ ┌ Templates for You ─┐  │              │
+//  │ Templates  │  └───────────────┘ └────────────────────┘  │              │
+//  │ Recycle    ├──────────────────────────────────────────────────────────┤
+//  │ 👤 profile │ " quote "     Quick Access  W S P A 📁   saved locally    │
+//  └────────────┴──────────────────────────────────────────────────────────┘
+//
+// The pieces with real behaviour behind them live in their own files:
+// HeroBanner (time-of-day greeting band), FileSearch (a genuine index of the
+// user's files), ActivityCard (history-backed graph), TemplateMarket +
+// TemplateArt (the gallery and its painted thumbnails).
+//
+// Signals the app wires to AppController / the shell:
+//   • newDocumentRequested(type) – blank doc in Writer/Calc/Impress/PDF
+//   • fileOpenRequested(path)    – open an existing file
+//   • templateChosen(type, name) – a named template from the gallery
+//   • toolRequested(tool)        – one of the Home tools
+//   • aiRequested()              – open the Stasis sidebar
+//   • settingsRequested()        – open settings
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "core/application/AppController.h"
@@ -19,78 +38,97 @@
 class QVBoxLayout;
 class QHBoxLayout;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QTimer;
 
 namespace NativeOffice {
 
 class SettingsTray;
+class SearchPopup;
+class HeroBanner;
 
 class StartScreen : public QWidget {
     Q_OBJECT
 
 public:
+    // The tools reachable from the right-hand Tools card.
+    enum class Tool {
+        ImageResizer, MarkdownEditor, QrCode, CompressPdf, Ocr, PdfToWord
+    };
+    Q_ENUM(Tool)
+
     explicit StartScreen(AppController* controller, QWidget* parent = nullptr);
 
 signals:
     void newDocumentRequested(DocumentType type);
     void fileOpenRequested(const QString& path);
     void settingsRequested();
-    // A named (non-blank) template was chosen in the gallery.
     void templateChosen(DocumentType type, const QString& name);
-    // The Image Resizer tool card (right column) was clicked.
-    void imageResizerRequested();
-    // The Markdown Editor tool card (right column) was clicked.
-    void markdownEditorRequested();
+    void toolRequested(StartScreen::Tool tool);
+    void aiRequested();
+
+protected:
+    void resizeEvent(QResizeEvent*) override;
+    // Arrow keys and Escape belong to the search results while they are open.
+    bool eventFilter(QObject*, QEvent*) override;
 
 private:
+    // ── chrome ──────────────────────────────────────────────────────────────
     void     buildUi();
     QWidget* buildSidebar();
     QWidget* buildTopBar();
-    QWidget* buildUpdateBanner();       // blue "scanning for updates" box
-    void     refreshUpdateBanner();     // sync the banner to UpdateChecker state
+    QWidget* buildBottomBar();
+    QWidget* buildUpdateBanner();       // compact "checking for updates" pill
+    void     refreshUpdateBanner();
     bool     launchLocked() const;      // true while the update scan is running
+
+    // ── body ────────────────────────────────────────────────────────────────
     QWidget* buildCenterColumn();
     QWidget* buildCreateCards();
     QWidget* buildRecentPanel();
     QWidget* buildTemplatesPanel();
     QWidget* buildRightColumn();
+    QWidget* buildToolsCard();
+    QWidget* buildAiCard();
+    QWidget* buildQuickTips();
 
+    // ── actions ─────────────────────────────────────────────────────────────
     void openFileDialog();
-    void showTemplatesDialog(int initialCategory = 0);  // 0 Word, 1 Sheet, 2 Slides
-    void showSettingsDialog();                          // gear → Settings pane
-    void showProfileTray();                             // avatar → Profile pane
-    void showNotificationsPopup(QWidget* anchor);       // bell dropdown
-    void showShortcutsDialog();                         // real supported shortcuts
-    void showWhatsNewDialog();                          // release highlights
-
-    // Recent-file row actions: star, reveal in Explorer, forget, delete.
+    void showTemplateMarket(int category = 0);
+    void showSettingsDialog();
+    void showProfileTray();
+    void showPlanPopup(QWidget* anchor);                // sidebar "Free plan" row
+    void showNotificationsPopup(QWidget* anchor);
+    void showShortcutsDialog();
+    void showWhatsNewDialog();
     void showRecentFileMenu(const QString& path, const QPoint& at);
-    // Swaps the Recent panel for a freshly built one (favourites filter, or
-    // after a star / delete changed what should be listed).
     void refreshRecentPanel();
     void openRecycleBin();
 
-    AppController* m_controller { nullptr };
-    SettingsTray*  m_settingsTray { nullptr };   // right-side slide-in settings
+    AppController* m_controller   { nullptr };
+    SettingsTray*  m_settingsTray { nullptr };
 
     // Update banner widgets (owned by the layout).
-    QWidget*     m_updateBanner { nullptr };   // compact top-right status pill
-    QLabel*      m_updateSpin   { nullptr };
-    QLabel*      m_updateText   { nullptr };
-    QTimer*      m_spinTimer    { nullptr };
-    int          m_spinPhase    { 0 };
+    QWidget* m_updateBanner { nullptr };
+    QLabel*  m_updateSpin   { nullptr };
+    QLabel*  m_updateText   { nullptr };
+    QTimer*  m_spinTimer    { nullptr };
+    int      m_spinPhase    { 0 };
 
-    // Notifications popup (bell): tracked so the bell toggles it cleanly and the
-    // dismiss-then-reopen flicker is suppressed.
+    // Notifications popup (bell): tracked so the bell toggles it cleanly.
     QPointer<QWidget> m_notifPopup;
     qint64            m_notifClosedMs { 0 };
 
-    // Recent panel, kept so the Favorites sidebar entry can re-filter it in
-    // place instead of only working on a fresh Home tab.
+    // Global search.
+    QLineEdit*             m_search      { nullptr };
+    QPointer<SearchPopup>  m_searchPopup;
+
+    HeroBanner*  m_hero { nullptr };
+
+    // Recent panel, kept so a star / delete can refresh it in place.
     QHBoxLayout* m_recentRowLayout { nullptr };
     QWidget*     m_recentPanel     { nullptr };
-    bool         m_favoritesOnly   { false };
 };
 
 } // namespace NativeOffice
