@@ -55,6 +55,10 @@ public:
     // from the on-screen rename bar).
     void setDocName(const QString& name);
 
+    // Load a .md file from disk into the source pane (Home → Open File routes
+    // markdown here rather than into Writer). Returns false if it can't be read.
+    bool loadFromFile(const QString& path);
+
 private:
     // ── build / theming ────────────────────────────────────────────────────
     QWidget* buildToolbar();

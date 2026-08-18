@@ -10,6 +10,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QEnterEvent>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -435,6 +436,16 @@ MarkdownEditorWidget::~MarkdownEditorWidget() { saveState(); }
 
 void MarkdownEditorWidget::setDocName(const QString& name) {
     if (!name.trimmed().isEmpty()) m_docName = name.trimmed();
+}
+
+bool MarkdownEditorWidget::loadFromFile(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    m_editor->setPlainText(QString::fromUtf8(f.readAll()));
+    f.close();
+    setDocName(QFileInfo(path).completeBaseName());
+    renderPreview();
+    return true;
 }
 
 // ── toolbar (monochrome Lucide icon buttons) ──────────────────────────────────
