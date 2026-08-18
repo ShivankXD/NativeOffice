@@ -2526,6 +2526,23 @@ void CalcModule::insertChart(ChartType type) {
     markDirty();
 }
 
+void CalcModule::addChartAt(ChartType type, const QRect& range, const QRect& geom) {
+    if (range.width() <= 0 || range.height() <= 0) return;
+    ChartSpec spec;
+    spec.type  = type;
+    spec.range = range;
+    spec.geom  = geom;
+    createChartObject(spec);
+    syncChartSpecs();
+}
+
+void CalcModule::setTemplateColumnWidths(const QHash<int, int>& widthsPx) {
+    if (!m_model) return;
+    for (auto it = widthsPx.begin(); it != widthsPx.end(); ++it)
+        m_model->setColWidth(it.key(), it.value());
+    applySizes();
+}
+
 void CalcModule::rebuildChartObjects() {
     // Tear down the live widgets for the previous sheet.
     for (ChartObject* c : m_chartObjs) c->deleteLater();

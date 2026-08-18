@@ -89,6 +89,15 @@ public:
     [[nodiscard]] QAction* redoAction()  const noexcept { return m_redoAct;  }
     [[nodiscard]] QAction* cutAction()   const noexcept { return m_cutAct;   }
     [[nodiscard]] QAction* copyAction()  const noexcept { return m_copyAct;  }
+    // Place a chart over an explicit range at explicit geometry.
+    // insertChart() reads the current selection, which a template has no
+    // way to set up; this lets a finished sheet be built in one pass.
+    void addChartAt(ChartType type, const QRect& range, const QRect& geom);
+
+    // Column widths for a template, applied to the view as well as stored,
+    // so a sheet built in one pass does not open with its labels clipped.
+    void setTemplateColumnWidths(const QHash<int, int>& widthsPx);
+
     [[nodiscard]] QAction* pasteAction() const noexcept { return m_pasteAct; }
     [[nodiscard]] QAction* deleteAction()const noexcept { return m_deleteAct;}
 
