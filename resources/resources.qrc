@@ -47,5 +47,12 @@
        <file alias="hero-afternoon.jpg">hero-afternoon.jpg</file>
        <file alias="hero-evening.jpg">hero-evening.jpg</file>
        <file alias="hero-night.jpg">hero-night.jpg</file>
+       <!-- Create-card art, composited from the supplied 3D renders by
+            scratchpad/make_cards.py: subject high in the frame, lower third
+            left clear for the name the card draws over it. -->
+       <file alias="card-document.jpg">card-document.jpg</file>
+       <file alias="card-spreadsheet.jpg">card-spreadsheet.jpg</file>
+       <file alias="card-presentation.jpg">card-presentation.jpg</file>
+       <file alias="card-pdf.jpg">card-pdf.jpg</file>
     </qresource>
 </RCC>
