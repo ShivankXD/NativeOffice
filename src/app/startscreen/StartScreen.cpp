@@ -215,8 +215,21 @@ public:
         : QFrame(parent), m_art(art), m_radius(radius) {
         setCursor(Qt::PointingHandCursor);
         setAttribute(Qt::WA_Hover, true);
-        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        // The frame takes the artwork's own proportions, so the picture fills it
+        // exactly: fitting a 1.58 image into a 1.77 frame left dark bands above
+        // and below it and the card looked loose inside its slot.
+        const QPixmap src(m_art);
+        if (!src.isNull() && src.height() > 0)
+            m_aspect = qreal(src.width()) / src.height();
+        QSizePolicy sp(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        sp.setHeightForWidth(true);
+        setSizePolicy(sp);
         setMinimumSize(60, 40);
+    }
+
+    [[nodiscard]] bool hasHeightForWidth() const override { return true; }
+    [[nodiscard]] int heightForWidth(int w) const override {
+        return m_aspect > 0.01 ? int(qRound(w / m_aspect)) : w;
     }
 
     std::function<void()> onClick;
@@ -274,6 +287,7 @@ private:
     QString m_art;
     QPixmap m_scaled;
     int     m_radius { 12 };
+    qreal   m_aspect { 0.0 };
     bool    m_hover  { false };
 };
 
