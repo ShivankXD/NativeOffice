@@ -26,6 +26,11 @@
        <file alias="spin-up@2x.png">spin-up@2x.png</file>
        <file alias="spin-down.png">spin-down.png</file>
        <file alias="spin-down@2x.png">spin-down@2x.png</file>
+       <!-- The same problem on the dark Home tool pages, where the spin
+            artwork above (dark, for the light chrome) is invisible.
+            Regenerate with resources/make_chevron_icon.py. -->
+       <file alias="chevron-down-light.png">chevron-down-light.png</file>
+       <file alias="chevron-down-light@2x.png">chevron-down-light@2x.png</file>
        <!-- Stasis brand mark for the AI sidebar and the Use AI button. The
             source art is a white glyph on a large black field; these are the
             glyph alone on transparency, cropped to its bounding box.
@@ -34,5 +39,13 @@
        <file alias="stasis-mark-32.png">stasis-mark-32.png</file>
        <file alias="stasis-mark-64.png">stasis-mark-64.png</file>
        <file alias="stasis-mark-256.png">stasis-mark-256.png</file>
+       <!-- Home hero banner art, one per time of day. The greeting sits over
+            the LEFT half, so each band is cropped (and morning mirrored) to
+            keep its bright area on the right. Regenerate from the full-size
+            source with scratchpad/make_strips.py. -->
+       <file alias="hero-morning.jpg">hero-morning.jpg</file>
+       <file alias="hero-afternoon.jpg">hero-afternoon.jpg</file>
+       <file alias="hero-evening.jpg">hero-evening.jpg</file>
+       <file alias="hero-night.jpg">hero-night.jpg</file>
     </qresource>
 </RCC>
