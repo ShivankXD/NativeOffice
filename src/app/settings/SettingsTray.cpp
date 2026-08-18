@@ -5,6 +5,9 @@
 #include "common/Avatars.h"
 #include "core/auth/AuthManager.h"
 #include "core/watermark/Watermark.h"
+#include "core/settings/ActivityLog.h"
+#include "core/settings/UsageStats.h"
+#include "startscreen/HomeKit.h"
 #include "startscreen/LucideIcons.h"
 
 #include <QButtonGroup>
@@ -12,6 +15,7 @@
 #include <QComboBox>
 #include <QEasingCurve>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -163,7 +167,7 @@ QWidget* SettingsTray::buildPanel() {
 QWidget* SettingsTray::buildSidebar() {
     auto* bar = new QWidget(m_panel);
     bar->setObjectName("traySidebar");
-    bar->setFixedWidth(124);
+    bar->setFixedWidth(134);
     bar->setStyleSheet(R"(
         QWidget#traySidebar { background:#0A0D12; border-right:1px solid #171D28; }
         QToolButton { background:transparent; border:none; border-radius:10px;
@@ -207,92 +211,205 @@ QWidget* SettingsTray::buildSidebar() {
     return bar;
 }
 
-// ── Profile page (avatar / plan / account actions / sign out) ────────────────
+// ── Profile page ─────────────────────────────────────────────────────────────
+// A banner with the account photo, the plan it is on, what the account has
+// actually done in the app, and the handful of actions that belong to it. The
+// old page was a stack of identical full-width grey buttons with no hierarchy;
+// this gives the identity the top of the page and demotes the links to rows.
 QWidget* SettingsTray::buildProfilePage() {
     auto* page = new QWidget;
     auto* v = new QVBoxLayout(page);
-    v->setContentsMargins(22, 6, 22, 22);
+    v->setContentsMargins(20, 4, 20, 20);
     v->setSpacing(14);
 
     auto& auth = AuthManager::instance();
 
-    // Identity card.
-    auto* card = new QFrame(page);
-    card->setStyleSheet("QFrame { background:#111621; border:1px solid #1F2735; border-radius:16px; }");
-    auto* cv = new QVBoxLayout(card);
-    cv->setContentsMargins(18, 18, 18, 18);
-    cv->setSpacing(12);
+    // ── Identity banner ─────────────────────────────────────────────────────
+    auto* banner = new QFrame(page);
+    banner->setObjectName("idBanner");
+    banner->setStyleSheet(
+        "QFrame#idBanner { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+        "  stop:0 #1B1739, stop:0.55 #141826, stop:1 #241C3C);"
+        "  border:1px solid #2E2857; border-radius:16px; }");
+    auto* bv = new QVBoxLayout(banner);
+    bv->setContentsMargins(20, 18, 20, 18);
+    bv->setSpacing(13);
 
     auto* top = new QHBoxLayout();
-    top->setSpacing(14);
-    auto* avatar = new QLabel(card);
-    avatar->setFixedSize(60, 60);
-    top->addWidget(avatar, 0, Qt::AlignTop);
+    top->setSpacing(15);
+
+    // The photo sits inside a soft ring, so it reads as a portrait rather than
+    // as a circle floating on the gradient.
+    auto* ring = new QFrame(banner);
+    ring->setFixedSize(78, 78);
+    ring->setStyleSheet("background:rgba(124,108,246,0.14);"
+                        "border:1px solid rgba(156,143,255,0.42);"
+                        "border-radius:39px;");
+    auto* ringL = new QHBoxLayout(ring);
+    ringL->setContentsMargins(0, 0, 0, 0);
+    auto* avatar = new QLabel(ring);
+    avatar->setFixedSize(64, 64);
+    avatar->setStyleSheet("background:transparent;border:none;");
+    ringL->addWidget(avatar, 0, Qt::AlignCenter);
+    top->addWidget(ring, 0, Qt::AlignTop);
+
     auto* idCol = new QVBoxLayout();
-    idCol->setSpacing(2);
-    auto* nameLbl  = text(QString(), 16, "#F4F6FB", true, card);
-    auto* emailLbl = text(QString(), 12, "#8A93A6", false, card);
+    idCol->setSpacing(3);
+    auto* nameLbl  = text(QString(), 19, "#F4F6FB", true, banner);
+    auto* emailLbl = text(QString(), 12, "#8A93A6", false, banner);
     idCol->addWidget(nameLbl);
     idCol->addWidget(emailLbl);
-    auto* planBadge = new QLabel(card);
-    planBadge->setFixedHeight(22);
+    idCol->addSpacing(6);
+    auto* planBadge = new QLabel(banner);
+    planBadge->setFixedHeight(23);
     planBadge->setAlignment(Qt::AlignCenter);
-    idCol->addSpacing(4);
-    { auto* pr = new QHBoxLayout(); pr->setContentsMargins(0,0,0,0);
+    { auto* pr = new QHBoxLayout(); pr->setContentsMargins(0, 0, 0, 0);
       pr->addWidget(planBadge, 0, Qt::AlignLeft); pr->addStretch(); idCol->addLayout(pr); }
     top->addLayout(idCol, 1);
     top->setAlignment(Qt::AlignTop);
-    cv->addLayout(top);
-    cv->addWidget(divider(card));
+    bv->addLayout(top);
+
+    bv->addWidget(divider(banner));
 
     QLabel *memberVal = nullptr, *occVal = nullptr;
-    cv->addWidget(infoRow(tr("Member since"), memberVal, card));
-    cv->addWidget(infoRow(tr("Occupation"),   occVal,    card));
-    v->addWidget(card);
+    bv->addWidget(infoRow(tr("Member since"), memberVal, banner));
+    bv->addWidget(infoRow(tr("Occupation"),   occVal,    banner));
+    v->addWidget(banner);
 
-    auto refresh = [avatar, nameLbl, emailLbl, planBadge, memberVal, occVal] {
-        auto& a = AuthManager::instance();
-        avatar->setPixmap(roundAvatarPixmap(60, avatar->devicePixelRatio()));
-        nameLbl->setText(a.userName().isEmpty() ? QStringLiteral("Not signed in") : a.userName());
-        emailLbl->setText(a.userEmail());
-        const bool premium = a.premiumActive();
-        planBadge->setText(premium ? a.premiumPlanLabel().toUpper() : QStringLiteral("FREE PLAN"));
-        planBadge->setStyleSheet(QString(
-            "border-radius:11px; padding:2px 12px; font:700 10px 'Segoe UI'; letter-spacing:1px;"
-            "background:%1; color:%2; border:1px solid %3;")
-            .arg(premium ? "#1E1A33" : "#161B26",
-                 premium ? "#B7A6FF" : "#8A93A6",
-                 premium ? "#332A5C" : "#232A38"));
-        memberVal->setText(a.joinedAt().isValid() ? a.joinedAt().toString("MMMM yyyy")
-                                                  : QStringLiteral("Not set"));
-        occVal->setText(a.occupation().isEmpty() ? QStringLiteral("Not set") : a.occupation());
+    // ── What this account has actually done ─────────────────────────────────
+    auto* stats = new QGridLayout();
+    stats->setSpacing(10);
+    int statIndex = 0;
+    auto statTile = [&](const char* icon, const QString& caption, const QString& value) {
+        auto* f = new QFrame(page);
+        f->setObjectName("statTile");
+        auto* fv = new QVBoxLayout(f);
+        fv->setContentsMargins(12, 10, 12, 10);
+        fv->setSpacing(4);
+        auto* head = new QHBoxLayout();
+        head->setSpacing(6);
+        head->addWidget(Lucide::label(icon, "#7E8799", 13, f));
+        head->addWidget(text(caption, 10, "#7E8799", false, f));
+        head->addStretch();
+        fv->addLayout(head);
+        fv->addWidget(text(value, 16, "#F0F2F7", true, f));
+        stats->addWidget(f, statIndex / 2, statIndex % 2);
+        ++statIndex;
     };
-    refresh();
-    connect(&auth, &AuthManager::profileChanged,     page, refresh);
-    connect(&auth, &AuthManager::entitlementChanged, page, [refresh](bool) { refresh(); });
+    {
+        auto& usage = UsageStats::instance();
+        statTile(Lucide::kFileText, tr("Opened"), QString::number(usage.documentsOpened()));
+        statTile(Lucide::kPencil,   tr("Edited"), QString::number(usage.filesEdited()));
+        statTile(Lucide::kTimer,    tr("Time"),   usage.formattedTotal());
+        statTile(Lucide::kRepeat,   tr("Streak"),
+                 tr("%1 d").arg(ActivityLog::instance().currentStreakDays()));
+    }
+    v->addLayout(stats);
 
-    // Account actions.
-    auto* edit = actionButton(Lucide::kPen, tr("Edit profile"), page);
-    connect(edit, &QPushButton::clicked, page, [] { AuthManager::instance().openAccountPage(); });
-    v->addWidget(edit);
+    // ── Plan card ───────────────────────────────────────────────────────────
+    auto* planCard = new QFrame(page);
+    planCard->setObjectName("planCard");
+    auto* pv = new QVBoxLayout(planCard);
+    pv->setContentsMargins(18, 16, 18, 16);
+    pv->setSpacing(11);
 
-    auto* key = actionButton(Lucide::kKey, tr("Activate a product key"), page);
-    connect(key, &QPushButton::clicked, page, [] { AuthManager::instance().openActivateKeyPage(); });
-    v->addWidget(key);
+    auto* planHead = new QHBoxLayout();
+    planHead->setSpacing(11);
+    auto* crown = new QLabel(planCard);
+    crown->setFixedSize(36, 36);
+    crown->setAlignment(Qt::AlignCenter);
+    crown->setPixmap(Lucide::pixmap(Lucide::kCrown, "#F5C453", 18, page->devicePixelRatio()));
+    crown->setStyleSheet("background:rgba(245,196,83,0.14);border-radius:11px;");
+    planHead->addWidget(crown, 0, Qt::AlignTop);
+    auto* planCol = new QVBoxLayout();
+    planCol->setSpacing(2);
+    auto* planTitle = text(QString(), 14, "#F0F2F7", true, planCard);
+    auto* planSub   = text(QString(), 11, "#7E8799", false, planCard);
+    planSub->setWordWrap(true);
+    planCol->addWidget(planTitle);
+    planCol->addWidget(planSub);
+    planHead->addLayout(planCol, 1);
+    pv->addLayout(planHead);
 
-    auto* manage = actionButton(Lucide::kSparkle,
-        auth.premiumActive() ? tr("Manage account") : tr("Buy Premium"), page);
-    connect(manage, &QPushButton::clicked, page, [] {
+    auto* perkBox = new QWidget(planCard);
+    auto* perkV = new QVBoxLayout(perkBox);
+    perkV->setContentsMargins(0, 0, 0, 0);
+    perkV->setSpacing(6);
+    const QStringList perks = { tr("No export watermark"), tr("Advanced PDF tools"),
+                                tr("Premium export defaults"), tr("Priority support") };
+    for (const QString& perk : perks) {
+        auto* r = new QWidget(perkBox);
+        auto* rl = new QHBoxLayout(r);
+        rl->setContentsMargins(2, 0, 0, 0);
+        rl->setSpacing(9);
+        rl->addWidget(Lucide::label(Lucide::kCircleCheck, "#22C55E", 14, r));
+        rl->addWidget(text(perk, 12, "#C6CCDA", false, r));
+        rl->addStretch();
+        perkV->addWidget(r);
+    }
+    pv->addWidget(perkBox);
+
+    auto* planBtn = new QPushButton(planCard);
+    planBtn->setObjectName("planCta");
+    planBtn->setCursor(Qt::PointingHandCursor);
+    planBtn->setFixedHeight(40);
+    connect(planBtn, &QPushButton::clicked, page, [] {
         auto& a = AuthManager::instance();
         a.premiumActive() ? a.openAccountPage() : a.openPremiumPage();
     });
-    v->addWidget(manage);
+    pv->addWidget(planBtn);
+    v->addWidget(planCard);
 
-    v->addWidget(text(tr("Profile is managed on nativeoffice.online. Changes sync back "
-                         "automatically."), 11, "#6B7280", false, page));
+    // ── Account links ───────────────────────────────────────────────────────
+    auto* rows = new QFrame(page);
+    rows->setObjectName("rowGroup");
+    auto* rowsV = new QVBoxLayout(rows);
+    rowsV->setContentsMargins(6, 6, 6, 6);
+    rowsV->setSpacing(2);
+
+    auto linkRow = [&](const char* icon, const QString& label, const QString& hint,
+                       std::function<void()> cb) {
+        auto* r = new ClickableFrame(rows);
+        r->setObjectName("acctRow");
+        r->setFixedHeight(46);
+        r->setCursor(Qt::PointingHandCursor);
+        auto* rl = new QHBoxLayout(r);
+        rl->setContentsMargins(11, 0, 11, 0);
+        rl->setSpacing(12);
+        rl->addWidget(Lucide::label(icon, "#9AA4B8", 16, r));
+        auto* col = new QVBoxLayout();
+        col->setSpacing(0);
+        auto* l1 = text(label, 13, "#E6E9F0", true, r);
+        l1->setAttribute(Qt::WA_TransparentForMouseEvents);
+        col->addWidget(l1);
+        auto* l2 = text(hint, 11, "#6B7280", false, r);
+        l2->setAttribute(Qt::WA_TransparentForMouseEvents);
+        col->addWidget(l2);
+        rl->addLayout(col, 1);
+        rl->addWidget(Lucide::label(Lucide::kChevronRight, "#5A6373", 15, r));
+        r->onClick = std::move(cb);
+        rowsV->addWidget(r);
+    };
+    linkRow(Lucide::kPen, tr("Edit profile"), tr("Name, photo and occupation"),
+            [] { AuthManager::instance().openAccountPage(); });
+    linkRow(Lucide::kKey, tr("Activate a product key"), tr("Redeem a Premium key"),
+            [] { AuthManager::instance().openActivateKeyPage(); });
+    linkRow(Lucide::kUser, tr("Manage account"), tr("Billing and sign-in on the website"),
+            [] { AuthManager::instance().openAccountPage(); });
+    v->addWidget(rows);
+
+    {
+        // Word-wrapped: a single long line here is wider than the tray and the
+        // page's scroll area has no horizontal bar, so it would just be clipped.
+        auto* note = text(tr("Your profile lives on nativeoffice.online. Changes there "
+                             "sync back to this computer on their own."),
+                          11, "#6B7280", false, page);
+        note->setWordWrap(true);
+        v->addWidget(note);
+    }
     v->addStretch();
 
-    // Sign out — only on the Profile pane.
+    // ── Sign out ────────────────────────────────────────────────────────────
     auto* out = actionButton(Lucide::kLogOut, tr("Sign out"), page);
     out->setObjectName("dangerBtn");
     out->setIcon(Lucide::icon(Lucide::kLogOut, "#F0736A", 16, page->devicePixelRatio()));
@@ -306,6 +423,64 @@ QWidget* SettingsTray::buildProfilePage() {
         AuthManager::instance().signOut();
     });
     v->addWidget(out);
+
+    page->setStyleSheet(R"(
+        QFrame#statTile { background:#111621; border:1px solid #1F2735; border-radius:12px; }
+        QFrame#planCard { background:#111621; border:1px solid #2A2350; border-radius:14px; }
+        QFrame#rowGroup { background:#111621; border:1px solid #1F2735; border-radius:14px; }
+        #acctRow { background:transparent; border-radius:10px; }
+        #acctRow:hover { background:#1B2331; }
+        QPushButton#planCta { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+            stop:0 #E0A93B, stop:1 #F0C558); border:none; border-radius:10px;
+            color:#221A05; font:700 13px 'Segoe UI'; text-align:center; }
+        QPushButton#planCta:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+            stop:0 #EFBA4C, stop:1 #FFD76D); }
+    )");
+
+    auto refresh = [avatar, nameLbl, emailLbl, planBadge, memberVal, occVal,
+                    planTitle, planSub, planBtn, perkBox] {
+        auto& a = AuthManager::instance();
+        avatar->setPixmap(roundAvatarPixmap(64, avatar->devicePixelRatio()));
+        nameLbl->setText(a.userName().isEmpty() ? QStringLiteral("Not signed in") : a.userName());
+        emailLbl->setText(a.userEmail());
+
+        const bool premium = a.premiumActive();
+        planBadge->setText(premium ? a.premiumPlanLabel().toUpper() : QStringLiteral("FREE PLAN"));
+        planBadge->setStyleSheet(QString(
+            "border-radius:11px; padding:2px 12px; font:700 10px 'Segoe UI'; letter-spacing:1px;"
+            "background:%1; color:%2; border:1px solid %3;")
+            .arg(premium ? "#211B3D" : "#161B26",
+                 premium ? "#C9BCFF" : "#8A93A6",
+                 premium ? "#3B2F70" : "#232A38"));
+
+        memberVal->setText(a.joinedAt().isValid() ? a.joinedAt().toString("MMMM yyyy")
+                                                  : QStringLiteral("Not set"));
+        occVal->setText(a.occupation().isEmpty() ? QStringLiteral("Not set") : a.occupation());
+
+        planTitle->setText(premium ? a.premiumPlanLabel()
+                                   : QCoreApplication::translate("SettingsTray",
+                                                                 "NativeOffice Pro"));
+        if (premium) {
+            const QDateTime until = a.premiumUntil();
+            planSub->setText(until.isValid()
+                ? QCoreApplication::translate("SettingsTray",
+                      "Active until %1. Thank you for supporting the app.")
+                      .arg(until.toString(QStringLiteral("d MMMM yyyy")))
+                : QCoreApplication::translate("SettingsTray",
+                      "Active. Thank you for supporting the app."));
+        } else {
+            planSub->setText(QCoreApplication::translate("SettingsTray",
+                "Unlock the full power of NativeOffice."));
+        }
+        perkBox->setVisible(!premium);
+        planBtn->setText(premium
+            ? QCoreApplication::translate("SettingsTray", "Manage subscription")
+            : QCoreApplication::translate("SettingsTray", "Upgrade to Pro"));
+    };
+    refresh();
+    connect(&auth, &AuthManager::profileChanged,     page, refresh);
+    connect(&auth, &AuthManager::entitlementChanged, page, [refresh](bool) { refresh(); });
+
     return page;
 }
 

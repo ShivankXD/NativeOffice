@@ -59,7 +59,7 @@ private:
     QToolButton*        m_navPremium  { nullptr };
     QLabel*             m_title   { nullptr };
     QPropertyAnimation* m_anim    { nullptr };
-    int                 m_panelW  { 520 };
+    int                 m_panelW  { 540 };
     bool                m_open    { false };
     View                m_view    { Settings };
 };
