@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// TemplateMarket.h — the full template browser behind "View all".
+// TemplateMarket.h: the full template browser behind "View all".
 //
 // Replaces the old three-tab dialog with a marketplace: a category rail, a
 // live search box, and a scrollable grid of cards whose thumbnails are painted
@@ -9,7 +9,7 @@
 // The catalogue lives in one table here so the Home panel and the marketplace
 // can never drift apart, and so a template added to the app appears in both by
 // editing a single list. Every entry maps to a template the editors actually
-// fill in — nothing in the grid opens an empty document pretending to be one.
+// fill in, nothing in the grid opens an empty document pretending to be one.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "core/application/AppController.h"

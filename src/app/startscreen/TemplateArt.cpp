@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// TemplateArt.cpp — see TemplateArt.h.
+// TemplateArt.cpp: see TemplateArt.h.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "TemplateArt.h"
 #include "HomeKit.h"

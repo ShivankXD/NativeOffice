@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// ActivityLog.h — the history behind the Home screen's "Your Activity" graph.
+// ActivityLog.h: the history behind the Home screen's "Your Activity" graph.
 //
 // UsageStats keeps three running totals, which is enough to print three
 // numbers but not enough to draw a line. This keeps the same events bucketed
@@ -13,7 +13,7 @@
 // Buckets older than kRetentionDays are dropped on write, so the value stays
 // small no matter how long the app has been installed.
 //
-// "Action" means one document opened or one file saved — the same two events
+// "Action" means one document opened or one file saved, the same two events
 // UsageStats counts, recorded through it so no call site changes.
 // ─────────────────────────────────────────────────────────────────────────────
 

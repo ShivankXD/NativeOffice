@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// ActivityCard.h — the "Your Activity" panel and the window behind it.
+// ActivityCard.h: the "Your Activity" panel and the window behind it.
 //
 //   ActivitySpark   the line chart itself. Hovering snaps to the nearest
 //                   bucket, lifts its dot and floats a labelled bubble over

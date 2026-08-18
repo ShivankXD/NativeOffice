@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// QrCodeGenerator.cpp — see QrCodeGenerator.h.
+// QrCodeGenerator.cpp: see QrCodeGenerator.h.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "QrCodeGenerator.h"
 #include "startscreen/HomeKit.h"

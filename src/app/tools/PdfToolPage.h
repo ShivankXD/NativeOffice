@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// PdfToolPage.h — Home → Tools → Compress PDF / OCR & Scan / PDF to Word.
+// PdfToolPage.h: Home → Tools → Compress PDF / OCR & Scan / PDF to Word.
 //
 // The engines behind all three already shipped inside the PDF editor
 // (Pdf::compressPdf, Pdf::ocrPdf, Pdf::toDocx), but they were only reachable
@@ -17,7 +17,7 @@
 //  │   report.pdf   4.8 MB   ·   12 pages                             │
 //  │   Effort  ○ Fast  ● Balanced  ○ Smallest                         │
 //  │                                          [   Compress   ]        │
-//  │   ✓ Saved report-compressed.pdf — 4.8 MB → 3.1 MB (36% smaller)  │
+//  │   ✓ Saved report-compressed.pdf, 4.8 MB → 3.1 MB (36% smaller)  │
 //  └──────────────────────────────────────────────────────────────────┘
 //
 // The work runs on a worker thread so a 200-page OCR pass does not freeze the

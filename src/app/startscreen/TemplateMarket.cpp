@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// TemplateMarket.cpp — see TemplateMarket.h.
+// TemplateMarket.cpp: see TemplateMarket.h.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "TemplateMarket.h"
 #include "HomeKit.h"

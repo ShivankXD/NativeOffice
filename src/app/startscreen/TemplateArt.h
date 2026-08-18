@@ -1,11 +1,11 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// TemplateArt.h — painted preview thumbnails for the template gallery.
+// TemplateArt.h: painted preview thumbnails for the template gallery.
 //
 // The old cards showed the same three flat SVG blobs behind every name, so a
 // resume and a press release looked identical. These paint a miniature of the
 // document itself: a page with a header band, a name block, ruled body lines,
-// a table or a chart — the shapes that tell you at a glance what you are about
+// a table or a chart, the shapes that tell you at a glance what you are about
 // to open.
 //
 // The layout comes from the template's own kind (resume, letter, report,

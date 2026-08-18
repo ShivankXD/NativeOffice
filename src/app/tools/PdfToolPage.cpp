@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// PdfToolPage.cpp — see PdfToolPage.h.
+// PdfToolPage.cpp: see PdfToolPage.h.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "PdfToolPage.h"
 #include "startscreen/HomeKit.h"
@@ -376,10 +376,10 @@ void PdfToolPage::runTo(const QString& out) {
             const int pct = m_sourceBytes > 0
                 ? int(100.0 * (m_sourceBytes - after) / double(m_sourceBytes)) : 0;
             msg = pct > 0
-                ? tr("Saved %1 — %2 → %3 (%4% smaller).")
+                ? tr("Saved %1, %2 → %3 (%4% smaller).")
                       .arg(QFileInfo(out).fileName(), humanSize(m_sourceBytes),
                            humanSize(after)).arg(pct)
-                : tr("Saved %1 — this PDF was already packed as tightly as it gets.")
+                : tr("Saved %1, this PDF was already packed as tightly as it gets.")
                       .arg(QFileInfo(out).fileName());
         } else {
             msg = tr("Saved %1 (%2).").arg(QFileInfo(out).fileName(), humanSize(after));

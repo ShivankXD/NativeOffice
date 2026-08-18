@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// QrEncoder.cpp — see QrEncoder.h.
+// QrEncoder.cpp: see QrEncoder.h.
 //
 // The structure follows the reference algorithm in the specification: build
 // the bit stream, split it into blocks, append Reed-Solomon parity, interleave,

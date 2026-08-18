@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// QrCodeGenerator.h — Home → Tools → QR Code Generator.
+// QrCodeGenerator.h: Home → Tools → QR Code Generator.
 //
 //  ┌──────────────────────────┬─────────────────────────────────────────┐
 //  │ Content                  │                                         │
