@@ -730,7 +730,8 @@ void ImageResizerWidget::updateUiState() {
     else if (pending)
         m_countLabel->setText(tr("Export the selected image to add more"));
     else
-        m_countLabel->setText(tr("%n image(s) added", nullptr, n));
+        m_countLabel->setText(n == 1 ? tr("1 image added")
+                                     : tr("%1 images added").arg(n));
     m_canvasStack->setCurrentIndex(n == 0 ? 0 : 1);
     m_exportBtn->setEnabled(!m_selected.isEmpty());
     m_btnAdd->setEnabled(!pending);
