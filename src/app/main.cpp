@@ -2408,21 +2408,25 @@ static QString writerTemplateHtml(const QString& name) {
 
     if (name == "Professional Resume" || name == "Modern Resume") {
         const QString accent = name.startsWith("Modern") ? "#0E7C5A" : "#1F3864";
-        return QString(R"(<h1 style="%1 color:%2; margin-bottom:2px;">Your Name</h1>
-<p style="%1 color:#5A6071;">City, Country · +00 00000 00000 · you@email.com · linkedin.com/in/you</p><hr/>
+        return QString(R"(<h1 style="%1 color:%2; margin-bottom:0px;">Your Name</h1>
+<p style="%1 color:%2; margin-top:0px;"><b>Professional Title</b></p>
+<p style="%1 color:#5A6071;">youremail@example.com &nbsp;·&nbsp; +1 234 567 890 &nbsp;·&nbsp; City, Country</p><hr/>
 <h2 style="%1 color:%2;">Summary</h2>
 <p style="%1">Results-driven professional with X years of experience in ____. Known for ____ and ____.</p>
+<h2 style="%1 color:%2;">Education</h2>
+<p style="%1"><b>Degree, Institution</b> &nbsp;·&nbsp; <i>20XX</i></p>
+<p style="%1"><b>Certification or second degree</b> &nbsp;·&nbsp; <i>20XX</i></p>
 <h2 style="%1 color:%2;">Experience</h2>
-<p style="%1"><b>Job Title — Company</b> &nbsp;·&nbsp; <i>20XX – Present</i></p>
+<p style="%1"><b>Job Title, Company</b> &nbsp;·&nbsp; <i>20XX to Present</i></p>
 <ul><li style="%1">Achievement with a measurable result (grew X by Y%)</li>
 <li style="%1">Responsibility that shows scope and ownership</li>
 <li style="%1">Tool, process or initiative you led</li></ul>
-<p style="%1"><b>Previous Title — Company</b> &nbsp;·&nbsp; <i>20XX – 20XX</i></p>
+<p style="%1"><b>Previous Title, Company</b> &nbsp;·&nbsp; <i>20XX to 20XX</i></p>
 <ul><li style="%1">Key contribution</li><li style="%1">Key contribution</li></ul>
-<h2 style="%1 color:%2;">Education</h2>
-<p style="%1"><b>Degree, Institution</b> — 20XX</p>
 <h2 style="%1 color:%2;">Skills</h2>
-<p style="%1">Skill one · Skill two · Skill three · Skill four · Skill five</p>)")
+<p style="%1">Skill one · Skill two · Skill three · Skill four · Skill five</p>
+<h2 style="%1 color:%2;">Languages</h2>
+<p style="%1">Language one — native &nbsp;·&nbsp; Language two — fluent &nbsp;·&nbsp; Language three — basic</p>)")
             .arg(base, accent);
     }
     if (name == "Cover Letter")
@@ -2440,16 +2444,20 @@ static QString writerTemplateHtml(const QString& name) {
              + p("Final paragraph: state the action you request and by when, and how you can be reached.")
              + p("Yours faithfully,<br/><br/><b>Your Name</b><br/>Your Title");
     if (name == "Project Report")
-        return h1("Project Report") + p("<i>Author · Date · Version 1.0</i>") + hr()
-             + QString("<h2 style=\"%1 color:#1F3864;\">1. Executive Summary</h2>").arg(base)
+        return h1("Project Name") + p("<i>Prepared by Your Name · " + QDate::currentDate().toString("MMMM d, yyyy") + "</i>") + hr()
+             + QString("<h2 style=\"%1 color:#1F3864;\">Project Overview</h2>").arg(base)
              + p("Two or three sentences: what the project is, its current status, and the headline result.")
-             + QString("<h2 style=\"%1 color:#1F3864;\">2. Objectives</h2>").arg(base)
-             + QString("<ul><li style=\"%1\">Objective one</li><li style=\"%1\">Objective two</li></ul>").arg(base)
-             + QString("<h2 style=\"%1 color:#1F3864;\">3. Progress</h2>").arg(base)
-             + p("What was completed this period, what is in flight, and what's next.")
-             + QString("<h2 style=\"%1 color:#1F3864;\">4. Risks & Issues</h2>").arg(base)
+             + QString("<h2 style=\"%1 color:#1F3864;\">Objectives</h2>").arg(base)
+             + QString("<ul><li style=\"%1\">Objective one, with the measure that says it is met</li>"
+                       "<li style=\"%1\">Objective two</li>"
+                       "<li style=\"%1\">Objective three</li></ul>").arg(base)
+             + QString("<h2 style=\"%1 color:#1F3864;\">Timeline</h2>").arg(base)
+             + QString("<ul><li style=\"%1\">Phase 1, Discovery: dates, owner</li>"
+                       "<li style=\"%1\">Phase 2, Build: dates, owner</li>"
+                       "<li style=\"%1\">Phase 3, Launch: dates, owner</li></ul>").arg(base)
+             + QString("<h2 style=\"%1 color:#1F3864;\">Risks and Issues</h2>").arg(base)
              + p("Top risks with owner and mitigation.")
-             + QString("<h2 style=\"%1 color:#1F3864;\">5. Conclusion</h2>").arg(base)
+             + QString("<h2 style=\"%1 color:#1F3864;\">Summary</h2>").arg(base)
              + p("Overall assessment and recommendation.");
     if (name == "Meeting Notes")
         return h1("Meeting Notes") + p(QString("<b>Date:</b> %1 &nbsp;&nbsp; <b>Time:</b> ____ &nbsp;&nbsp; <b>Location:</b> ____")
@@ -2506,15 +2514,15 @@ static void applyCalcTemplate(NativeOffice::CalcModule* calc, const QString& nam
     QList<QStringList> rows;
     if (name == "Monthly Budget")
         rows = { {"Monthly Budget"}, {},
-                 {"Category","Budgeted","Actual","Difference"},
-                 {"Housing / Rent","1200","","=B4-C4"},
-                 {"Groceries","400","","=B5-C5"},
-                 {"Transport","150","","=B6-C6"},
-                 {"Utilities","180","","=B7-C7"},
-                 {"Entertainment","120","","=B8-C8"},
-                 {"Savings","300","","=B9-C9"},
-                 {"Other","100","","=B10-C10"}, {},
-                 {"Total","=SUM(B4:B10)","=SUM(C4:C10)","=B12-C12"} };
+                 {"Category","Budget","Actual","Difference"},
+                 {"Income","5000","5200","=C4-B4"},
+                 {"Housing","1500","1450","=B5-C5"},
+                 {"Food","800","750","=B6-C6"},
+                 {"Transportation","400","380","=B7-C7"},
+                 {"Utilities","300","320","=B8-C8"},
+                 {"Entertainment","200","180","=B9-C9"},
+                 {"Savings","800","900","=C10-B10"}, {},
+                 {"Total","=SUM(B5:B10)","=SUM(C5:C10)","=B12-C12"} };
     else if (name == "Invoice")
         rows = { {"INVOICE"}, {"Invoice #","0001","","Date",""}, {},
                  {"From:","Your Company"}, {"Bill To:","Client Name"}, {},

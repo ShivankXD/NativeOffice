@@ -905,12 +905,12 @@ void ImpressModule::applyDeckTemplate(const QString& name) {
     const Pal dark   { "#18181B", "#27272A", "#FAFAFA", "#D4D4D8", "#F59E0B" };
 
     QHash<QString, Deck> decks;
-    decks["Pitch Deck"] = { "Your Startup", "one line that investors remember", navy, {
-        { "The Problem",  { "What's broken today", "Who feels the pain and how often", "Cost of the status quo" } },
-        { "The Solution", { "Your product in one sentence", "Why now — what changed", "Live demo" } },
-        { "Market & Model", { "TAM / SAM / SOM", "How you make money", "Pricing" } },
-        { "Traction",     { "Key metrics and growth", "Customers & pipeline", "Milestones hit" } },
-        { "The Ask",      { "Raising: amount & instrument", "Use of funds", "12-month plan" } } } };
+    decks["Pitch Deck"] = { "Business Pitch Deck", "one line that investors remember", navy, {
+        { "The Problem",    { "What is broken today", "Who feels the pain and how often", "Cost of the status quo" } },
+        { "The Solution",   { "Your product in one sentence", "Why now, and what changed", "Live demo" } },
+        { "Market Overview", { "TAM, SAM and SOM", "Who you sell to", "How you make money" } },
+        { "Growth",         { "Key metrics quarter on quarter", "Customers and pipeline", "Milestones hit" } },
+        { "The Ask",        { "Raising: amount and instrument", "Use of funds", "12-month plan" } } } };
     decks["Business Review"] = { "Quarterly Business Review", "Q_ 20__ · Team", blue, {
         { "Highlights",     { "Wins this quarter", "Revenue vs plan", "Team changes" } },
         { "Key Metrics",    { "Revenue & margin", "Customer growth / churn", "NPS" } },
