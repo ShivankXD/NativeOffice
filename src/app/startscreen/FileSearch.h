@@ -1,6 +1,6 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// FileSearch.h — the home search box actually searching the machine.
+// FileSearch.h: the home search box actually searching the machine.
 //
 // The box on the top bar used to be decorative: it accepted text and did
 // nothing with it. This gives it a real index and a real result list.

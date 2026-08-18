@@ -220,10 +220,16 @@ QVector<IndexedFile> FileIndex::search(const QString& queryIn, int limit) const 
 // SearchPopup
 // ─────────────────────────────────────────────────────────────────────────────
 SearchPopup::SearchPopup(QWidget* anchor, QWidget* parent)
-    : QWidget(parent, Qt::Popup | Qt::FramelessWindowHint), m_anchor(anchor) {
+    : QWidget(parent), m_anchor(anchor) {
     setObjectName("searchPopup");
     setAttribute(Qt::WA_StyledBackground, true);
-    setFocusPolicy(Qt::NoFocus);   // typing stays in the search box
+    setFocusPolicy(Qt::NoFocus);
+    hide();
+    // A plain child widget raised over the page, NOT a Qt::Popup. A popup takes
+    // a keyboard grab the moment it shows, so the first letter typed opened
+    // this list and every letter after it went to the list instead of to the
+    // search box: the field accepted exactly one character and then appeared
+    // to be dead.
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(8, 8, 8, 8);
@@ -300,7 +306,7 @@ void SearchPopup::rebuild() {
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(10, 0, 12, 0);
         h->setSpacing(11);
-        h->addWidget(badge(kind.letter, kind.color, 28, row));
+        h->addWidget(fileBadge(kind, 30, row));
 
         auto* col = new QVBoxLayout();
         col->setSpacing(1);
@@ -332,9 +338,12 @@ void SearchPopup::rebuild() {
 }
 
 void SearchPopup::showUnder() {
-    if (!m_anchor) return;
+    if (!m_anchor || !parentWidget()) return;
     FileIndex::instance().ensureStarted();
-    const QPoint below = m_anchor->mapToGlobal(QPoint(0, m_anchor->height() + 8));
+    // Positioned in the parent's coordinates now that this is a child widget
+    // rather than its own window.
+    const QPoint below = m_anchor->mapTo(parentWidget(),
+                                         QPoint(0, m_anchor->height() + 8));
     setFixedWidth(qMax(420, m_anchor->width()));
     move(below);
     show();
