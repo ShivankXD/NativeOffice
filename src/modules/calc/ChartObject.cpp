@@ -318,6 +318,12 @@ void ChartObject::rebuild() {
         const Series first = series.isEmpty() ? Series{} : series.first();
         for (int i = 0; i < cats.size() && i < first.vals.size(); ++i)
             ps->append(cats[i], first.vals[i]);
+        // The size has to be stated. Left to itself with labels outside, Qt
+        // shrinks the pie to make room for them, and with several categories
+        // that collapsed it to nothing: the labels piled up in the middle of an
+        // empty chart and no wedge was drawn at all.
+        ps->setPieSize(0.62);
+        ps->setLabelsPosition(QPieSlice::LabelOutside);
         ps->setLabelsVisible(true);
         chart->addSeries(ps);
         break;
