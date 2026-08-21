@@ -2777,8 +2777,14 @@ static void applyCalcTemplate(NativeOffice::CalcModule* calc, const QString& nam
         // number redraws them.
         // Both ranges start on the header row, so the chart names its series
         // from it rather than treating the first category as a heading.
-        calc->addChartAt(NativeOffice::ChartType::Pie,
-                         QRect(0, 2, 2, 8), QRect(520, 18, 430, 300));
+        // Spending only: the categories run Housing..Savings (rows 5..10 on the
+        // sheet), skipping Income, which is what "Total out" below already sums.
+        calc->addChartExplicit(NativeOffice::ChartType::Pie,
+                               QRect(0, 4, 1, 6),      // A5:A10  category names
+                               QRect(1, 4, 1, 6),      // B5:B10  budgeted amounts
+                               QStringLiteral("Budget"),
+                               QStringLiteral("Where the money goes"),
+                               QRect(520, 18, 430, 300));
         calc->addChartAt(NativeOffice::ChartType::Column,
                          QRect(0, 2, 3, 8), QRect(520, 336, 430, 300));
 
