@@ -36,6 +36,8 @@
 #include <functional>
 
 #include "Cell.h"
+#include <QPointer>
+
 #include "ChartSpec.h"
 #include "DataCleanser.h"   // for the Op enum in the slot signature
 #include "SheetSql.h"       // for ResultTable held as a member
@@ -67,6 +69,10 @@ class CalcModule : public QWidget {
 
 public:
     explicit CalcModule(QWidget* parent = nullptr);
+    // Child widgets outlive these members: ~QWidget deletes them after every
+    // member here is already gone, and their destroyed() handlers would then
+    // touch freed containers. The destructor cuts those connections first.
+    ~CalcModule() override;
 
     [[nodiscard]] SpreadsheetModel* model() const noexcept { return m_model; }
 
@@ -94,12 +100,33 @@ public:
     // way to set up; this lets a finished sheet be built in one pass.
     void addChartAt(ChartType type, const QRect& range, const QRect& geom);
 
+    // A chart whose categories and values are named separately, so it can plot
+    // a subset of a table rather than one contiguous block.
+    void addChartExplicit(ChartType type, const QRect& catRange,
+                          const QRect& valRange, const QString& seriesName,
+                          const QString& title, const QRect& geom);
+
     // Column widths for a template, applied to the view as well as stored,
     // so a sheet built in one pass does not open with its labels clipped.
     void setTemplateColumnWidths(const QHash<int, int>& widthsPx);
 
     [[nodiscard]] QAction* pasteAction() const noexcept { return m_pasteAct; }
     [[nodiscard]] QAction* deleteAction()const noexcept { return m_deleteAct;}
+
+    // ── Dev capture aids (NATIVEOFFICE_CALC_GRAB) ────────────────────────────
+    // Switching sheets and reporting what sits on one, so chart and picture
+    // import can be checked offscreen instead of by driving the UI.
+    void activateSheet(int index) { switchToSheet(index); }
+    void dumpSheetObjects() const;
+    // Charts + pictures across every sheet, so the save path can tell the user
+    // what an .xlsx write would drop.
+    [[nodiscard]] int sheetObjectCount() const;
+    void dumpCell(const QString& ref) const;
+    void scrollToCell(int col, int row);
+    // Sends a real Ctrl+wheel event to the grid so the zoom path is exercised
+    // end to end rather than by calling zoomBy() directly.
+    void devCtrlWheel(int notches);
+    void devMarkDirty() { markDirty(); }
 
 signals:
     void cellSelected(const QString& address);
@@ -294,6 +321,19 @@ private:
     // Copy live chart geometries/types back into the active model's specs.
     void syncChartSpecs();
     ChartObject* createChartObject(const ChartSpec& spec);
+    // Viewport geometry for an anchor, at the current scroll and zoom.
+    [[nodiscard]] QRect anchorGeometry(const CellAnchor& a, const QRect& fallback) const;
+    // The anchor an object's current geometry corresponds to (the inverse).
+    [[nodiscard]] CellAnchor geometryToAnchor(const QRect& g) const;
+    // Rebuild the picture widgets for the active sheet.
+    void rebuildImageObjects();
+    QWidget* createImageObject(const SheetImage& img);
+    void rebuildShapeObjects();
+    // Anchor plus sub-rect. anchorGeometry() places the whole anchored object;
+    // this narrows that to the share a grouped member actually occupies.
+    [[nodiscard]] QRect placedGeometry(QWidget* w, const CellAnchor& a) const;
+    void syncImageSpecs();
+    bool deleteSelectedObject();
 
     // Insert =FN(range) into the active cell, auto-detecting the range above/left.
     void insertFunction(const QString& fn);
@@ -458,8 +498,28 @@ private:
     QVector<ChartObject*> m_chartObjs;
 
     // ── Floating-object cell anchoring (charts/images scroll with the grid) ────
-    struct ObjAnchor { int col; int row; int dx; int dy; };
-    QHash<QWidget*, ObjAnchor> m_objAnchors;
+    // A two-corner anchor, so an object spans a block of cells and keeps
+    // spanning it when rows/columns are resized or the sheet is zoomed.
+    QHash<QWidget*, CellAnchor> m_objAnchors;
+    // Only populated for objects that are part of a group: the fraction of
+    // the anchor they cover, and the full-object size to fall back on when the
+    // anchor has only one corner.
+    QHash<QWidget*, QRectF> m_objFrac;
+    QHash<QWidget*, QRect>  m_objFallback;
+    QVector<class ShapeObject*> m_shapeObjs;
+    // The chart or picture currently selected, so Delete knows to remove the
+    // object rather than clearing the cells underneath it.
+    QPointer<QWidget> m_selectedObj;
+    // Which rows are hidden. Asking the view about every row is not an option
+    // once the grid is Excel-sized.
+    QSet<int> m_hiddenRows;
+    QSet<int> m_hiddenColsApplied;
+    // Encoded bytes for each picture widget, so the image survives a save and
+    // a sheet switch without going back to the file it came from.
+    QHash<QWidget*, QByteArray> m_imageData;
+    // The bytes of the .xlsx this workbook was opened from. Kept so a save can
+    // put every part back that the exporter cannot reproduce.
+    QByteArray m_originalXlsx;
     void anchorWidget(QWidget* w);             // record the cell under w's top-left
     void repositionFloatingObjects();          // move anchored objects on scroll/resize
     void insertImagePixmap(const QPixmap& pm); // create a floating image from a pixmap

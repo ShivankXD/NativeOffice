@@ -8,6 +8,7 @@
 #include "CalcHeaderView.h"
 #include "CalcIcons.h"
 #include "ChartObject.h"
+#include "ShapeObject.h"
 #include "FormulaEngine.h"
 #include "Cell.h"
 #include "XlsxIo.h"
@@ -35,7 +36,10 @@
 #include <QItemSelection>
 #include <QAbstractItemView>
 #include <QKeyEvent>
+#include <QBuffer>
+#include <QElapsedTimer>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QResizeEvent>
 #include <QFont>
 #include <QSizePolicy>
@@ -357,9 +361,11 @@ public:
     std::function<void(QWidget*)> onSelected;   // fired when clicked (module deselects others)
 
     void setSelected(bool on) {
-        setStyleSheet(QString("QFrame#floatItem{background:#FFFFFF;border:1px %1;}")
-                          .arg(on ? "solid #1A73E8" : "solid transparent"));
-        if (m_close)    m_close->setVisible(on);
+        // Transparent either way: a white card behind a picture turned every
+        // image with an alpha channel into a floating white box.
+        setStyleSheet(on
+            ? QStringLiteral("QFrame#floatItem{background:transparent;border:1px solid #1A73E8;}")
+            : QStringLiteral("QFrame#floatItem{background:transparent;border:none;}"));
         if (m_moveGrip) m_moveGrip->setVisible(on);
         if (m_grip)     m_grip->setVisible(on);
     }
@@ -371,22 +377,15 @@ public:
         setAutoFillBackground(true);
         setAttribute(Qt::WA_NoMousePropagation);   // swallow clicks, no fall-through
         setCursor(Qt::SizeAllCursor);              // drag the body to move
-        setStyleSheet("QFrame#floatItem{background:#FFFFFF;border:1px solid #B6BBC2;}");
+        setStyleSheet("QFrame#floatItem{background:transparent;border:none;}");
         auto* v = new QVBoxLayout(this);
-        v->setContentsMargins(1, 1, 1, 1);
+        v->setContentsMargins(0, 0, 0, 0);
         v->setSpacing(0);
 
         if (content) { content->setParent(this); v->addWidget(content); }
 
-        // Small delete button, top-right corner.
-        m_close = new QToolButton(this);
-        m_close->setText("\xE2\x9C\x95");
-        m_close->setCursor(Qt::ArrowCursor);
-        m_close->setFixedSize(16, 16);
-        m_close->setStyleSheet(
-            "QToolButton{border:none;background:rgba(255,255,255,210);color:#8A8A8A;"
-            "font-size:11px;border-radius:2px;} QToolButton:hover{color:#E8372A;background:#FDECEA;}");
-        connect(m_close, &QToolButton::clicked, this, [this]{ deleteLater(); });
+        // No close button, for the same reason the chart has none: it made the
+        // object look like a window. Delete removes the selected object.
 
         // Top-left move handle (lets even an editable text box be dragged).
         m_moveGrip = new QWidget(this);
@@ -407,10 +406,8 @@ public:
     }
 protected:
     void resizeEvent(QResizeEvent*) override {
-        if (m_close)    m_close->move(width() - 18, 2);
         if (m_moveGrip) m_moveGrip->move(2, 2);
         if (m_grip)     { m_grip->move(width() - 14, height() - 14); m_grip->raise(); }
-        if (m_close)    m_close->raise();
     }
     void mousePressEvent(QMouseEvent* e) override {
         if (e->button() == Qt::LeftButton) {
@@ -466,7 +463,6 @@ private:
         }
         setGeometry(g);
     }
-    QToolButton* m_close    { nullptr };
     QWidget*     m_moveGrip { nullptr };
     QWidget*     m_grip     { nullptr };
     bool   m_drag   { false };
@@ -502,6 +498,18 @@ public:
         if (bgv.canConvert<QColor>() && bgv.value<QColor>().isValid())
             bg = bgv.value<QColor>();
         p->fillRect(opt.rect, bg);
+
+        // Data bar: a proportional bar behind the value. Drawn after the fill
+        // and before the text so the number stays readable on top of it.
+        if (model) {
+            const CondFormatRule::Result cf = model->evalCondFormat(idx.column(), idx.row());
+            if (cf.barColor.isValid() && cf.barFraction > 0.0) {
+                QRect bar = opt.rect.adjusted(1, 2, -1, -2);
+                bar.setWidth(int(bar.width() * cf.barFraction));
+                p->fillRect(bar, cf.barColor);
+            }
+        }
+
         if (opt.state & QStyle::State_Selected)
             p->fillRect(opt.rect, QColor(16, 124, 65, 28));   // green selection tint
 
@@ -514,9 +522,15 @@ public:
 
             // Default grid, drawn on the cell's own right and bottom edges so
             // neighbouring cells share the line rather than leaving a seam.
-            p->setPen(QColor("#E2E2E2"));
-            p->drawLine(r, t, r, b);
-            p->drawLine(l, b, r, b);
+            // A sheet can switch the grid off (showGridLines="0"), which
+            // dashboard-style workbooks nearly always do; drawing it anyway put
+            // a mesh over artwork that is meant to read as a solid panel.
+            const auto* sm = qobject_cast<const SpreadsheetModel*>(idx.model());
+            if (!sm || sm->showGridLines()) {
+                p->setPen(QColor("#E2E2E2"));
+                p->drawLine(r, t, r, b);
+                p->drawLine(l, b, r, b);
+            }
 
             // User borders paint over the grid on the same coordinates, so an
             // all-borders block reads as one table instead of loose boxes.
@@ -1360,8 +1374,38 @@ void CalcModule::connectActiveView() {
             [this](const QModelIndex&, const QModelIndex&) { onSelectionChanged(); });
 }
 
+CalcModule::~CalcModule() {
+    // Order matters. QObject's destroyed() signal fires from ~QObject, which is
+    // the last base destructor to run, while the hashes below are members of
+    // CalcModule and are already destroyed by then. A floating object deleted
+    // during ~QWidget would therefore run a handler that reads freed memory -
+    // reproducibly a crash on close for any workbook containing pictures.
+    for (QWidget* w : m_floatingItems) if (w) w->disconnect(this);
+    for (ChartObject* c : m_chartObjs)  if (c) c->disconnect(this);
+    for (ShapeObject* s : m_shapeObjs)  if (s) s->disconnect(this);
+    m_floatingItems.clear();
+    m_chartObjs.clear();
+    m_shapeObjs.clear();
+    m_imageData.clear();
+    m_objAnchors.clear();
+    m_objFrac.clear();
+    m_objFallback.clear();
+    m_selectedObj = nullptr;
+}
+
 void CalcModule::switchToSheet(int index) {
     if (index < 0 || index >= m_sheets.size()) return;
+    // Rebuilding the view raises model signals that look like edits. Nothing
+    // here changes a cell, so the dirty flag is held still for the duration and
+    // restored at the end.
+    const bool wasDirty = m_dirty;
+    const bool prevIgnore = m_ignoreChange;
+    m_ignoreChange = true;
+    const QScopeGuard restoreDirty([this, wasDirty, prevIgnore] {
+        m_ignoreChange = prevIgnore;
+        m_dirty = wasDirty;
+    });
+
     m_activeSheet = index;
     m_model = m_sheets[index];
     m_tableView->setModel(m_model);
@@ -1378,13 +1422,33 @@ void CalcModule::switchToSheet(int index) {
     applySizes();
 
     // Grow rows with wrapped cells that have no explicit stored height.
+    //
+    // Measured over the used columns only. resizeRowToContents() would ask the
+    // delegate for a size hint on every column of the grid, which is 16384 cell
+    // evaluations per wrapped row and made a sheet switch take a minute.
     QSet<int> wrapRows;
     const auto& data = m_model->cells();
     for (auto it = data.begin(); it != data.end(); ++it)
         if (it->second.format.wrap) wrapRows.insert(SpreadsheetModel::keyRow(it->first));
+
+    int usedCol = -1, usedRow = -1;
+    m_model->usedBounds(usedCol, usedRow);
     m_applyingSizes = true;
-    for (int row : wrapRows)
-        if (!m_model->rowHeights().contains(row)) m_tableView->resizeRowToContents(row);
+    if (usedCol >= 0) {
+        QStyleOptionViewItem opt;
+        opt.initFrom(m_tableView);
+        QAbstractItemDelegate* del = m_tableView->itemDelegate();
+        for (int row : wrapRows) {
+            if (m_model->rowHeights().contains(row)) continue;
+            int h = m_tableView->verticalHeader()->defaultSectionSize();
+            for (int c = 0; c <= usedCol; ++c) {
+                const QModelIndex ix = m_model->index(row, c);
+                opt.rect = QRect(0, 0, m_tableView->columnWidth(c), 0);
+                h = qMax(h, del->sizeHint(opt, ix).height());
+            }
+            m_tableView->setRowHeight(row, h);
+        }
+    }
     m_applyingSizes = false;
 
     const QModelIndex first = m_model->index(0, 0);
@@ -1451,6 +1515,10 @@ void CalcModule::rebuildTabBar() {
     }
 
     for (int i = 0; i < m_sheets.size(); ++i) {
+        // A hidden sheet keeps its data (charts reference it) but gets no tab,
+        // unless it is somehow the active one, which would leave the user with
+        // no way back.
+        if (m_sheets[i]->isHidden() && i != m_activeSheet) continue;
         auto* b = new QToolButton(m_tabBar);
         b->setText(m_sheets[i]->sheetName());
         b->setObjectName(i == m_activeSheet ? "sheetTabActive" : "sheetTab");
@@ -2487,6 +2555,17 @@ void CalcModule::insertFunction(const QString& fn) {
 // ─────────────────────────────────────────────────────────────────────────────
 ChartObject* CalcModule::createChartObject(const ChartSpec& spec) {
     auto* obj = new ChartObject(m_model, spec, m_tableView->viewport());
+    // An imported chart often plots a different sheet than the one it sits on.
+    obj->setSheetResolver([this](const QString& name) -> SpreadsheetModel* {
+        return sheetByName(name);
+    });
+    // Placement comes from the anchor when the chart has one; a chart made in
+    // the app before anchors existed still has only pixel geometry.
+    if (spec.anchor.hasFrom())
+        if (spec.frac != QRectF(0, 0, 1, 1)) m_objFrac.insert(obj, spec.frac);
+        m_objFallback.insert(obj, spec.geom);
+        obj->setGeometry(placedGeometry(obj, spec.anchor));
+    obj->rebuild();     // resolver and geometry are both set now
     obj->show();
     obj->raise();
     connect(obj, &ChartObject::closed, this, [this](ChartObject* c){
@@ -2503,7 +2582,8 @@ ChartObject* CalcModule::createChartObject(const ChartSpec& spec) {
     });
     connect(obj, &ChartObject::selected, this, [this](ChartObject* c){ selectFloatingObject(c); });
     m_chartObjs.push_back(obj);
-    anchorWidget(obj);              // anchor to the cell it sits over
+    if (spec.anchor.hasFrom()) m_objAnchors.insert(obj, spec.anchor);
+    else                       anchorWidget(obj);
     return obj;
 }
 
@@ -2536,6 +2616,29 @@ void CalcModule::addChartAt(ChartType type, const QRect& range, const QRect& geo
     syncChartSpecs();
 }
 
+void CalcModule::addChartExplicit(ChartType type, const QRect& catRange,
+                                  const QRect& valRange, const QString& seriesName,
+                                  const QString& title, const QRect& geom) {
+    if (catRange.isNull() || valRange.isNull()) return;
+    ChartSpec spec;
+    spec.type     = type;
+    spec.geom     = geom;
+    spec.title    = title;
+    spec.hasTitle = !title.isEmpty();
+    spec.catRange = catRange;
+    spec.showLegend = true;
+    spec.legendPos  = 'b';
+    spec.showDataLabels = true;
+
+    ChartSeries ser;
+    ser.name     = seriesName;
+    ser.valRange = valRange;
+    spec.series.push_back(ser);
+
+    createChartObject(spec);
+    syncChartSpecs();
+}
+
 void CalcModule::setTemplateColumnWidths(const QHash<int, int>& widthsPx) {
     if (!m_model) return;
     for (auto it = widthsPx.begin(); it != widthsPx.end(); ++it)
@@ -2545,11 +2648,238 @@ void CalcModule::setTemplateColumnWidths(const QHash<int, int>& widthsPx) {
 
 void CalcModule::rebuildChartObjects() {
     // Tear down the live widgets for the previous sheet.
-    for (ChartObject* c : m_chartObjs) c->deleteLater();
+    for (ChartObject* c : m_chartObjs) { m_objAnchors.remove(c); c->deleteLater(); }
     m_chartObjs.clear();
     if (!m_model) return;
     for (const ChartSpec& s : m_model->charts())
         createChartObject(s);
+    rebuildImageObjects();
+    // Shapes last so they sit over the charts and pictures they annotate,
+    // which is the order the file draws them in.
+    rebuildShapeObjects();
+}
+
+// ── Pictures on the sheet ───────────────────────────────────────────────────
+QWidget* CalcModule::createImageObject(const SheetImage& img) {
+    QPixmap pm;
+    if (!pm.loadFromData(img.data)) return nullptr;
+
+    auto* lbl = new QLabel;
+    lbl->setPixmap(pm);
+    lbl->setScaledContents(true);
+    lbl->setStyleSheet("background:transparent;");
+    lbl->setAttribute(Qt::WA_TransparentForMouseEvents);   // body drags the object
+
+    // Where it goes: the anchor if it has one, otherwise its own size.
+    const QRect fallback = img.geom.isEmpty()
+                               ? QRect(40, 30, pm.width(), pm.height())
+                               : img.geom;
+    auto* item = new FloatingItem(lbl, fallback, m_tableView->viewport());
+    if (img.frac != QRectF(0, 0, 1, 1)) m_objFrac.insert(item, img.frac);
+    m_objFallback.insert(item, fallback);
+    const QRect g = img.anchor.hasFrom() ? placedGeometry(item, img.anchor) : fallback;
+    // An imported picture is often a small icon; the default floor is sized for
+    // a text box and would inflate it.
+    item->setMinimumSize(8, 8);
+    item->setGeometry(g);
+    item->show(); item->raise();
+    m_floatingItems.push_back(item);
+    m_imageData.insert(item, img.data);
+    if (img.anchor.hasFrom()) m_objAnchors.insert(item, img.anchor);
+    else                      anchorWidget(item);
+    item->onMoved = [this, item]{
+        // Once the user has moved it by hand it is no longer positioned by the
+        // group it came from, so the sub-rect has to go or the next reposition
+        // would snap it back inside the group's old share of the anchor.
+        m_objFrac.remove(item);
+        m_objFallback.remove(item);
+        anchorWidget(item); syncImageSpecs(); markDirty();
+    };
+    item->onSelected = [this](QWidget* o){ selectFloatingObject(o); };
+    connect(item, &QObject::destroyed, this, [this](QObject* o){
+        auto* w = static_cast<QWidget*>(o);
+        m_objAnchors.remove(w);
+        m_objFrac.remove(w);
+        m_objFallback.remove(w);
+        m_imageData.remove(w);
+        m_floatingItems.removeAll(w);
+    });
+    return item;
+}
+
+void CalcModule::rebuildImageObjects() {
+    for (QWidget* w : m_floatingItems) { m_objAnchors.remove(w); w->deleteLater(); }
+    m_floatingItems.clear();
+    m_imageData.clear();
+    if (!m_model) return;
+    for (const SheetImage& img : m_model->images())
+        createImageObject(img);
+}
+
+// ── Shapes on the sheet ─────────────────────────────────────────────────────
+void CalcModule::rebuildShapeObjects() {
+    for (ShapeObject* s : m_shapeObjs) {
+        m_objAnchors.remove(s);
+        m_objFrac.remove(s);
+        m_objFallback.remove(s);
+        s->deleteLater();
+    }
+    m_shapeObjs.clear();
+    if (!m_model) return;
+
+    for (const SheetShape& sh : m_model->shapes()) {
+        auto* w = new ShapeObject(sh, m_tableView->viewport());
+        const QRect fallback = sh.geom.isEmpty() ? QRect(40, 30, 220, 90) : sh.geom;
+        m_objAnchors.insert(w, sh.anchor);
+        m_objFallback.insert(w, fallback);
+        if (sh.frac != QRectF(0, 0, 1, 1)) m_objFrac.insert(w, sh.frac);
+        w->setZoom(m_zoom > 0 ? m_zoom : 1.0);
+        w->setGeometry(sh.anchor.hasFrom() ? placedGeometry(w, sh.anchor) : fallback);
+        w->show();
+        m_shapeObjs.push_back(w);
+        connect(w, &QObject::destroyed, this, [this](QObject* o) {
+            auto* victim = static_cast<QWidget*>(o);
+            m_objAnchors.remove(victim);
+            m_objFrac.remove(victim);
+            m_objFallback.remove(victim);
+        });
+    }
+}
+
+// Dev capture aid: bring a cell into view so an object anchored below the fold
+// can be captured where it actually sits.
+void CalcModule::scrollToCell(int col, int row) {
+    if (!m_model || !m_tableView) return;
+    // PositionAtTop covers the vertical axis; the horizontal one is handled by
+    // the same call, so the scrollbar must not be nudged again afterwards (in
+    // per-item mode its value is an index, not a pixel offset).
+    m_tableView->scrollTo(m_model->index(row, col), QAbstractItemView::PositionAtTop);
+    repositionFloatingObjects();
+}
+
+void CalcModule::devCtrlWheel(int notches) {
+    if (!m_tableView) return;
+    QWidget* vp = m_tableView->viewport();
+    const QPoint  centre = vp->rect().center();
+    const QPoint  global = vp->mapToGlobal(centre);
+
+    // Deliver it the way the window system does: to whatever widget is actually
+    // on top at that point, not straight to the viewport. If an overlay or a
+    // floating object is intercepting the wheel, this is what shows it up.
+    QWidget* target = QApplication::widgetAt(global);
+    if (!target) target = vp;
+    qWarning("[calc] wheel target: %s (%s)%s",
+             target->metaObject()->className(),
+             qUtf8Printable(target->objectName().isEmpty()
+                                ? QStringLiteral("-") : target->objectName()),
+             target == vp ? "  == viewport" : "  != viewport");
+
+    const QPointF local = target->mapFromGlobal(global);
+    QWheelEvent we(local, global, QPoint(0, 0),
+                   QPoint(0, notches * 120), Qt::NoButton,
+                   Qt::ControlModifier, Qt::NoScrollPhase, false);
+    const bool handled = QApplication::sendEvent(target, &we);
+    qWarning("[calc] wheel sent, handled=%d accepted=%d zoom now %.2f",
+             int(handled), int(we.isAccepted()), m_zoom);
+}
+
+// Dev aid: dump one cell's raw content and what it evaluates to.
+void CalcModule::dumpCell(const QString& ref) const {
+    if (!m_model) return;
+    int col = 0, row = 0, i = 0, c = 0;
+    while (i < ref.size() && ref[i].isLetter()) { c = c*26 + (ref[i].toUpper().toLatin1()-'A'+1); ++i; }
+    col = c - 1; row = ref.mid(i).toInt() - 1;
+    if (col < 0 || row < 0) return;
+    qWarning("[cell] %s raw=<%s> shown=<%s>",
+             qUtf8Printable(ref),
+             qUtf8Printable(m_model->rawContent(col, row)),
+             qUtf8Printable(m_model->displayValue(col, row)));
+}
+
+int CalcModule::sheetObjectCount() const {
+    int n = 0;
+    for (SpreadsheetModel* m : m_sheets)
+        if (m) n += m->charts().size() + m->images().size();
+    return n;
+}
+
+// Dev capture aid: what is actually sitting on the active sheet right now.
+// Reports the live widgets, not the model, so an object that failed to be
+// created or landed off-screen shows up as such rather than being assumed fine.
+void CalcModule::dumpSheetObjects() const {
+    const QSize vp = m_tableView ? m_tableView->viewport()->size() : QSize();
+    qWarning("[calc] grid %d cols x %d rows (last cell %s%d)",
+             SpreadsheetModel::NUM_COLS, SpreadsheetModel::NUM_ROWS,
+             qUtf8Printable(QStringLiteral("XFD")), SpreadsheetModel::NUM_ROWS);
+    qWarning("[calc] sheet %d of %d  viewport %dx%d  zoom %.2f",
+             m_activeSheet + 1, int(m_sheets.size()), vp.width(), vp.height(), m_zoom);
+    qWarning("[calc] model: %d chart(s), %d image(s), %d shape(s)",
+             m_model ? m_model->charts().size() : 0,
+             m_model ? m_model->images().size() : 0,
+             m_model ? m_model->shapes().size() : 0);
+
+    int onScreen = 0;
+    for (ChartObject* c : m_chartObjs) {
+        const QRect g = c->geometry();
+        const bool vis = c->isVisible() && g.intersects(QRect(QPoint(0, 0), vp));
+        if (vis) ++onScreen;
+        const CellAnchor a = c->anchor();
+        qWarning("[calc]   chart %-9s geom %4d,%4d %4dx%-4d anchor (%d,%d)->(%d,%d) %s",
+                 qUtf8Printable(chartTypeName(c->type())),
+                 g.x(), g.y(), g.width(), g.height(),
+                 a.fromCol, a.fromRow, a.toCol, a.toRow,
+                 vis ? "VISIBLE" : "offscreen");
+    }
+    for (QWidget* w : m_floatingItems) {
+        if (!m_imageData.contains(w)) continue;
+        const QRect g = w->geometry();
+        const bool vis = w->isVisible() && g.intersects(QRect(QPoint(0, 0), vp));
+        if (vis) ++onScreen;
+        const CellAnchor a = m_objAnchors.value(w);
+        qWarning("[calc]   image           geom %4d,%4d %4dx%-4d anchor (%d,%d)->(%d,%d) %s",
+                 g.x(), g.y(), g.width(), g.height(),
+                 a.fromCol, a.fromRow, a.toCol, a.toRow,
+                 vis ? "VISIBLE" : "offscreen");
+    }
+    for (ShapeObject* w : m_shapeObjs) {
+        const QRect g = w->geometry();
+        const bool vis = w->isVisible() && g.intersects(QRect(QPoint(0, 0), vp));
+        if (vis) ++onScreen;
+        const SheetShape& sh = w->shape();
+        QString caption;
+        for (const ShapeParagraph& para : sh.text)
+            for (const ShapeRun& run : para.runs) caption += run.text;
+        caption = caption.simplified().left(24);
+        qWarning("[calc]   shape g%-2d       geom %4d,%4d %4dx%-4d fill %-9s line %-9s %s %s",
+                 int(sh.preset), g.x(), g.y(), g.width(), g.height(),
+                 qUtf8Printable(sh.fill.isValid() ? sh.fill.name()
+                                : (sh.gradient.isEmpty() ? QStringLiteral("none")
+                                                         : sh.gradient.first().name() + QStringLiteral("~"))),
+                 qUtf8Printable(sh.line.isValid() ? sh.line.name() : QStringLiteral("none")),
+                 vis ? "VISIBLE  " : "offscreen",
+                 qUtf8Printable(caption));
+    }
+    qWarning("[calc] widgets: %d chart(s), %d picture(s), %d shape(s), %d within the viewport",
+             int(m_chartObjs.size()), int(m_imageData.size()),
+             int(m_shapeObjs.size()), onScreen);
+}
+
+void CalcModule::syncImageSpecs() {
+    if (!m_model) return;
+    QVector<SheetImage> out;
+    for (QWidget* w : m_floatingItems) {
+        if (!m_imageData.contains(w)) continue;    // text boxes are not pictures
+        SheetImage img;
+        img.data   = m_imageData.value(w);
+        img.anchor = m_objAnchors.value(w);
+        img.geom   = w->geometry();
+        // A picture that came out of a group covers only part of its anchor.
+        // Dropping that here put it back at full size on the next rebuild.
+        const QRectF f = m_objFrac.value(w);
+        if (!f.isNull() && f.width() > 0 && f.height() > 0) img.frac = f;
+        out.push_back(img);
+    }
+    m_model->setImages(out);
 }
 
 void CalcModule::refreshChartsData() {
@@ -2586,21 +2916,24 @@ void CalcModule::applyFilters() {
     int c1, r1, c2, r2;
     if (!usedRange(m_model, c1, r1, c2, r2)) return;
     const int headerRow = r1;                       // top used row = header
-    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row) {
+    // Only the used range can be filtered, and only rows whose state actually
+    // changes are touched: setRowHidden relayouts the header every call.
+    for (int row = headerRow + 1; row <= r2; ++row) {
         bool hidden = false;
-        if (row > headerRow && row <= r2) {
-            for (auto it = m_columnFilters.begin(); it != m_columnFilters.end() && !hidden; ++it)
-                if (!it.value().contains(m_model->displayValue(it.key(), row)))
-                    hidden = true;
+        for (auto it = m_columnFilters.begin(); it != m_columnFilters.end() && !hidden; ++it)
+            if (!it.value().contains(m_model->displayValue(it.key(), row)))
+                hidden = true;
+        if (m_tableView->isRowHidden(row) != hidden) {
+            m_tableView->setRowHidden(row, hidden);
+            if (hidden) m_hiddenRows.insert(row);
+            else        m_hiddenRows.remove(row);
         }
-        m_tableView->setRowHidden(row, hidden);
     }
 }
 
 void CalcModule::clearFilters() {
     m_columnFilters.clear();
-    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row)
-        m_tableView->setRowHidden(row, false);
+    unhideAllRows();
 }
 
 void CalcModule::showColumnFilter() {
@@ -2756,9 +3089,21 @@ void CalcModule::updateFrozenViews() {
     m_placingFrozen = true;
     const QScopeGuard done([this]{ m_placingFrozen = false; });
 
+    // Runs on every scroll, so it copies the defaults and only the sections
+    // that actually differ rather than walking the whole grid each time.
     auto syncSizes = [&](QTableView* v){
-        for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c) v->setColumnWidth(c, m_tableView->columnWidth(c));
-        for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r) v->setRowHeight(r, m_tableView->rowHeight(r));
+        v->horizontalHeader()->setDefaultSectionSize(
+            m_tableView->horizontalHeader()->defaultSectionSize());
+        v->verticalHeader()->setDefaultSectionSize(
+            m_tableView->verticalHeader()->defaultSectionSize());
+        const auto& cw = m_model->colWidths();
+        for (auto it = cw.begin(); it != cw.end(); ++it)
+            if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_COLS)
+                v->setColumnWidth(it.key(), m_tableView->columnWidth(it.key()));
+        const auto& rh = m_model->rowHeights();
+        for (auto it = rh.begin(); it != rh.end(); ++it)
+            if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_ROWS)
+                v->setRowHeight(it.key(), m_tableView->rowHeight(it.key()));
     };
 
     int fcW = 0; for (int c = 0; c < m_freezeCols; ++c) fcW += m_tableView->columnWidth(c);
@@ -2853,33 +3198,124 @@ void CalcModule::featureInfo(const QString& name, const QString& detail) {
     QMessageBox::information(this, name, detail);
 }
 
-// ── Floating-object anchoring (objects scroll with the grid) ─────────────────
+// ── Floating-object anchoring (objects sit ON the cells) ────────────────────
+// An object is placed the way a spreadsheet places it: by the cells its two
+// corners fall in, not by viewport pixels. That is what makes a chart span a
+// block of cells and keep spanning it while the sheet scrolls, its columns are
+// resized or its zoom changes.
+CellAnchor CalcModule::geometryToAnchor(const QRect& g) const {
+    CellAnchor a;
+    const double z = m_zoom > 0 ? m_zoom : 1.0;
+
+    auto cellAt = [&](int x, int y, int& col, int& row, int& dx, int& dy) {
+        col = m_tableView->columnAt(x);
+        row = m_tableView->rowAt(y);
+        // A corner past the last populated column/row still has to land
+        // somewhere sensible, so it clamps to the edge rather than going -1.
+        if (col < 0) col = qMax(0, m_tableView->columnAt(qMax(0, x - 1)));
+        if (row < 0) row = qMax(0, m_tableView->rowAt(qMax(0, y - 1)));
+        if (col < 0) col = 0;
+        if (row < 0) row = 0;
+        dx = int((x - m_tableView->horizontalHeader()->sectionViewportPosition(col)) / z);
+        dy = int((y - m_tableView->verticalHeader()->sectionViewportPosition(row)) / z);
+    };
+
+    cellAt(g.left(),  g.top(),    a.fromCol, a.fromRow, a.fromDx, a.fromDy);
+    cellAt(g.right(), g.bottom(), a.toCol,   a.toRow,   a.toDx,   a.toDy);
+    return a;
+}
+
+QRect CalcModule::anchorGeometry(const CellAnchor& a, const QRect& fallback) const {
+    if (!a.hasFrom() || !m_model) return fallback;
+    const double z = m_zoom > 0 ? m_zoom : 1.0;
+
+    // Section positions come from the headers, not from columnViewportPosition:
+    // the view's helper is only dependable for columns that are currently on
+    // screen, and an object anchored off to the right resolved both of its
+    // corners to the same x, collapsing it to its minimum size.
+    const QHeaderView* hh = m_tableView->horizontalHeader();
+    const QHeaderView* vh = m_tableView->verticalHeader();
+
+    const int x = hh->sectionViewportPosition(a.fromCol) + int(a.fromDx * z);
+    const int y = vh->sectionViewportPosition(a.fromRow) + int(a.fromDy * z);
+
+    if (a.hasTo()) {
+        const int x2 = hh->sectionViewportPosition(a.toCol) + int(a.toDx * z);
+        const int y2 = vh->sectionViewportPosition(a.toRow) + int(a.toDy * z);
+        // Never collapse to nothing: a corner cell that is scrolled out of
+        // reach can report a position that would invert the rectangle.
+        return QRect(x, y, qMax(8, x2 - x), qMax(8, y2 - y));
+    }
+    // One-corner anchor: keep the object's own size, scaled by the zoom.
+    const QSize s = fallback.isEmpty() ? QSize(420, 280) : fallback.size();
+    return QRect(x, y, int(s.width() * z), int(s.height() * z));
+}
+
+// Where an object actually goes. anchorGeometry() gives the whole anchored
+// object's box; a member of a group covers only a fraction of that box, and the
+// fraction has to be re-applied every time the box changes (scroll, resize,
+// zoom) or the group's internal layout comes apart.
+QRect CalcModule::placedGeometry(QWidget* w, const CellAnchor& a) const {
+    const QRect base = anchorGeometry(a, m_objFallback.value(w, w->geometry()));
+    const QRectF f   = m_objFrac.value(w);
+    if (f.isNull() || f.width() <= 0 || f.height() <= 0) return base;
+    return QRect(base.x() + qRound(f.x() * base.width()),
+                 base.y() + qRound(f.y() * base.height()),
+                 qMax(2, qRound(f.width()  * base.width())),
+                 qMax(2, qRound(f.height() * base.height())));
+}
+
 void CalcModule::anchorWidget(QWidget* w) {
     if (!w) return;
-    const QPoint tl = w->pos();
-    int col = m_tableView->columnAt(tl.x()); if (col < 0) col = 0;
-    int row = m_tableView->rowAt(tl.y());    if (row < 0) row = 0;
-    ObjAnchor a;
-    a.col = col; a.row = row;
-    a.dx = tl.x() - m_tableView->columnViewportPosition(col);
-    a.dy = tl.y() - m_tableView->rowViewportPosition(row);
+    const CellAnchor a = geometryToAnchor(w->geometry());
     m_objAnchors.insert(w, a);
+    // Charts carry their anchor in the spec so it is saved with the sheet.
+    if (auto* c = qobject_cast<ChartObject*>(w)) c->setAnchor(a);
 }
 
 void CalcModule::repositionFloatingObjects() {
+    // A shape's caption is sized in points, so it only tracks the sheet if the
+    // zoom is pushed into it. This runs on every scroll and zoom, which is
+    // exactly when that can have changed.
+    const double z = m_zoom > 0 ? m_zoom : 1.0;
+    for (ShapeObject* s : m_shapeObjs) if (s) s->setZoom(z);
+
     for (auto it = m_objAnchors.begin(); it != m_objAnchors.end(); ++it) {
         QWidget* w = it.key();
         if (!w) continue;
-        const ObjAnchor& a = it.value();
-        const QRect cr = m_tableView->visualRect(m_model->index(a.row, a.col));
-        w->move(cr.x() + a.dx, cr.y() + a.dy);
+        const QRect g = placedGeometry(w, it.value());
+        if (g != w->geometry()) w->setGeometry(g);
     }
 }
 
 void CalcModule::selectFloatingObject(QWidget* obj) {
+    m_selectedObj = obj;
     for (ChartObject* c : m_chartObjs) c->setSelected(c == obj);
     for (QWidget* w : m_floatingItems)
         static_cast<FloatingItem*>(w)->setSelected(w == obj);
+}
+
+// Delete on a selected object removes it. Returns false when nothing was
+// selected, so the key falls through to clearing the selected cells.
+bool CalcModule::deleteSelectedObject() {
+    QWidget* obj = m_selectedObj;
+    if (!obj) return false;
+    m_selectedObj = nullptr;
+
+    if (auto* c = qobject_cast<ChartObject*>(obj)) {
+        m_chartObjs.removeAll(c);
+        m_objAnchors.remove(c);
+        c->deleteLater();
+        syncChartSpecs();
+    } else {
+        m_floatingItems.removeAll(obj);
+        m_objAnchors.remove(obj);
+        m_imageData.remove(obj);
+        obj->deleteLater();
+        syncImageSpecs();
+    }
+    markDirty();
+    return true;
 }
 
 // ── Insert ───────────────────────────────────────────────────────────────────
@@ -2892,14 +3328,27 @@ void CalcModule::insertImagePixmap(const QPixmap& src) {
     lbl->setStyleSheet("background:#FFFFFF;");
     lbl->setAttribute(Qt::WA_TransparentForMouseEvents);   // body drags the object
     const QRect g(40, 30, pm.width() + 4, pm.height() + 4);
+    // Keep the encoded bytes so the picture is saved with the sheet and comes
+    // back on a sheet switch, rather than living only in this widget.
+    QByteArray png;
+    { QBuffer buf(&png); buf.open(QIODevice::WriteOnly); pm.save(&buf, "PNG"); }
+
     auto* item = new FloatingItem(lbl, g, m_tableView->viewport());
     item->show(); item->raise();
     m_floatingItems.push_back(item);
+    m_imageData.insert(item, png);
     anchorWidget(item);
-    item->onMoved = [this, item]{ anchorWidget(item); };
+    item->onMoved = [this, item]{ anchorWidget(item); syncImageSpecs(); markDirty(); };
     item->onSelected = [this](QWidget* o){ selectFloatingObject(o); };
-    connect(item, &QObject::destroyed, this, [this](QObject* o){ m_objAnchors.remove(static_cast<QWidget*>(o)); });
+    connect(item, &QObject::destroyed, this, [this](QObject* o){
+        auto* w = static_cast<QWidget*>(o);
+        m_objAnchors.remove(w);
+        m_imageData.remove(w);
+        m_floatingItems.removeAll(w);
+        syncImageSpecs();
+    });
     selectFloatingObject(item);
+    syncImageSpecs();
     markDirty();
 }
 
@@ -3247,10 +3696,14 @@ void CalcModule::importData() {
 }
 void CalcModule::hideSelectedRows() {
     const QRect r = selectedRect();
-    for (int row = r.top(); row <= r.bottom(); ++row) m_tableView->setRowHidden(row, true);
+    for (int row = r.top(); row <= r.bottom(); ++row) {
+        m_tableView->setRowHidden(row, true);
+        m_hiddenRows.insert(row);
+    }
 }
 void CalcModule::unhideAllRows() {
-    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row) m_tableView->setRowHidden(row, false);
+    for (int row : m_hiddenRows) m_tableView->setRowHidden(row, false);
+    m_hiddenRows.clear();
 }
 
 // ── Review: comments & protection ────────────────────────────────────────────
@@ -3274,12 +3727,13 @@ void CalcModule::toggleShowComments() {
 void CalcModule::gotoComment(bool forward) {
     const auto& cm = m_model->comments();
     if (cm.isEmpty()) { featureInfo("Comments", "There are no comments on this sheet."); return; }
-    QList<int> keys = cm.keys();
+    QList<qint64> keys = cm.keys();
     std::sort(keys.begin(), keys.end());
     const QModelIndex cur = m_tableView->currentIndex();
-    const int curKey = cur.isValid() ? SpreadsheetModel::cellKey(cur.column(), cur.row()) : -1;
-    int target = -1;
-    if (forward) { for (int k : keys) if (k > curKey) { target = k; break; } if (target < 0) target = keys.first(); }
+    const qint64 curKey = cur.isValid()
+        ? SpreadsheetModel::cellKey(cur.column(), cur.row()) : -1;
+    qint64 target = -1;
+    if (forward) { for (qint64 k : keys) if (k > curKey) { target = k; break; } if (target < 0) target = keys.first(); }
     else { for (int i = keys.size() - 1; i >= 0; --i) if (keys[i] < curKey) { target = keys[i]; break; } if (target < 0) target = keys.last(); }
     m_tableView->setCurrentIndex(m_model->index(SpreadsheetModel::keyRow(target),
                                                 SpreadsheetModel::keyCol(target)));
@@ -3300,16 +3754,33 @@ void CalcModule::zoomBy(int deltaPercent) {
     resetZoom();   // re-apply
 }
 void CalcModule::resetZoom() {
+    // Anchors are stored in unzoomed cell space, so the objects have to be
+    // laid out again after the row/column sizes change below.
     if (m_zoom <= 0) m_zoom = 1.0;
     QFont vf("Calibri"); vf.setPointSizeF(11.0 * m_zoom);
     m_tableView->setFont(vf);
+    // The cell text is sized from the model, so it has to be told as well.
+    if (m_model) m_model->setViewZoom(m_zoom);
+    // A header refuses to size a section below its own minimum, which is
+    // derived from the font. Zoomed-out rows are legitimately a few pixels
+    // tall, so the floor is lifted out of the way.
+    m_tableView->verticalHeader()->setMinimumSectionSize(1);
+    m_tableView->horizontalHeader()->setMinimumSectionSize(1);
     m_applyingSizes = true;
-    for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c)
-        m_tableView->setColumnWidth(c, int((m_model->colWidths().value(c, 64)) * m_zoom));
-    for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r)
-        m_tableView->setRowHeight(r, int((m_model->rowHeights().value(r, 20)) * m_zoom));
+    // Default first, then only the rows and columns that carry an override.
+    m_tableView->horizontalHeader()->setDefaultSectionSize(int(64 * m_zoom));
+    m_tableView->verticalHeader()->setDefaultSectionSize(int(20 * m_zoom));
+    const auto& zcw = m_model->colWidths();
+    for (auto it = zcw.begin(); it != zcw.end(); ++it)
+        if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_COLS)
+            m_tableView->setColumnWidth(it.key(), int(it.value() * m_zoom));
+    const auto& zrh = m_model->rowHeights();
+    for (auto it = zrh.begin(); it != zrh.end(); ++it)
+        if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_ROWS)
+            m_tableView->setRowHeight(it.key(), int(it.value() * m_zoom));
     m_applyingSizes = false;
     updateFrozenViews();
+    repositionFloatingObjects();
 }
 void CalcModule::toggleHighlightActive() {
     m_highlightActive = !m_highlightActive;
@@ -3885,21 +4356,54 @@ void CalcModule::applyMerges() {
 }
 
 void CalcModule::applySizes() {
+    if (!m_model) return;
     m_applyingSizes = true;
-    // Reset to grid defaults, then apply this sheet's overrides.
-    for (int c = 0; c < SpreadsheetModel::NUM_COLS; ++c)
-        m_tableView->setColumnWidth(c, 64);
-    for (int r = 0; r < SpreadsheetModel::NUM_ROWS; ++r)
-        m_tableView->setRowHeight(r, 20);
-    const auto& cw = m_model->colWidths();
-    for (auto it = cw.begin(); it != cw.end(); ++it)
+
+    // Whatever the previous sheet hid has to be shown again before this one's
+    // hidden sections are applied, or hiding accumulates across sheet switches.
+    for (int r : m_hiddenRows)        m_tableView->setRowHidden(r, false);
+    for (int c : m_hiddenColsApplied) m_tableView->setColumnHidden(c, false);
+    m_hiddenRows.clear();
+    m_hiddenColsApplied.clear();
+
+    for (int c : m_model->hiddenCols())
+        if (c >= 0 && c < SpreadsheetModel::NUM_COLS) {
+            m_tableView->setColumnHidden(c, true);
+            m_hiddenColsApplied.insert(c);
+        }
+    for (int r : m_model->hiddenRows())
+        if (r >= 0 && r < SpreadsheetModel::NUM_ROWS) {
+            m_tableView->setRowHidden(r, true);
+            m_hiddenRows.insert(r);
+        }
+
+    // The sheet's own saved zoom drives the section sizes. Applied here rather
+    // than by calling resetZoom(): that released this guard mid-way and the
+    // resulting section-resize signals fed back into layout without settling.
+    m_zoom = m_model->zoomScale() / 100.0;
+    if (m_zoom <= 0) m_zoom = 1.0;
+    m_model->setViewZoom(m_zoom);
+
+    QFont vf(QStringLiteral("Calibri"));
+    vf.setPointSizeF(11.0 * m_zoom);
+    m_tableView->setFont(vf);
+    m_tableView->verticalHeader()->setMinimumSectionSize(1);
+    m_tableView->horizontalHeader()->setMinimumSectionSize(1);
+    m_tableView->horizontalHeader()->setDefaultSectionSize(int(64 * m_zoom));
+    m_tableView->verticalHeader()->setDefaultSectionSize(int(20 * m_zoom));
+
+    const auto& cw2 = m_model->colWidths();
+    for (auto it = cw2.begin(); it != cw2.end(); ++it)
         if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_COLS)
-            m_tableView->setColumnWidth(it.key(), it.value());
-    const auto& rh = m_model->rowHeights();
-    for (auto it = rh.begin(); it != rh.end(); ++it)
+            m_tableView->setColumnWidth(it.key(), int(it.value() * m_zoom));
+    const auto& rh2 = m_model->rowHeights();
+    for (auto it = rh2.begin(); it != rh2.end(); ++it)
         if (it.key() >= 0 && it.key() < SpreadsheetModel::NUM_ROWS)
-            m_tableView->setRowHeight(it.key(), it.value());
+            m_tableView->setRowHeight(it.key(), int(it.value() * m_zoom));
+
     m_applyingSizes = false;
+    updateFrozenViews();
+    repositionFloatingObjects();
 }
 
 void CalcModule::onMergeClicked() {
@@ -5035,14 +5539,16 @@ void CalcModule::replaceAll() {
     const auto cs = m_matchCase->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
 
     std::vector<std::pair<QPoint, Cell>> edits;
-    for (int row = 0; row < SpreadsheetModel::NUM_ROWS; ++row)
-        for (int col = 0; col < SpreadsheetModel::NUM_COLS; ++col) {
-            Cell c = m_model->cellAt(col, row);
-            if (c.content.contains(needle, cs)) {
-                c.content.replace(needle, repl, cs);
-                edits.push_back({QPoint(col, row), c});
-            }
-        }
+    // Cells are stored sparsely, so this walks what exists rather than every
+    // position in the grid.
+    const auto& data = m_model->cells();
+    for (auto it = data.begin(); it != data.end(); ++it) {
+        Cell c = it->second;
+        if (!c.content.contains(needle, cs)) continue;
+        c.content.replace(needle, repl, cs);
+        edits.push_back({QPoint(SpreadsheetModel::keyCol(it->first),
+                                SpreadsheetModel::keyRow(it->first)), c});
+    }
     m_model->applyCellEdits(edits, "Replace All");
     QWidget* parent = m_findDialog ? static_cast<QWidget*>(m_findDialog)
                                    : static_cast<QWidget*>(this);
@@ -5276,6 +5782,29 @@ QRect CalcModule::fillHandleGrabRect(const QRect& bottomRightCell) {
 bool CalcModule::eventFilter(QObject* watched, QEvent* event) {
     if (watched == m_tableView->viewport()) {
         switch (event->type()) {
+        case QEvent::KeyPress: {
+            // An object is selected: Delete removes it instead of wiping the
+            // cells it happens to be sitting over.
+            auto* ke = static_cast<QKeyEvent*>(event);
+            if ((ke->key() == Qt::Key_Delete || ke->key() == Qt::Key_Backspace)
+                && m_selectedObj && deleteSelectedObject())
+                return true;
+            break;
+        }
+        case QEvent::Wheel: {
+            // Ctrl+wheel zooms, the way Excel and Google Sheets do. Without the
+            // modifier the event falls through to normal scrolling.
+            auto* we = static_cast<QWheelEvent*>(event);
+            if (!(we->modifiers() & Qt::ControlModifier)) break;
+            const int steps = we->angleDelta().y();
+            if (steps == 0) return true;
+            // One notch is 120 units, which works out at 10%. A trackpad sends
+            // smaller deltas, so the step is scaled rather than treated as a
+            // whole notch, and clamped so a fast flick cannot jump the range.
+            const int pct = qBound(-25, steps / 12, 25);
+            zoomBy(pct != 0 ? pct : (steps > 0 ? 1 : -1));
+            return true;      // swallow it, or the grid scrolls as well
+        }
         case QEvent::Resize: {
             const QSize s = m_tableView->viewport()->size();
             if (m_ants)       m_ants->resize(s);
@@ -5844,10 +6373,15 @@ bool CalcModule::saveToPath(const QString& path) {
             xs.name = s->sheetName();
             const auto& data = s->cells();
             for (auto it = data.begin(); it != data.end(); ++it)
+                // A cell that still wears the style it was imported with can
+                // be written with that same index, which is what lets the
+                // original styles.xml (and the rest of the package) be kept.
                 xs.cells.push_back({SpreadsheetModel::keyCol(it->first),
                                     SpreadsheetModel::keyRow(it->first),
                                     it->second.content,
-                                    it->second.format});
+                                    it->second.format,
+                                    it->second.keepsOriginalStyle()
+                                        ? it->second.xfIndex : -1});
             for (const QRect& m : s->merges()) xs.merges.push_back(mergeToRef(m));
             const auto& cw = s->colWidths();
             for (auto it = cw.begin(); it != cw.end(); ++it)
@@ -5857,7 +6391,12 @@ bool CalcModule::saveToPath(const QString& path) {
                 xs.rowHeights.push_back({it.key(), it.value()});
             out.push_back(std::move(xs));
         }
-        if (!exportXlsx(path, out)) return false;
+        // Preferred: put the original package back with only the cells
+        // replaced, so charts and pictures survive. Falls back to a full
+        // rebuild when the workbook cannot be updated that way.
+        if (!exportXlsxPreserving(path, out, m_originalXlsx)
+            && !exportXlsx(path, out))
+            return false;
         m_currentPath = path;
         m_dirty       = false;
         emit filePathChanged(path);
@@ -5983,6 +6522,12 @@ bool CalcModule::loadFromPath(const QString& path) {
 
     if (isXlsx) {
         if (!importXlsx(path, xlsxSheets)) return false;
+        // Kept for a preserving save.
+        {
+            QFile src(path);
+            if (src.open(QIODevice::ReadOnly)) { m_originalXlsx = src.readAll(); src.close(); }
+            else                                 m_originalXlsx.clear();
+        }
     } else {
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
@@ -6014,7 +6559,8 @@ bool CalcModule::loadFromPath(const QString& path) {
                 if (c.col >= 0 && c.col < SpreadsheetModel::NUM_COLS
                     && c.row >= 0 && c.row < SpreadsheetModel::NUM_ROWS
                     && (!c.content.isEmpty() || !c.format.isDefault()))
-                    m->applyCellRaw(c.col, c.row, Cell{c.content, c.format});
+                    m->applyCellRaw(c.col, c.row,
+                                    Cell{c.content, c.format, c.xfIndex, c.format});
             QVector<QRect> mg;
             for (const QString& ref : xs.merges) {
                 const QRect r = refToMerge(ref);
@@ -6026,6 +6572,19 @@ bool CalcModule::loadFromPath(const QString& path) {
             for (const auto& p : xs.rowHeights) rh.insert(p.first, p.second);
             m->setColWidths(cw);
             m->setRowHeights(rh);
+            // Objects drawn over the cells. Without this the workbook opened
+            // showing only the grid and every chart and picture vanished.
+            m->setCharts(QVector<ChartSpec>(xs.charts.begin(), xs.charts.end()));
+            m->setImages(QVector<SheetImage>(xs.images.begin(), xs.images.end()));
+            m->setShapes(QVector<SheetShape>(xs.shapes.begin(), xs.shapes.end()));
+            m->setShowGridLines(xs.showGridLines);
+            m->setHidden(xs.hidden);
+            m->setCondRules(QVector<CondFormatRule>(xs.condRules.begin(), xs.condRules.end()));
+            // Hidden rows and columns are part of the layout: a dashboard uses
+            // them as spacers, and showing them shifts everything sideways.
+            m->setHiddenCols(QVector<int>(xs.hiddenCols.begin(), xs.hiddenCols.end()));
+            m->setHiddenRows(QVector<int>(xs.hiddenRows.begin(), xs.hiddenRows.end()));
+            m->setZoomScale(xs.zoomScale);
         }
     } else if (root.contains("sheets")) {
         // ── v2 multi-sheet ───────────────────────────────────────────────
@@ -6111,6 +6670,9 @@ bool CalcModule::loadFromPath(const QString& path) {
     for (auto* s : m_sheets) { s->notifyAllChanged(); s->undoStack()->clear(); }
     m_ignoreChange = false;
 
+    // Land on the first sheet the user is meant to see.
+    for (int i = 0; i < m_sheets.size(); ++i)
+        if (!m_sheets[i]->isHidden()) { m_activeSheet = i; break; }
     switchToSheet(m_activeSheet);
 
     m_currentPath = path;
