@@ -26,6 +26,11 @@ add_library(CalcModule STATIC
     # drawing/chart schemas are their own world and the parser needs no ZIP.
     XlsxDrawing.cpp
     XlsxDrawing.h
+    # The write half: turning a chart or a picture back into the parts and the
+    # drawing anchor it needs, so an object built here survives a save and not
+    # only an import.
+    XlsxDrawingWriter.cpp
+    XlsxDrawingWriter.h
     # Drawn shapes (banners, buttons, callouts, rules). Rendering them is its
     # own job: the parser hands over geometry, fill and text, this paints it.
     ShapeObject.cpp

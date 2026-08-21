@@ -15,6 +15,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QString>
+#include <functional>
 #include <vector>
 #include <utility>
 
@@ -42,6 +43,15 @@ struct XlsxSheet {
     std::vector<ChartSpec>  charts;
     std::vector<SheetImage> images;
     std::vector<SheetShape> shapes;
+
+    // Reads a cell's displayed text on this sheet.
+    //
+    // Writing a chart needs it. A chart built in the app is described as one
+    // range of cells, not as a list of series, and turning that range into the
+    // series a chart part must name requires looking at what the cells hold:
+    // which row is a header, which column is labels, what the numbers are.
+    // Left unset, charts on this sheet are skipped rather than guessed at.
+    std::function<QString(int, int)> cellText;
 
     // How the sheet was last being looked at. A workbook stores this, and
     // ignoring it is why a file authored at 70% with the grid switched off

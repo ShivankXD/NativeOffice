@@ -63,6 +63,15 @@ QString pptxPicXml(int shapeId, const QString& imageRelId, const QString& linkRe
 QByteArray xlsxDrawingXml(const QString& imageRelId, const QString& linkRelId,
                           int anchorCol, int anchorRow);
 
+// Just the anchor from the part above, with no <xdr:wsDr> wrapper around it.
+//
+// A worksheet may reference exactly one drawing part, so when the sheet also
+// carries charts the mark cannot have a part to itself: both have to be
+// anchors inside the same document. This is that anchor, for the caller to
+// concatenate with the others.
+QString xlsxDrawingAnchorXml(const QString& imageRelId, const QString& linkRelId,
+                             int anchorCol, int anchorRow);
+
 // ── Excel: the repeated footer graphic ──────────────────────────────────────
 // Excel repeats a header/footer picture on every printed page, which the
 // anchored drawing above cannot do. The two have to be separate elements:

@@ -524,6 +524,15 @@ private:
     // Encoded bytes for each picture widget, so the image survives a save and
     // a sheet switch without going back to the file it came from.
     QHash<QWidget*, QByteArray> m_imageData;
+    // Pictures that were read out of the workbook rather than added here.
+    //
+    // syncImageSpecs() rebuilds every SheetImage from the live widgets, and a
+    // fresh SheetImage has fromFile false, so without this the flag was lost
+    // the first time any picture moved. That was harmless while nothing wrote
+    // pictures; now that a save adds a media part for the ones the app made,
+    // an imported picture wrongly marked as app-made would be written into a
+    // package that already contains it, and appear twice.
+    QSet<QWidget*> m_objFromFile;
     // The bytes of the .xlsx this workbook was opened from. Kept so a save can
     // put every part back that the exporter cannot reproduce.
     QByteArray m_originalXlsx;

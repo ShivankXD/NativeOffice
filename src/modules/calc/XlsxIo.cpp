@@ -6,6 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "XlsxIo.h"
 #include "XlsxDrawing.h"
+#include "XlsxDrawingWriter.h"
 
 #include "core/watermark/Watermark.h"
 #include "core/watermark/WatermarkOoxml.h"
@@ -1252,7 +1253,11 @@ struct StyleTable {
     }
 };
 
-QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles) {
+// `hasDrawing` says whether a drawing part was generated for this sheet.
+// A worksheet may reference exactly one, and it now covers the charts as
+// well as the export mark, so the caller decides and passes it in.
+QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles,
+                          bool hasDrawing) {
     QMap<int, QVector<const XlsxCell*>> byRow;
     for (const XlsxCell& c : sheet.cells) byRow[c.row].push_back(&c);
 
@@ -1324,12 +1329,12 @@ QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles) {
             xml += QString("<mergeCell ref=\"%1\"/>").arg(m);
         xml += "</mergeCells>";
     }
-    // The watermark drawing is referenced last: the schema requires <drawing>
-    // after <mergeCells>, and Excel rejects the sheet if the order is wrong.
+    // The drawing is referenced last: the schema requires <drawing> after
+    // <mergeCells>, and Excel rejects the sheet if the order is wrong.
+    if (hasDrawing) xml += "<drawing r:id=\"rIdDraw\"/>";
     if (NativeOffice::Watermark::enabledForExport()) {
         // Schema order matters here: drawing, then headerFooter, then
         // legacyDrawingHF. Excel rejects the sheet otherwise.
-        xml += "<drawing r:id=\"rIdWmDraw\"/>";
         xml += NativeOffice::Watermark::Ooxml::xlsxHeaderFooterXml();
         xml += "<legacyDrawingHF r:id=\"rIdWmVml\"/>";
     }
@@ -1416,6 +1421,276 @@ bool buildPreservedSheetData(const XlsxSheet& sh, QByteArray& out) {
     return true;
 }
 
+
+// ── Adding app-made objects to a package that is being put back ──────────
+//
+// A preserving save copies the original package, so on its own it can only ever
+// hold the charts and pictures that package already held. Anything drawn in the
+// app has no part to copy, which is why every .xlsx save dropped it. What
+// follows puts the missing pieces in: a chart or media part, an anchor in the
+// sheet's drawing (creating that drawing when the sheet has none), and the
+// relationships and content types tying them together.
+//
+// Anything that cannot be done is skipped. One object failing to be written
+// must never cost the workbook content it already had.
+
+const char* kRelsHead =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">";
+const char* kRelsTail = "</Relationships>";
+
+// Byte offset of the first depth-1 child of the root element whose local name
+// is in `stop`, or of the root's closing tag when none of them is there.
+//
+// This is a depth-aware scan rather than an indexOf, because every name that
+// matters here also occurs nested inside other elements: a <extLst> under a
+// data validation is not the worksheet's own <extLst>, and splicing ahead of
+// it would drop the new element into the middle of something else. Returns -1
+// when the document cannot be scanned.
+int insertPointBefore(const QByteArray& xml, const QSet<QByteArray>& stop) {
+    const int n = xml.size();
+    int i = 0, depth = 0;
+    while (i < n) {
+        if (xml[i] != '<') { ++i; continue; }
+        if (xml.mid(i, 4) == "<!--") {
+            i = xml.indexOf("-->", i);  if (i < 0) return -1;  i += 3;  continue;
+        }
+        if (xml.mid(i, 9) == "<![CDATA[") {
+            i = xml.indexOf("]]>", i);  if (i < 0) return -1;  i += 3;  continue;
+        }
+        if (xml.mid(i, 2) == "<?") {
+            i = xml.indexOf("?>", i);   if (i < 0) return -1;  i += 2;  continue;
+        }
+        if (xml.mid(i, 2) == "<!") {
+            i = xml.indexOf('>', i);    if (i < 0) return -1;  i += 1;  continue;
+        }
+        const bool closing = (i + 1 < n && xml[i + 1] == '/');
+
+        // End of the tag, honouring quoted attribute values so a '>' inside
+        // one does not end it early.
+        int j = i + 1;
+        bool inQuote = false;
+        char quoteCh = 0;
+        while (j < n) {
+            const char ch = xml[j];
+            if (inQuote)                             { if (ch == quoteCh) inQuote = false; }
+            else if (ch == '"' || ch == '\'')        { inQuote = true; quoteCh = ch; }
+            else if (ch == '>')                      break;
+            ++j;
+        }
+        if (j >= n) return -1;
+        const bool selfClose = (xml[j - 1] == '/');
+
+        int a = i + (closing ? 2 : 1), b = a;
+        while (b < j && xml[b] != ' ' && xml[b] != '/' && xml[b] != '>'
+               && xml[b] != '\t' && xml[b] != '\n' && xml[b] != '\r') ++b;
+        QByteArray name = xml.mid(a, b - a);
+        const int colon = name.lastIndexOf(':');
+        if (colon >= 0) name = name.mid(colon + 1);   // drop the prefix
+
+        if (closing) {
+            if (--depth == 0) return i;               // the root's closing tag
+        } else {
+            ++depth;
+            if (depth == 2 && stop.contains(name)) return i;
+            if (selfClose) --depth;
+        }
+        i = j + 1;
+    }
+    return -1;
+}
+
+bool spliceBeforeRootClose(QByteArray& xml, const QByteArray& fragment) {
+    const int at = insertPointBefore(xml, {});
+    if (at < 0) return false;
+    xml.insert(at, fragment);
+    return true;
+}
+
+// A relationship id this rels part does not already use. The prefix keeps it
+// clear of the ids the original file chose, whatever scheme those follow.
+QString freeRelId(const QByteArray& rels) {
+    for (int n = 1; ; ++n) {
+        const QString id = QString("rIdNO%1").arg(n);
+        if (!rels.contains(("\"" + id + "\"").toUtf8())) return id;
+    }
+}
+
+// "xl/charts/chart3.xml" seen from "xl/drawings" is "../charts/chart3.xml".
+QString relativeTarget(const QString& part, const QString& baseDir) {
+    QStringList a = part.split('/', Qt::SkipEmptyParts);
+    QStringList b = baseDir.split('/', Qt::SkipEmptyParts);
+    while (!a.isEmpty() && !b.isEmpty() && a.first() == b.first()) {
+        a.removeFirst(); b.removeFirst();
+    }
+    QString up;
+    for (int k = 0; k < b.size(); ++k) up += QStringLiteral("../");
+    return up + a.join('/');
+}
+
+void injectAppObjects(const ZipReader& zip,
+                     const std::vector<XlsxSheet>& sheets,
+                     const QStringList& sheetParts,
+                     QHash<QString, QByteArray>& replaced,
+                     QStringList& added) {
+    // Part names already spoken for, so a new part never lands on an existing
+    // one. Matched case-insensitively for the same reason the reader is.
+    QSet<QString> used;
+    for (const QString& n : zip.names()) used.insert(n.toLower());
+    auto claim = [&](const char* pattern, int& counter) {
+        QString name;
+        do { name = QString(pattern).arg(++counter); } while (used.contains(name.toLower()));
+        used.insert(name.toLower());
+        return name;
+    };
+    auto partBytes = [&](const QString& path) {
+        return replaced.contains(path) ? replaced.value(path) : zip.file(path);
+    };
+
+    int chartCounter = 0, drawingCounter = 0;
+    QStringList   overrides;
+    QSet<QString> mediaExts;
+
+    for (int i = 0; i < sheetParts.size() && i < static_cast<int>(sheets.size()); ++i) {
+        const XlsxSheet& sh = sheets[i];
+        if (!sh.cellText) continue;         // no reader, so no way to resolve a range
+
+        // Only what the app added. The file's own objects are already in the
+        // package this save is putting back, in better shape than a rewrite.
+        QVector<const ChartSpec*>  myCharts;
+        QVector<const SheetImage*> myImages;
+        for (const ChartSpec& c : sh.charts) if (!c.fromFile) myCharts.push_back(&c);
+        for (const SheetImage& i : sh.images)
+            if (!i.fromFile && !i.data.isEmpty()) myImages.push_back(&i);
+        if (myCharts.isEmpty() && myImages.isEmpty()) continue;
+
+        const QString sheetDir      = partDir(sheetParts[i]);
+        const QString sheetRelsPath = relsPathFor(sheetParts[i]);
+        QByteArray    sheetRels     = partBytes(sheetRelsPath);
+
+        QString drawPart = sheetRels.isEmpty()
+            ? QString() : firstRelOfType(sheetRels, "/drawing", sheetDir);
+        const bool newDrawing = drawPart.isEmpty() || !zip.has(drawPart);
+        if (newDrawing) drawPart = claim("xl/drawings/drawing%1.xml", drawingCounter);
+
+        const QString drawDir       = partDir(drawPart);
+        const QString drawRelsPath  = relsPathFor(drawPart);
+        QByteArray    drawXml       = newDrawing ? QByteArray() : partBytes(drawPart);
+        QByteArray    drawRels      = newDrawing ? QByteArray() : partBytes(drawRelsPath);
+
+        if (drawXml.isEmpty())
+            drawXml = QByteArray(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/"
+                "spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/"
+                "drawingml/2006/main\"></xdr:wsDr>");
+        if (drawRels.isEmpty()) drawRels = QByteArray(kRelsHead) + kRelsTail;
+
+        QByteArray anchors;
+        int shapeId = 5000;                 // clear of the ids a file usually uses
+        for (const ChartSpec* c : myCharts) {
+            const QByteArray part = buildChartPartXml(*c, sh.name, sh.cellText);
+            if (part.isEmpty()) continue;   // nothing plottable, leave it out
+
+            const QString chartPart = claim("xl/charts/chart%1.xml", chartCounter);
+            const QString relId     = freeRelId(drawRels);
+            const int at = drawRels.lastIndexOf(kRelsTail);
+            if (at < 0) continue;
+            drawRels.insert(at, QString("<Relationship Id=\"%1\" Type=\"http://schemas."
+                                        "openxmlformats.org/officeDocument/2006/relationships"
+                                        "/chart\" Target=\"%2\"/>")
+                                    .arg(relId, relativeTarget(chartPart, drawDir)).toUtf8());
+            anchors += buildChartAnchorXml(*c, relId, ++shapeId).toUtf8();
+            replaced.insert(chartPart, part);
+            added << chartPart;
+            overrides << QString("<Override PartName=\"/%1\" ContentType=\"application/vnd."
+                                 "openxmlformats-officedocument.drawingml.chart+xml\"/>")
+                             .arg(chartPart);
+        }
+        for (const SheetImage* im : myImages) {
+            const QString ext = imageExtension(im->data);
+            QString mediaPart;
+            {
+                // Media is named by extension, so the counter is per extension.
+                const QString pattern = QStringLiteral("xl/media/image%1.") + ext;
+                int n = 0;
+                do { mediaPart = pattern.arg(++n); }
+                while (used.contains(mediaPart.toLower()));
+                used.insert(mediaPart.toLower());
+            }
+            const QString relId = freeRelId(drawRels);
+            const int at = drawRels.lastIndexOf(kRelsTail);
+            if (at < 0) continue;
+            drawRels.insert(at, QString("<Relationship Id=\"%1\" Type=\"http://schemas."
+                                        "openxmlformats.org/officeDocument/2006/relationships"
+                                        "/image\" Target=\"%2\"/>")
+                                    .arg(relId, relativeTarget(mediaPart, drawDir)).toUtf8());
+            anchors += buildPictureAnchorXml(*im, relId, ++shapeId).toUtf8();
+            replaced.insert(mediaPart, im->data);
+            added << mediaPart;
+            mediaExts.insert(ext);
+        }
+        if (anchors.isEmpty()) continue;
+        if (!spliceBeforeRootClose(drawXml, anchors)) continue;
+
+        replaced.insert(drawPart, drawXml);
+        replaced.insert(drawRelsPath, drawRels);
+        if (!zip.has(drawRelsPath)) added << drawRelsPath;
+
+        if (!newDrawing) continue;          // the worksheet already points at it
+        added << drawPart;
+        overrides << QString("<Override PartName=\"/%1\" ContentType=\"application/vnd."
+                             "openxmlformats-officedocument.drawing+xml\"/>").arg(drawPart);
+
+        // Point the worksheet at the new drawing. <drawing> has a fixed place
+        // in the worksheet schema, after everything that may precede it and
+        // before the legacy-drawing and table elements that follow.
+        if (sheetRels.isEmpty()) sheetRels = QByteArray(kRelsHead) + kRelsTail;
+        const QString relId = freeRelId(sheetRels);
+        const int at = sheetRels.lastIndexOf(kRelsTail);
+        if (at < 0) continue;
+        sheetRels.insert(at, QString("<Relationship Id=\"%1\" Type=\"http://schemas."
+                                     "openxmlformats.org/officeDocument/2006/relationships"
+                                     "/drawing\" Target=\"%2\"/>")
+                                 .arg(relId, relativeTarget(drawPart, sheetDir)).toUtf8());
+
+        static const QSet<QByteArray> kAfterDrawing = {
+            "legacyDrawing", "legacyDrawingHF", "drawingHF", "picture", "oleObjects",
+            "controls", "webPublishItems", "tableParts", "extLst"
+        };
+        QByteArray wsXml = partBytes(sheetParts[i]);
+        const int ins = insertPointBefore(wsXml, kAfterDrawing);
+        if (ins < 0) continue;
+        wsXml.insert(ins, QString("<drawing xmlns:r=\"http://schemas.openxmlformats.org/"
+                                  "officeDocument/2006/relationships\" r:id=\"%1\"/>")
+                              .arg(relId).toUtf8());
+        replaced.insert(sheetParts[i], wsXml);
+        replaced.insert(sheetRelsPath, sheetRels);
+        if (!zip.has(sheetRelsPath)) added << sheetRelsPath;
+    }
+
+    if (overrides.isEmpty() && mediaExts.isEmpty()) return;
+
+    // Content types last, once the full list of new parts is known.
+    QByteArray ct = partBytes(QStringLiteral("[Content_Types].xml"));
+    if (ct.isEmpty()) return;
+    QByteArray add;
+    for (const QString& o : overrides) add += o.toUtf8();
+    // A media part is typed by a <Default> on its extension. Most workbooks
+    // that already hold pictures declare it; adding a second one for the same
+    // extension is what makes Excel call the package invalid, so this only
+    // adds what is missing.
+    for (const QString& ext : mediaExts) {
+        if (ct.contains(QString("Extension=\"%1\"").arg(ext).toUtf8())) continue;
+        if (ct.contains(QString("Extension=\"%1\"").arg(ext.toUpper()).toUtf8())) continue;
+        add += QString("<Default Extension=\"%1\" ContentType=\"image/%1\"/>")
+                   .arg(ext).toUtf8();
+    }
+    if (add.isEmpty()) return;
+    if (spliceBeforeRootClose(ct, add))
+        replaced.insert(QStringLiteral("[Content_Types].xml"), ct);
+}
+
 } // namespace
 
 // Everything the preserving write does except the writing. `outBytes` may be
@@ -1476,11 +1751,19 @@ static bool rebuildPreservedPackage(const std::vector<XlsxSheet>& sheets,
 
     if (!outBytes) return true;      // a dry run, and every check passed
 
+    // Charts the app added have no part in this package to keep, so their parts
+    // are created here. Everything it adds lands in `replaced` (for parts that
+    // already exist) or in `extra` (for brand new ones).
+    QStringList extra;
+    injectAppObjects(zip, sheets, sheetParts, replaced, extra);
+
     // Write the package back out: every original part, with the worksheets
-    // swapped for the regenerated ones.
+    // swapped for the regenerated ones, then whatever the charts needed added.
     ZipWriter out;
     for (const QString& name : zip.names())
         out.add(name, replaced.contains(name) ? replaced.value(name) : zip.file(name));
+    for (const QString& name : extra)
+        out.add(name, replaced.value(name));
     *outBytes = out.finish();
     return true;
 }
@@ -1507,13 +1790,61 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
     const int nSheets = std::max<int>(1, static_cast<int>(sheets.size()));
     ZipWriter zip;
 
-    // Generate worksheets first so the style table is fully populated.
+    // ── Charts ──────────────────────────────────────────────────────────────
+    // Worked out before the worksheets, because a worksheet has to say whether
+    // it references a drawing and a sheet has a drawing when it carries either
+    // a chart or the export mark.
+    struct SheetDrawing {
+        QStringList         partNames;   // "xl/charts/chart1.xml", "xl/media/image1.png"
+        QStringList         targets;     // "../charts/chart1.xml", as the rel wants it
+        QStringList         relTypes;    // "chart" or "image"
+        QVector<QByteArray> partXml;
+        QStringList         relIds;
+        QString             anchors;     // the graphicFrames and pictures, concatenated
+    };
+    QVector<SheetDrawing> draw(nSheets);
+    QSet<QString> mediaExts;             // extensions needing a <Default> content type
+    int chartNo = 0, imageNo = 0;
+    for (int i = 0; i < nSheets && i < (int)sheets.size(); ++i) {
+        const XlsxSheet& sh = sheets[i];
+        // Shape ids only have to be unique inside one drawing part.
+        int shapeId = 1;
+        for (const ChartSpec& cs : sh.charts) {
+            const QByteArray part = buildChartPartXml(cs, sh.name, sh.cellText);
+            if (part.isEmpty()) continue;   // nothing plottable, skip it
+            ++chartNo;
+            const QString relId = QString("rIdCh%1").arg(chartNo);
+            draw[i].partNames << QString("xl/charts/chart%1.xml").arg(chartNo);
+            draw[i].targets   << QString("../charts/chart%1.xml").arg(chartNo);
+            draw[i].relTypes  << QStringLiteral("chart");
+            draw[i].partXml   << part;
+            draw[i].relIds    << relId;
+            draw[i].anchors   += buildChartAnchorXml(cs, relId, ++shapeId);
+        }
+        for (const SheetImage& im : sh.images) {
+            if (im.data.isEmpty()) continue;
+            ++imageNo;
+            const QString ext   = imageExtension(im.data);
+            const QString relId = QString("rIdIm%1").arg(imageNo);
+            mediaExts.insert(ext);
+            draw[i].partNames << QString("xl/media/image%1.%2").arg(imageNo).arg(ext);
+            draw[i].targets   << QString("../media/image%1.%2").arg(imageNo).arg(ext);
+            draw[i].relTypes  << QStringLiteral("image");
+            draw[i].partXml   << im.data;
+            draw[i].relIds    << relId;
+            draw[i].anchors   += buildPictureAnchorXml(im, relId, ++shapeId);
+        }
+    }
+    const bool wm = NativeOffice::Watermark::enabledForExport();
+    auto hasDrawing = [&](int i) { return wm || !draw[i].anchors.isEmpty(); };
+
+    // Generate worksheets so the style table is fully populated.
     StyleTable styles;
     QVector<QByteArray> sheetXml;
     for (int i = 0; i < nSheets; ++i) {
         const XlsxSheet empty;
         const XlsxSheet& sh = (i < (int)sheets.size()) ? sheets[i] : empty;
-        sheetXml.push_back(buildWorksheet(sh, styles));
+        sheetXml.push_back(buildWorksheet(sh, styles, hasDrawing(i)));
     }
 
     // [Content_Types].xml
@@ -1529,70 +1860,109 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
             s += QString("<Override PartName=\"/xl/worksheets/sheet%1.xml\" "
                          "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>")
                      .arg(i + 1);
-        if (NativeOffice::Watermark::enabledForExport()) {
+        if (wm) {
             s += "<Default Extension=\"png\" ContentType=\"image/png\"/>";
             s += "<Default Extension=\"vml\" ContentType=\"application/vnd.openxmlformats-officedocument.vmlDrawing\"/>";
-            for (int i = 0; i < nSheets; ++i)
+        }
+        for (int i = 0; i < nSheets; ++i)
+            if (hasDrawing(i))
                 s += QString("<Override PartName=\"/xl/drawings/drawing%1.xml\" "
                              "ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>")
                          .arg(i + 1);
+        for (int i = 0; i < nSheets; ++i)
+            for (int k = 0; k < draw[i].partNames.size(); ++k)
+                if (draw[i].relTypes.at(k) == QLatin1String("chart"))
+                    s += QString("<Override PartName=\"/%1\" ContentType=\"application/vnd."
+                                 "openxmlformats-officedocument.drawingml.chart+xml\"/>")
+                             .arg(draw[i].partNames.at(k));
+        // Media is typed by extension. The watermark already declares png when
+        // it is on, so only what is not there yet gets added.
+        for (const QString& ext : mediaExts) {
+            if (wm && ext == QLatin1String("png")) continue;
+            s += QString("<Default Extension=\"%1\" ContentType=\"image/%2\"/>")
+                     .arg(ext, ext == QLatin1String("jpeg") ? QStringLiteral("jpeg") : ext);
         }
         s += "</Types>";
         zip.add("[Content_Types].xml", s.toUtf8());
     }
 
-    // ── Export watermark ────────────────────────────────────────────────────
-    // One drawing part per sheet, each anchored past the used range so it sits
-    // clear of the data, carrying the hyperlink on the picture.
-    if (NativeOffice::Watermark::enabledForExport()) {
+    // ── Drawings: the charts, and the export mark ────────────────────
+    // One drawing part per sheet that needs one. A worksheet may reference only
+    // a single drawing, so the mark and the sheet's charts go in as anchors
+    // inside the same document rather than as parts of their own.
+    {
         namespace WO = NativeOffice::Watermark::Ooxml;
-        zip.add("xl/media/nativeoffice-watermark.png", WO::pngBytes());
+        const QString relsHead =
+            QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                           "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
+                           "package/2006/relationships\">");
+
+        if (wm) zip.add("xl/media/nativeoffice-watermark.png", WO::pngBytes());
 
         for (int i = 0; i < nSheets; ++i) {
-            // Anchor just past the last used cell so the mark never lands on
-            // top of the user's data.
-            int col = 0, row = 0;
-            if (i < static_cast<int>(sheets.size())) {
-                for (const auto& c : sheets[i].cells) {
-                    col = std::max(col, c.col);
-                    row = std::max(row, c.row);
-                }
+            for (int k = 0; k < draw[i].partNames.size(); ++k)
+                zip.add(draw[i].partNames.at(k), draw[i].partXml.at(k));
+
+            if (!hasDrawing(i)) continue;
+
+            QString anchors, rels = relsHead;
+            if (wm) {
+                // Anchor just past the last used cell so the mark never lands
+                // on top of the user's data.
+                int col = 0, row = 0;
+                if (i < static_cast<int>(sheets.size()))
+                    for (const auto& c : sheets[i].cells) {
+                        col = std::max(col, c.col);
+                        row = std::max(row, c.row);
+                    }
+                anchors += WO::xlsxDrawingAnchorXml(QStringLiteral("rIdWmPic"),
+                                                    QStringLiteral("rIdWmLink"),
+                                                    col + 1, row + 2);
+                rels += WO::imageRel(QStringLiteral("rIdWmPic"),
+                                     QStringLiteral("../media/nativeoffice-watermark.png"))
+                      + WO::hyperlinkRel(QStringLiteral("rIdWmLink"));
             }
+            anchors += draw[i].anchors;
+            for (int k = 0; k < draw[i].relIds.size(); ++k)
+                rels += QString("<Relationship Id=\"%1\" Type=\"http://schemas."
+                                "openxmlformats.org/officeDocument/2006/relationships/%2\" "
+                                "Target=\"%3\"/>")
+                            .arg(draw[i].relIds.at(k), draw[i].relTypes.at(k),
+                                 draw[i].targets.at(k));
+            rels += QStringLiteral("</Relationships>");
+
             zip.add(QString("xl/drawings/drawing%1.xml").arg(i + 1),
-                    WO::xlsxDrawingXml(QStringLiteral("rIdWmPic"),
-                                       QStringLiteral("rIdWmLink"),
-                                       col + 1, row + 2));
-            zip.add(QString("xl/drawings/_rels/drawing%1.xml.rels").arg(i + 1),
                 (QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                                "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
-                                "package/2006/relationships\">")
-                 + WO::imageRel(QStringLiteral("rIdWmPic"),
-                                QStringLiteral("../media/nativeoffice-watermark.png"))
-                 + WO::hyperlinkRel(QStringLiteral("rIdWmLink"))
-                 + QStringLiteral("</Relationships>")).toUtf8());
+                                "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/"
+                                "drawingml/2006/spreadsheetDrawing\" "
+                                "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
+                                "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/"
+                                "2006/relationships\">")
+                 + anchors + QStringLiteral("</xdr:wsDr>")).toUtf8());
+            zip.add(QString("xl/drawings/_rels/drawing%1.xml.rels").arg(i + 1), rels.toUtf8());
 
-            // The repeated footer graphic: a VML part plus its image rel.
-            zip.add(QString("xl/drawings/vmlDrawing%1.vml").arg(i + 1),
-                    WO::xlsxFooterVml(QStringLiteral("rIdWmVmlImg")));
-            zip.add(QString("xl/drawings/_rels/vmlDrawing%1.vml.rels").arg(i + 1),
-                (QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                                "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
-                                "package/2006/relationships\">")
-                 + WO::imageRel(QStringLiteral("rIdWmVmlImg"),
-                                QStringLiteral("../media/nativeoffice-watermark.png"))
-                 + QStringLiteral("</Relationships>")).toUtf8());
-
+            QString sheetRels = relsHead
+                + QString("<Relationship Id=\"rIdDraw\" "
+                          "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                          "relationships/drawing\" Target=\"../drawings/drawing%1.xml\"/>")
+                      .arg(i + 1);
+            if (wm) {
+                // The repeated footer graphic: a VML part plus its image rel.
+                zip.add(QString("xl/drawings/vmlDrawing%1.vml").arg(i + 1),
+                        WO::xlsxFooterVml(QStringLiteral("rIdWmVmlImg")));
+                zip.add(QString("xl/drawings/_rels/vmlDrawing%1.vml.rels").arg(i + 1),
+                    (relsHead
+                     + WO::imageRel(QStringLiteral("rIdWmVmlImg"),
+                                    QStringLiteral("../media/nativeoffice-watermark.png"))
+                     + QStringLiteral("</Relationships>")).toUtf8());
+                sheetRels += QString("<Relationship Id=\"rIdWmVml\" "
+                                     "Type=\"http://schemas.openxmlformats.org/officeDocument/"
+                                     "2006/relationships/vmlDrawing\" "
+                                     "Target=\"../drawings/vmlDrawing%1.vml\"/>").arg(i + 1);
+            }
+            sheetRels += QStringLiteral("</Relationships>");
             zip.add(QString("xl/worksheets/_rels/sheet%1.xml.rels").arg(i + 1),
-                QString("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-                        "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
-                        "package/2006/relationships\">"
-                        "<Relationship Id=\"rIdWmDraw\" "
-                        "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
-                        "relationships/drawing\" Target=\"../drawings/drawing%1.xml\"/>"
-                        "<Relationship Id=\"rIdWmVml\" "
-                        "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
-                        "relationships/vmlDrawing\" Target=\"../drawings/vmlDrawing%1.vml\"/>"
-                        "</Relationships>").arg(i + 1).toUtf8());
+                    sheetRels.toUtf8());
         }
     }
 

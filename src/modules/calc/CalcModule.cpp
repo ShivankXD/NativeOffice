@@ -12,6 +12,7 @@
 #include "FormulaEngine.h"
 #include "Cell.h"
 #include "XlsxIo.h"
+#include "XlsxDrawingWriter.h"
 #include "StructuredData.h"
 #include "StructuredDataDialog.h"
 #include "DataCleanser.h"
@@ -2561,10 +2562,10 @@ ChartObject* CalcModule::createChartObject(const ChartSpec& spec) {
     });
     // Placement comes from the anchor when the chart has one; a chart made in
     // the app before anchors existed still has only pixel geometry.
-    if (spec.anchor.hasFrom())
-        if (spec.frac != QRectF(0, 0, 1, 1)) m_objFrac.insert(obj, spec.frac);
-        m_objFallback.insert(obj, spec.geom);
-        obj->setGeometry(placedGeometry(obj, spec.anchor));
+    if (spec.anchor.hasFrom() && spec.frac != QRectF(0, 0, 1, 1))
+        m_objFrac.insert(obj, spec.frac);
+    m_objFallback.insert(obj, spec.geom);
+    obj->setGeometry(placedGeometry(obj, spec.anchor));
     obj->rebuild();     // resolver and geometry are both set now
     obj->show();
     obj->raise();
@@ -2685,6 +2686,7 @@ QWidget* CalcModule::createImageObject(const SheetImage& img) {
     item->show(); item->raise();
     m_floatingItems.push_back(item);
     m_imageData.insert(item, img.data);
+    if (img.fromFile) m_objFromFile.insert(item);
     if (img.anchor.hasFrom()) m_objAnchors.insert(item, img.anchor);
     else                      anchorWidget(item);
     item->onMoved = [this, item]{
@@ -2702,6 +2704,7 @@ QWidget* CalcModule::createImageObject(const SheetImage& img) {
         m_objFrac.remove(w);
         m_objFallback.remove(w);
         m_imageData.remove(w);
+        m_objFromFile.remove(w);
         m_floatingItems.removeAll(w);
     });
     return item;
@@ -2711,6 +2714,7 @@ void CalcModule::rebuildImageObjects() {
     for (QWidget* w : m_floatingItems) { m_objAnchors.remove(w); w->deleteLater(); }
     m_floatingItems.clear();
     m_imageData.clear();
+    m_objFromFile.clear();
     if (!m_model) return;
     for (const SheetImage& img : m_model->images())
         createImageObject(img);
@@ -2798,23 +2802,27 @@ void CalcModule::dumpCell(const QString& ref) const {
 
 // How many drawn objects an .xlsx write would leave behind.
 //
-// Charts and pictures live in parts the exporter cannot produce, so the one
-// thing that keeps them is putting the workbook's own package back, and that
-// keeps exactly the objects the package already held. An object the app added
-// is lost either way; the file's own objects are lost only when the workbook
-// can no longer be written that way and the save rebuilds it from the cells.
+// Charts and pictures are both written now, whichever path the save takes: one
+// the app added gets its parts built for it, and the file's own are kept in the
+// package a preserving save puts back (or rebuilt when it cannot be). The only
+// chart that does not survive is one that plots nothing.
+//
+// Drawn shapes are the exception, and they can only ever be the file's own: the
+// Shapes and Icons buttons insert a picture, so the app never makes one. They
+// survive by putting the package back and are lost when it cannot be.
 int CalcModule::objectsLostOnXlsxSave() const {
-    int added = 0, imported = 0;
-    for (SpreadsheetModel* m : m_sheets) {
-        if (!m) continue;
-        for (const ChartSpec&  c : m->charts()) { if (c.fromFile) ++imported; else ++added; }
-        for (const SheetImage& i : m->images()) { if (i.fromFile) ++imported; else ++added; }
-    }
-    if (added + imported == 0) return 0;
-
     std::vector<XlsxSheet> out;
     buildXlsxSheets(out);
-    return canPreserveXlsx(out, m_originalXlsx) ? added : added + imported;
+    const bool preserved = canPreserveXlsx(out, m_originalXlsx);
+
+    int lost = 0;
+    for (const XlsxSheet& xs : out)
+        for (const ChartSpec& c : xs.charts)
+            if (!chartIsWritable(c, xs.cellText)) ++lost;
+    if (!preserved)
+        for (SpreadsheetModel* m : m_sheets)
+            if (m) lost += int(m->shapes().size());
+    return lost;
 }
 
 // Dev capture aid: what is actually sitting on the active sheet right now.
@@ -2891,9 +2899,10 @@ void CalcModule::syncImageSpecs() {
     for (QWidget* w : m_floatingItems) {
         if (!m_imageData.contains(w)) continue;    // text boxes are not pictures
         SheetImage img;
-        img.data   = m_imageData.value(w);
-        img.anchor = m_objAnchors.value(w);
-        img.geom   = w->geometry();
+        img.data     = m_imageData.value(w);
+        img.anchor   = m_objAnchors.value(w);
+        img.geom     = w->geometry();
+        img.fromFile = m_objFromFile.contains(w);
         // A picture that came out of a group covers only part of its anchor.
         // Dropping that here put it back at full size on the next rebuild.
         const QRectF f = m_objFrac.value(w);
@@ -6407,6 +6416,16 @@ void CalcModule::buildXlsxSheets(std::vector<XlsxSheet>& out) const {
         const auto& rh = s->rowHeights();
         for (auto it = rh.begin(); it != rh.end(); ++it)
             xs.rowHeights.push_back({it.key(), it.value()});
+
+        // Charts drawn over the cells, and the reader the writer needs to make
+        // sense of them. Without these the exporter had no chart data at all,
+        // so every .xlsx write dropped charts whatever the exporter could do.
+        const QVector<ChartSpec>& cs = s->charts();
+        xs.charts.assign(cs.begin(), cs.end());
+        const QVector<SheetImage>& im = s->images();
+        xs.images.assign(im.begin(), im.end());
+        xs.cellText = [s](int col, int row) { return s->displayValue(col, row); };
+
         out.push_back(std::move(xs));
     }
 }
@@ -6414,6 +6433,7 @@ void CalcModule::buildXlsxSheets(std::vector<XlsxSheet>& out) const {
 bool CalcModule::saveToPath(const QString& path) {
     // ── .xlsx export ─────────────────────────────────────────────────────────
     if (path.endsWith(".xlsx", Qt::CaseInsensitive)) {
+        syncChartSpecs();      // capture the active sheet's live chart geometries
         std::vector<XlsxSheet> out;
         buildXlsxSheets(out);
         // Preferred: put the original package back with only the cells

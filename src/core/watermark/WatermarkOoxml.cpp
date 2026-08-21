@@ -122,13 +122,9 @@ QString pptxPicXml(int shapeId, const QString& imageRelId, const QString& linkRe
              QString::number(cx), QString::number(cy));
 }
 
-QByteArray xlsxDrawingXml(const QString& imageRelId, const QString& linkRelId,
-                          int anchorCol, int anchorRow) {
-    const QString xml = QStringLiteral(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
-        "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" "
-        "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
-        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+QString xlsxDrawingAnchorXml(const QString& imageRelId, const QString& linkRelId,
+                             int anchorCol, int anchorRow) {
+    return QStringLiteral(
         "<xdr:oneCellAnchor>"
         "<xdr:from><xdr:col>%1</xdr:col><xdr:colOff>0</xdr:colOff>"
         "<xdr:row>%2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
@@ -144,11 +140,21 @@ QByteArray xlsxDrawingXml(const QString& imageRelId, const QString& linkRelId,
         "<xdr:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr>"
         "</xdr:pic>"
         "<xdr:clientData/>"
-        "</xdr:oneCellAnchor>"
-        "</xdr:wsDr>")
+        "</xdr:oneCellAnchor>")
         .arg(QString::number(anchorCol), QString::number(anchorRow),
              QString::number(widthEmu()), QString::number(heightEmu()),
              linkRelId, imageRelId);
+}
+
+QByteArray xlsxDrawingXml(const QString& imageRelId, const QString& linkRelId,
+                          int anchorCol, int anchorRow) {
+    const QString xml = QStringLiteral(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+        "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" "
+        "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
+        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">")
+        + xlsxDrawingAnchorXml(imageRelId, linkRelId, anchorCol, anchorRow)
+        + QStringLiteral("</xdr:wsDr>");
     return xml.toUtf8();
 }
 
