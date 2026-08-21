@@ -123,6 +123,23 @@ add_custom_command(TARGET WatermarkSmoke POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:pdfium>" "$<TARGET_FILE_DIR:WatermarkSmoke>")
 
+# Dev-only check that a chart or picture built in the app survives an .xlsx save.
+# The failure this guards against is silent: a chart part whose elements are in
+# the wrong order still writes, and Excel repairs the file by deleting the
+# chart. Round-trips both save paths through the importer.
+#   DrawingWriteSmoke.exe testdata     also exercises the preserving path
+# resources.qrc carries the brand mark that the export watermark renders; the
+# export path stamps it whether or not this test cares, so it has to be here.
+qt_add_executable(DrawingWriteSmoke tools/DrawingWriteSmoke.cpp
+    ${CMAKE_SOURCE_DIR}/resources/resources.qrc)
+target_link_libraries(DrawingWriteSmoke PRIVATE CalcModule Qt6::Gui)
+target_include_directories(DrawingWriteSmoke PRIVATE ${CMAKE_SOURCE_DIR}/src/modules/calc)
+foreach(_d IN LISTS _qtcore_inc2)
+    if(EXISTS "${_d}/${Qt6Core_VERSION}/QtCore/private/qzipreader_p.h")
+        target_include_directories(DrawingWriteSmoke PRIVATE "${_d}/${Qt6Core_VERSION}")
+    endif()
+endforeach()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Installation rules (future-proofing)
 # ─────────────────────────────────────────────────────────────────────────────
