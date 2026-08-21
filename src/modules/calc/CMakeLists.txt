@@ -12,6 +12,10 @@ add_library(CalcModule STATIC
     ChartObject.cpp
     ChartObject.h
     ChartSpec.h
+    # The header/category scan that reads a chart's range. Shared by the
+    # renderer and the .xlsx writer so the file cannot disagree with the screen.
+    ChartResolve.cpp
+    ChartResolve.h
     CondFormat.h
     CalcCommands.cpp
     CalcCommands.h

@@ -4,6 +4,7 @@
 #include "ChartObject.h"
 #include "SpreadsheetModel.h"
 #include "CalcIcons.h"
+#include "ChartResolve.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -309,46 +310,20 @@ void ChartObject::rebuild() {
 
     } else {
         // ── In-app chart: one contiguous block, scanned for a header row ───
-        const int c1 = m_spec.range.left(), c2 = m_spec.range.right();
-        const int r1 = m_spec.range.top(),  r2 = m_spec.range.bottom();
+        // The scan itself lives in ChartResolve so the .xlsx writer reaches the
+        // same answer; see the header comment there for why it had to move.
+        const RangeChart rc = resolveRangeChart(
+            m_spec.range,
+            [this](int c, int r) { return m_model->displayValue(c, r); });
 
-        auto disp  = [&](int c, int r) { return m_model->displayValue(c, r); };
-        auto isNum = [&](int c, int r) {
-            const QString d = disp(c, r);
-            if (d.isEmpty()) return false;
-            bool ok = false; d.toDouble(&ok); return ok;
-        };
-
-        // Header row: top row carries text labels and there is data below it.
-        bool headerRow = false;
-        if (r2 > r1)
-            for (int c = c1; c <= c2; ++c)
-                if (!disp(c, r1).isEmpty() && !isNum(c, r1)) { headerRow = true; break; }
-        const int firstDataRow = headerRow ? r1 + 1 : r1;
-
-        // Category column: left column carries text labels.
-        bool catCol = false;
-        if (c2 > c1)
-            for (int r = firstDataRow; r <= r2; ++r)
-                if (!disp(c1, r).isEmpty() && !isNum(c1, r)) { catCol = true; break; }
-        const int firstDataCol = catCol ? c1 + 1 : c1;
-
-        for (int r = firstDataRow; r <= r2; ++r)
-            cats << (catCol ? disp(c1, r) : QString::number(r - firstDataRow + 1));
-
-        for (int c = firstDataCol; c <= c2; ++c) {
+        cats = rc.categories;
+        for (const RangeSeries& rs : rc.series) {
             Series s;
-            s.name = headerRow ? disp(c, r1) : QString();
-            if (s.name.isEmpty()) s.name = QString("Series %1").arg(c - firstDataCol + 1);
-            for (int r = firstDataRow; r <= r2; ++r) {
-                bool ok = false; const double val = disp(c, r).toDouble(&ok);
-                s.vals << (ok ? val : 0.0);
-            }
+            s.name = rs.name;
+            s.vals = rs.values;
             series << s;
         }
-
-        if (explicitTitle.isEmpty() && headerRow && catCol)
-            explicitTitle = disp(c1, r1);
+        if (explicitTitle.isEmpty()) explicitTitle = rc.cornerTitle;
     }
 
     auto* chart = new QChart();
