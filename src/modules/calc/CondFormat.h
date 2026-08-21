@@ -25,12 +25,21 @@ struct CondFormatRule {
     QColor  textColor;         // invalid → no text-colour override
     bool    bold { false };    // apply bold when the rule matches
 
+    // Data-bar rules draw a proportional bar behind the value instead of
+    // filling the cell, so they carry their own colour and value range and are
+    // evaluated by magnitude rather than by a true/false formula.
+    QColor  barColor;          // invalid → not a data-bar rule
+    double  barMin { 0.0 };
+    double  barMax { 0.0 };    // == barMin → scale across the rule's range
+
     // The effective styling a cell should receive when one or more rules match.
     struct Result {
         bool   matched { false };
         QColor bgColor;
         QColor textColor;
         bool   bold { false };
+        QColor barColor;             // valid → draw a bar
+        double barFraction { 0.0 };  // 0..1 of the cell width
     };
 };
 

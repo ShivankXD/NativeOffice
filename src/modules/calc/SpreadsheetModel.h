@@ -52,8 +52,18 @@ class SpreadsheetModel : public QAbstractTableModel {
     Q_OBJECT
 
 public:
-    static constexpr int NUM_ROWS = 100;
-    static constexpr int NUM_COLS = 26;
+    // The grid a workbook is allowed to use. This was 100x26, which silently
+    // truncated any imported sheet with data past row 100 or column Z, and made
+    // it impossible to place a chart or picture anchored beyond that. Real
+    // files routinely go further, so the grid now covers column IV and 20000
+    // rows. Cells are stored sparsely, so the cost of the larger grid is in the
+    // view's section handling, not in memory: every full-grid loop over these
+    // constants has been made proportional to the used range instead.
+    // These are Excel's own limits. cellKey() is row * NUM_COLS + col, which at
+    // this size is 17,179,869,184 and overflows a 32-bit int, so the key is a
+    // qint64 and the maps are keyed by that.
+    static constexpr int NUM_ROWS = 1048576;
+    static constexpr int NUM_COLS = 16384;
 
     explicit SpreadsheetModel(QObject* parent = nullptr);
 
@@ -102,12 +112,28 @@ public:
     void notifyAllChanged();                                 // emit whole-sheet dataChanged
 
     // Read-only access to the sparse cell store (for serialization).
-    [[nodiscard]] const std::unordered_map<int, Cell>& cells() const { return m_data; }
+    [[nodiscard]] const std::unordered_map<qint64, Cell>& cells() const { return m_data; }
 
     // Static key helper (col,row) → flat int (exposed for serialization).
-    static int cellKey(int col, int row) { return row * NUM_COLS + col; }
-    static int keyCol(int key) { return key % NUM_COLS; }
-    static int keyRow(int key) { return key / NUM_COLS; }
+    // qint64: at Excel's dimensions this product does not fit in an int, and
+    // silently wrapping would alias distant cells onto each other.
+    // The furthest column/row that holds anything. Grid operations are sized
+    // from this rather than from NUM_COLS/NUM_ROWS: the grid is Excel-sized and
+    // rebuilding all of it would mean billions of entries for one inserted row.
+    void usedBounds(int& maxCol, int& maxRow) const {
+        maxCol = -1; maxRow = -1;
+        for (const auto& kv : m_data) {
+            if (kv.second.content.isEmpty() && kv.second.format.isDefault()) continue;
+            maxCol = qMax(maxCol, keyCol(kv.first));
+            maxRow = qMax(maxRow, keyRow(kv.first));
+        }
+    }
+
+    static qint64 cellKey(int col, int row) {
+        return static_cast<qint64>(row) * NUM_COLS + col;
+    }
+    static int keyCol(qint64 key) { return static_cast<int>(key % NUM_COLS); }
+    static int keyRow(qint64 key) { return static_cast<int>(key / NUM_COLS); }
 
     // Apply a number-format code (e.g. "0.00", "$#,##0.00", "0%") to a value.
     [[nodiscard]] static QString formatNumber(double value, const QString& code);
@@ -149,7 +175,7 @@ public:
         else m_comments.insert(cellKey(col, row), text);
         notifyAllChanged();
     }
-    [[nodiscard]] const QHash<int, QString>& comments() const { return m_comments; }
+    [[nodiscard]] const QHash<qint64, QString>& comments() const { return m_comments; }
     void setShowCommentMarkers(bool on) { m_showCommentMarkers = on; notifyAllChanged(); }
     [[nodiscard]] bool showCommentMarkers() const { return m_showCommentMarkers; }
 
@@ -165,11 +191,50 @@ public:
     void addChart(const ChartSpec& c) { m_charts.push_back(c); }
     void clearCharts() { m_charts.clear(); }
 
+    // Pictures sitting on the sheet, kept next to the charts for the same
+    // reason: they belong to the sheet, not to the view showing it.
+    [[nodiscard]] const QVector<SheetImage>& images() const { return m_images; }
+    void setImages(const QVector<SheetImage>& i) { m_images = i; }
+    void addImage(const SheetImage& i) { m_images.push_back(i); }
+    void clearImages() { m_images.clear(); }
+
+    // Drawn shapes: banners, buttons, callouts, rules. Kept alongside the
+    // charts and pictures because they are the same kind of thing, an object
+    // that belongs to the sheet rather than to a cell.
+    [[nodiscard]] const QVector<SheetShape>& shapes() const { return m_shapes; }
+    void setShapes(const QVector<SheetShape>& s) { m_shapes = s; }
+    void clearShapes() { m_shapes.clear(); }
+
     // ── Conditional formatting rules (stored in the data model) ──────────────
     // Rules are evaluated live in data() for the colour/font roles. List order is
     // priority order: index 0 is highest priority and wins each property it sets.
+    // A workbook stores whether the grid is drawn. The delegate paints the
+    // gridlines, so it has to ask the model rather than the view.
+    // Rows and columns the file marks hidden, and the zoom it was saved at.
+    [[nodiscard]] const QVector<int>& hiddenCols() const { return m_hiddenCols; }
+    [[nodiscard]] const QVector<int>& hiddenRows() const { return m_hiddenRows; }
+    void setHiddenCols(const QVector<int>& c) { m_hiddenCols = c; }
+    void setHiddenRows(const QVector<int>& r) { m_hiddenRows = r; }
+    // The zoom the view is currently drawing at. It lives here because the
+    // font size is served from FontRole, so this is the only place that can
+    // scale the type along with the cells.
+    [[nodiscard]] double viewZoom() const { return m_viewZoom; }
+    void setViewZoom(double z);
+
+    [[nodiscard]] int  zoomScale() const { return m_zoomScale; }
+    void setZoomScale(int z) { if (z >= 10 && z <= 400) m_zoomScale = z; }
+
+    // Hidden sheets keep their data (charts reference them) but get no tab.
+    [[nodiscard]] bool isHidden() const { return m_hidden; }
+    void setHidden(bool h) { m_hidden = h; }
+
+    [[nodiscard]] bool showGridLines() const { return m_showGridLines; }
+    void setShowGridLines(bool on) { m_showGridLines = on; notifyAllChanged(); }
+
     [[nodiscard]] const QVector<CondFormatRule>& condRules() const { return m_condRules; }
-    void setCondRules(const QVector<CondFormatRule>& r) { m_condRules = r; notifyAllChanged(); }
+    void setCondRules(const QVector<CondFormatRule>& r) {
+        m_condRules = r; m_cfCache.clear(); m_barRangeCache.clear(); notifyAllChanged();
+    }
     void addCondRule(const CondFormatRule& r) { m_condRules.push_back(r); notifyAllChanged(); }
     void updateCondRule(int i, const CondFormatRule& r) {
         if (i >= 0 && i < m_condRules.size()) { m_condRules[i] = r; notifyAllChanged(); }
@@ -192,10 +257,10 @@ public:
 
 private:
     // Recursion-guard: tracks which cells are currently being evaluated.
-    mutable std::unordered_map<int, bool> m_evaluating;
+    mutable std::unordered_map<qint64, bool> m_evaluating;
 
     // The sparse cell store (only non-default cells are stored).
-    std::unordered_map<int, Cell> m_data;
+    std::unordered_map<qint64, Cell> m_data;
 
     FormulaEngine    m_engine;
     QUndoStack*      m_undo { nullptr };
@@ -207,9 +272,22 @@ private:
     QHash<int, int>  m_colWidths;
     QHash<int, int>  m_rowHeights;
     QVector<ChartSpec> m_charts;
+    QVector<SheetImage> m_images;
+    QVector<SheetShape> m_shapes;
     QVector<CondFormatRule> m_condRules;
+    // Conditional formatting is evaluated per cell, several times per repaint.
+    // Both of these are pure functions of the cell data, so they are cached and
+    // dropped wholesale whenever anything changes.
+    mutable QHash<qint64, CondFormatRule::Result> m_cfCache;
+    mutable QHash<int, QPair<double, double>>     m_barRangeCache;
+    bool m_showGridLines { true };
+    bool m_hidden { false };
+    QVector<int> m_hiddenCols;
+    QVector<int> m_hiddenRows;
+    int  m_zoomScale { 100 };
+    double m_viewZoom { 1.0 };
     QHash<QString, QString> m_definedNames;
-    QHash<int, QString>     m_comments;
+    QHash<qint64, QString>  m_comments;
     QHash<int, QStringList> m_validations;
     bool             m_showCommentMarkers { true };
 };

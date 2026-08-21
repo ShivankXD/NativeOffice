@@ -259,7 +259,10 @@ QVariant SpreadsheetModel::data(const QModelIndex& index, int role) const {
             && !boldEff && !fmt.italic && !fmt.underline && !fmt.strike)
             return {};   // grid default font
         QFont f(fmt.fontFamily.isEmpty() ? QStringLiteral("Calibri") : fmt.fontFamily);
-        f.setPointSize(fmt.fontSize > 0 ? fmt.fontSize : 11);
+        // Scaled by the view zoom: a sheet saved at 70% has to draw its text
+        // at 70% too, or the type overflows the cells it is meant to sit in.
+        const double pt = (fmt.fontSize > 0 ? fmt.fontSize : 11) * m_viewZoom;
+        f.setPointSizeF(qMax(1.0, pt));
         f.setBold(boldEff);
         f.setItalic(fmt.italic);
         f.setUnderline(fmt.underline);
@@ -323,14 +326,79 @@ Qt::ItemFlags SpreadsheetModel::flags(const QModelIndex& index) const {
 // ─────────────────────────────────────────────────────────────────────────────
 // Raw / display helpers
 // ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+// Split a format code into its sections. Excel allows up to four
+// (positive;negative;zero;text) and only one of them applies to a given value.
+// The split has to skip separators inside quoted literals and inside the
+// bracketed colour/condition tokens.
+QStringList numFmtSections(const QString& code) {
+    QStringList out;
+    QString cur;
+    for (int i = 0; i < code.size(); ++i) {
+        const QChar c = code.at(i);
+        if (c == QLatin1Char('"')) {
+            cur += c;
+            for (++i; i < code.size(); ++i) { cur += code.at(i);
+                                              if (code.at(i) == QLatin1Char('"')) break; }
+            continue;
+        }
+        if (c == QLatin1Char('[')) {
+            cur += c;
+            for (++i; i < code.size(); ++i) { cur += code.at(i);
+                                              if (code.at(i) == QLatin1Char(']')) break; }
+            continue;
+        }
+        if (c == QLatin1Char('\\')) { cur += c; if (++i < code.size()) cur += code.at(i); continue; }
+        if (c == QLatin1Char(';')) { out << cur; cur.clear(); continue; }
+        cur += c;
+    }
+    out << cur;
+    return out;
+}
+
+// Strip everything from a section that says nothing about the value's type:
+// bracketed colour/locale/condition tokens, quoted literal text, and
+// backslash-escaped characters. What is left is the actual format pattern.
+//
+// This is the whole reason a currency format was being read as a date: [Red]
+// contains a 'd', and the date test was looking at the raw string.
+QString numFmtPattern(const QString& section) {
+    QString out;
+    for (int i = 0; i < section.size(); ++i) {
+        const QChar c = section.at(i);
+        if (c == QLatin1Char('[')) { while (i < section.size()
+                                            && section.at(i) != QLatin1Char(']')) ++i; continue; }
+        if (c == QLatin1Char('"')) { for (++i; i < section.size()
+                                          && section.at(i) != QLatin1Char('"'); ++i) {} continue; }
+        if (c == QLatin1Char('\\')) { ++i; continue; }
+        out += c;
+    }
+    return out;
+}
+
+} // namespace
+
 QString SpreadsheetModel::formatNumber(double value, const QString& code) {
     if (code.isEmpty() || code == QLatin1String("General"))
         return QString::number(value, 'g', 10);
 
+    // Pick the section that applies to this value.
+    const QStringList sections = numFmtSections(code);
+    int si = 0;
+    if (value < 0 && sections.size() > 1)       si = 1;
+    else if (value == 0 && sections.size() > 2) si = 2;
+    const QString section = sections.value(si);
+    // An empty section means "show nothing", which is how ";;" hides a cell.
+    if (section.trimmed().isEmpty()) return QString();
+
+    // The pattern with colour tokens and literal text removed.
+    const QString pat = numFmtPattern(section);
+
     // ── Date / time codes (value is an Excel serial: days since 1899-12-30) ────
-    const bool dateCode = code.contains('y') || code.contains('d')
-                          || code.contains(QLatin1String("mmm"));
-    const bool timeCode = code.contains('h') || code.contains('s');
+    const bool dateCode = pat.contains('y') || pat.contains('d')
+                          || pat.contains(QLatin1String("mmm"));
+    const bool timeCode = pat.contains('h') || pat.contains('s');
     if (dateCode || timeCode) {
         const QDateTime base(QDate(1899, 12, 30), QTime(0, 0));
         const QDateTime dt = base.addMSecs(static_cast<qint64>(std::llround(value * 86400000.0)));
@@ -344,22 +412,25 @@ QString SpreadsheetModel::formatNumber(double value, const QString& code) {
             {"h:mm","h:mm"}, {"hh:mm","hh:mm"}, {"h:mm:ss","h:mm:ss"},
             {"hh:mm:ss","hh:mm:ss"}, {"h:mm am/pm","h:mm AP"},
         };
-        QString qf = map.value(code.toLower());
+        QString qf = map.value(pat.toLower().trimmed());
+        if (qf.isEmpty()) qf = map.value(code.toLower());
         if (qf.isEmpty())
             qf = dateCode ? (timeCode ? "yyyy-MM-dd h:mm" : "yyyy-MM-dd") : "h:mm:ss";
         return dt.toString(qf);
     }
 
-    const bool percent   = code.contains('%');
-    const bool currency  = code.contains('$');
-    const bool thousands = code.contains(',');
+    const bool percent   = pat.contains('%');
+    // The currency symbol is a quoted literal ("$"), so it is looked for in the
+    // section rather than in the stripped pattern.
+    const bool currency  = section.contains('$');
+    const bool thousands = pat.contains(',');
 
     // Decimal places = run of '0'/'#' immediately after the decimal point.
     int decimals = 0;
-    const int dot = code.indexOf('.');
+    const int dot = pat.indexOf('.');
     if (dot >= 0) {
-        for (int i = dot + 1; i < code.size(); ++i) {
-            const QChar ch = code[i];
+        for (int i = dot + 1; i < pat.size(); ++i) {
+            const QChar ch = pat[i];
             if (ch == '0' || ch == '#') ++decimals;
             else break;
         }
@@ -403,7 +474,8 @@ QString SpreadsheetModel::rawContent(int col, int row) const {
 }
 
 QString SpreadsheetModel::displayValue(int col, int row) const {
-    const int key = cellKey(col, row);
+    // qint64 for the same reason as applyCellRaw: an int wraps at this grid size.
+    const qint64 key = cellKey(col, row);
 
     // Circular-reference guard
     if (m_evaluating[key]) return "#CIRC";
@@ -444,9 +516,20 @@ QString SpreadsheetModel::displayValue(int col, int row) const {
 // is run through the same FormulaEngine as ordinary cells. A rule matches when
 // its formula yields TRUE (or a non-zero number). List order is priority order
 // (index 0 highest); the first rule to set a property wins it.
+void SpreadsheetModel::setViewZoom(double z) {
+    if (z <= 0) z = 1.0;
+    if (qFuzzyCompare(m_viewZoom, z)) return;
+    m_viewZoom = z;
+    notifyAllChanged();          // every cell has to be re-measured and repainted
+}
+
 CondFormatRule::Result SpreadsheetModel::evalCondFormat(int col, int row) const {
     CondFormatRule::Result res;
     if (m_condRules.isEmpty()) return res;
+
+    const qint64 key = cellKey(col, row);
+    const auto cached = m_cfCache.constFind(key);
+    if (cached != m_cfCache.constEnd()) return *cached;
 
     const FormulaEngine::CellLookup lookup =
         [this](const QString& sheet, int c, int r) -> QString {
@@ -455,8 +538,45 @@ CondFormatRule::Result SpreadsheetModel::evalCondFormat(int col, int row) const 
                                       : QString("#REF!");
         };
 
-    for (const CondFormatRule& rule : m_condRules) {
+    for (int ruleIdx = 0; ruleIdx < m_condRules.size(); ++ruleIdx) {
+        const CondFormatRule& rule = m_condRules.at(ruleIdx);
         if (!rule.range.contains(col, row)) continue;
+
+        // A data bar is sized from the value, not from a condition.
+        if (rule.barColor.isValid()) {
+            bool ok = false;
+            const double v = displayValue(col, row).toDouble(&ok);
+            if (!ok) continue;
+            double lo = rule.barMin, hi = rule.barMax;
+            if (hi <= lo) {
+                // No explicit range in the file: scale against the extremes of
+                // the cells the rule covers, which is what "automatic" means.
+                // Computed once per rule, not once per cell: doing it per cell
+                // made a repaint quadratic in the size of the banded range.
+                const auto hit = m_barRangeCache.constFind(ruleIdx);
+                if (hit != m_barRangeCache.constEnd()) {
+                    lo = hit->first; hi = hit->second;
+                } else {
+                    lo = 0.0; hi = 0.0;
+                    for (int r2 = rule.range.top(); r2 <= rule.range.bottom(); ++r2)
+                        for (int c2 = rule.range.left(); c2 <= rule.range.right(); ++c2) {
+                            bool o = false;
+                            const double d = displayValue(c2, r2).toDouble(&o);
+                            if (!o) continue;
+                            lo = qMin(lo, d);
+                            hi = qMax(hi, d);
+                        }
+                    m_barRangeCache.insert(ruleIdx, qMakePair(lo, hi));
+                }
+            }
+            if (hi <= lo) continue;
+            res.matched     = true;
+            res.barColor    = rule.barColor;
+            res.barFraction = qBound(0.0, (v - lo) / (hi - lo), 1.0);
+            continue;
+            
+        }
+
         if (!rule.formula.startsWith('=')) continue;
 
         const int dCol = col - rule.range.left();
@@ -477,6 +597,7 @@ CondFormatRule::Result SpreadsheetModel::evalCondFormat(int col, int row) const 
         if (rule.textColor.isValid() && !res.textColor.isValid()) res.textColor = rule.textColor;
         if (rule.bold) res.bold = true;
     }
+    m_cfCache.insert(key, res);
     return res;
 }
 
@@ -522,9 +643,13 @@ void SpreadsheetModel::applyCellEdits(
 // applyCellEdits records before/after and filters no-ops.
 void SpreadsheetModel::insertRowAt(int row) {
     if (row < 0 || row >= NUM_ROWS) return;
+    int maxCol, maxRow;
+    usedBounds(maxCol, maxRow);
+    if (maxCol < 0) return;                       // empty sheet, nothing to shift
+    const int lastRow = qMin(maxRow + 1, NUM_ROWS - 1);
     std::vector<std::pair<QPoint, Cell>> edits;
-    for (int r = 0; r < NUM_ROWS; ++r)
-        for (int c = 0; c < NUM_COLS; ++c) {
+    for (int r = 0; r <= lastRow; ++r)
+        for (int c = 0; c <= maxCol; ++c) {
             Cell after = (r < row) ? cellAt(c, r)
                        : (r == row) ? Cell{} : cellAt(c, r - 1);
             after.content = rewriteFormula(after.content, GridOp::InsertRow, row);
@@ -535,11 +660,14 @@ void SpreadsheetModel::insertRowAt(int row) {
 
 void SpreadsheetModel::deleteRowAt(int row) {
     if (row < 0 || row >= NUM_ROWS) return;
+    int maxCol, maxRow;
+    usedBounds(maxCol, maxRow);
+    if (maxCol < 0) return;
     std::vector<std::pair<QPoint, Cell>> edits;
-    for (int r = 0; r < NUM_ROWS; ++r)
-        for (int c = 0; c < NUM_COLS; ++c) {
+    for (int r = 0; r <= maxRow; ++r)
+        for (int c = 0; c <= maxCol; ++c) {
             Cell after = (r < row) ? cellAt(c, r)
-                       : (r == NUM_ROWS - 1) ? Cell{} : cellAt(c, r + 1);
+                       : (r >= maxRow) ? Cell{} : cellAt(c, r + 1);
             after.content = rewriteFormula(after.content, GridOp::DeleteRow, row);
             edits.push_back({QPoint(c, r), after});
         }
@@ -548,9 +676,13 @@ void SpreadsheetModel::deleteRowAt(int row) {
 
 void SpreadsheetModel::insertColumnAt(int col) {
     if (col < 0 || col >= NUM_COLS) return;
+    int maxCol, maxRow;
+    usedBounds(maxCol, maxRow);
+    if (maxCol < 0) return;
+    const int lastCol = qMin(maxCol + 1, NUM_COLS - 1);
     std::vector<std::pair<QPoint, Cell>> edits;
-    for (int c = 0; c < NUM_COLS; ++c)
-        for (int r = 0; r < NUM_ROWS; ++r) {
+    for (int c = 0; c <= lastCol; ++c)
+        for (int r = 0; r <= maxRow; ++r) {
             Cell after = (c < col) ? cellAt(c, r)
                        : (c == col) ? Cell{} : cellAt(c - 1, r);
             after.content = rewriteFormula(after.content, GridOp::InsertCol, col);
@@ -561,11 +693,14 @@ void SpreadsheetModel::insertColumnAt(int col) {
 
 void SpreadsheetModel::deleteColumnAt(int col) {
     if (col < 0 || col >= NUM_COLS) return;
+    int maxCol, maxRow;
+    usedBounds(maxCol, maxRow);
+    if (maxCol < 0) return;
     std::vector<std::pair<QPoint, Cell>> edits;
-    for (int c = 0; c < NUM_COLS; ++c)
-        for (int r = 0; r < NUM_ROWS; ++r) {
+    for (int c = 0; c <= maxCol; ++c)
+        for (int r = 0; r <= maxRow; ++r) {
             Cell after = (c < col) ? cellAt(c, r)
-                       : (c == NUM_COLS - 1) ? Cell{} : cellAt(c + 1, r);
+                       : (c >= maxCol) ? Cell{} : cellAt(c + 1, r);
             after.content = rewriteFormula(after.content, GridOp::DeleteCol, col);
             edits.push_back({QPoint(c, r), after});
         }
@@ -574,17 +709,41 @@ void SpreadsheetModel::deleteColumnAt(int col) {
 
 // ── Raw-apply hooks (used by CellsChangeCommand) ──────────────────────────────
 void SpreadsheetModel::applyCellRaw(int col, int row, const Cell& cell) {
-    const int key = cellKey(col, row);
+    // qint64: at the full grid size row * NUM_COLS + col does not fit in an int,
+    // and truncating it here would alias distant cells onto one another.
+    const qint64 key = cellKey(col, row);
     if (cell.isEmpty())
         m_data.erase(key);
     else
         m_data[key] = cell;
+    if (!m_cfCache.isEmpty())      m_cfCache.clear();
+    if (!m_barRangeCache.isEmpty()) m_barRangeCache.clear();
 }
 
 void SpreadsheetModel::notifyAllChanged() {
-    // Invalidate the whole sheet so dependent formula cells repaint.
+    // The conditional-format caches are pure functions of the cell data, so
+    // they die with it.
+    m_cfCache.clear();
+    m_barRangeCache.clear();
+    // Invalidate the sheet so dependent formula cells repaint.
+    //
+    // Bounded to the range that actually holds something. This used to span the
+    // whole grid, which was harmless when the grid was 100x26 but is 17 billion
+    // cells now: the view walked it on every recalculation and a sheet took a
+    // minute to open. Conditional-format ranges are included because a rule can
+    // paint a cell that holds no value of its own.
+    int maxCol, maxRow;
+    usedBounds(maxCol, maxRow);
+    for (const CondFormatRule& r : m_condRules) {
+        maxCol = qMax(maxCol, r.range.right());
+        maxRow = qMax(maxRow, r.range.bottom());
+    }
+    if (maxCol < 0 || maxRow < 0) return;          // nothing to repaint
+    maxCol = qMin(maxCol, NUM_COLS - 1);
+    maxRow = qMin(maxRow, NUM_ROWS - 1);
+
     emit dataChanged(index(0, 0),
-                     index(NUM_ROWS - 1, NUM_COLS - 1),
+                     index(maxRow, maxCol),
                      {Qt::DisplayRole, Qt::EditRole, Qt::ForegroundRole,
                       Qt::BackgroundRole, Qt::FontRole, Qt::TextAlignmentRole});
 }
