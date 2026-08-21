@@ -52,6 +52,7 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QString>
 #include <QCloseEvent>
 #include <QMouseEvent>
@@ -250,6 +251,28 @@ public:
     virtual bool saveQuietlyTo(const QString& path) { Q_UNUSED(path); return false; }
     virtual bool autoSaveEnabled() const { return true; }
 
+    // Whether an automatic write is allowed to land on the document's own file.
+    //
+    // It is not, for any format this app reads more of than it writes. A real
+    // .xlsx carries charts, pictures, pivot tables and defined names that the
+    // exporter does not model, so an autosave tick over the original replaced a
+    // 78-part workbook with a 7-part one: the charts were gone and other office
+    // suites could no longer open it. Opening someone's file must never be able
+    // to damage it, so for those formats the tick writes a recovery copy
+    // alongside and leaves the original exactly as it was found.
+    virtual bool canAutoSaveInPlace() const { return true; }
+
+    // Where the recovery copy for a document we must not overwrite goes.
+    QString recoveryPathFor(const QString& original) const {
+        QDir dir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+                 + QStringLiteral("/NativeOffice/Recovered"));
+        if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) return {};
+        const QFileInfo fi(original);
+        // Kept in our own format: it is the one thing guaranteed to hold
+        // everything the editor currently has in memory.
+        return dir.filePath(fi.completeBaseName() + QStringLiteral(".noff"));
+    }
+
     // True only while an autosave tick is writing. Subclasses check it in
     // performSave() so an automatic write is not counted as the user editing
     // and saving a file.
@@ -292,7 +315,8 @@ public:
     bool autoSaveNow() {
         if (!autoSaveEnabled() || !docDirty()) return true;
         QString path = currentDocPath();
-        if (path.isEmpty()) path = reserveAutoSavePath();
+        if (path.isEmpty())            path = reserveAutoSavePath();
+        else if (!canAutoSaveInPlace()) path = recoveryPathFor(path);
         if (path.isEmpty()) return false;
         // Marks this write as automatic so the "Files edited" counter does not
         // tick every few seconds while someone is simply typing.
@@ -333,7 +357,12 @@ public:
     // never been named, so there is nothing left to ask about. The old prompt
     // now only appears if the write itself failed, where staying silent would
     // mean losing the work.
-    bool closedCleanlyByAutoSave() { return autoSaveNow(); }
+    bool closedCleanlyByAutoSave() {
+        // A recovery copy is not the same as having saved the user's file, so
+        // closing a modified document in one of those formats still asks.
+        if (!canAutoSaveInPlace() && docDirty()) { autoSaveNow(); return false; }
+        return autoSaveNow();
+    }
 
 signals:
     void displayNameChanged();
@@ -430,6 +459,16 @@ public:
     QString currentDocPath() const override { return m_writer ? m_writer->currentFilePath() : QString(); }
     bool    docDirty()       const override { return m_writer && m_writer->isDirty(); }
     bool saveQuietlyTo(const QString& path) override { return performSave(path); }
+
+    // An automatic write must never land on a document in a format this app
+    // rebuilds rather than round-trips: .docx carries far more than the
+    // exporter models, and a timer-driven rewrite would quietly strip it.
+    // Autosave still protects the work, in a recovery copy alongside.
+    bool canAutoSaveInPlace() const override {
+        const QString path = currentDocPath();
+        return path.isEmpty()
+               || path.endsWith(QStringLiteral(".noff"), Qt::CaseInsensitive);
+    }
 
     bool requestClose() override {
         if (closedCleanlyByAutoSave()) return true;
@@ -541,6 +580,24 @@ public:
     bool    docDirty()       const override { return m_calc && m_calc->isDirty(); }
     bool saveQuietlyTo(const QString& path) override { return performSave(path); }
 
+    // ── Autosave is OFF for spreadsheets ────────────────────────────────────
+    // Turned off at the user's explicit request while .xlsx fidelity is being
+    // worked on, and it stays off until they say otherwise.
+    //
+    // The reason it cannot simply be left on: the exporter rebuilds the package
+    // out of the cells alone, so an automatic write turned a real .xlsx into a
+    // cells-only file - charts and pictures gone, and other office suites could
+    // not open the result. Nothing is written unless the user asks for it.
+    bool autoSaveEnabled() const override { return false; }
+
+    // Kept for when autosave is switched back on: even then, only our own
+    // format is safe for an automatic in-place write.
+    bool canAutoSaveInPlace() const override {
+        const QString path = currentDocPath();
+        return path.isEmpty()
+               || path.endsWith(QStringLiteral(".noff"), Qt::CaseInsensitive);
+    }
+
     bool requestClose() override {
         if (closedCleanlyByAutoSave()) return true;
         if (m_calc && m_calc->isDirty()) {
@@ -567,6 +624,7 @@ protected:
 
 private:
     bool performSave(const QString& path) {
+        if (!confirmLossySave(path)) return false;
         if (!m_calc->saveToPath(path)) {
             QMessageBox::critical(this, "Save Failed",
                 "Could not write to:\n" + path);
@@ -578,6 +636,44 @@ private:
         return true;
     }
 
+    // Writing .xlsx rebuilds the package out of the cells, so the charts and
+    // pictures this workbook carries would not survive the trip. Asked once per
+    // document: silently dropping someone's charts is how a file comes back
+    // "broken" in another office suite.
+    bool confirmLossySave(const QString& path) {
+        if (m_autoSaving || m_lossySaveAccepted) return true;
+        if (!path.endsWith(QStringLiteral(".xlsx"), Qt::CaseInsensitive)) return true;
+        const int objects = m_calc ? m_calc->sheetObjectCount() : 0;
+        if (objects <= 0) return true;
+
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(QStringLiteral("Charts and pictures will not be saved"));
+        box.setText(QString("This workbook contains %1 chart%2 or picture%2 that "
+                            "NativeOffice cannot yet write back into an .xlsx file.")
+                        .arg(objects).arg(objects == 1 ? "" : "s"));
+        box.setInformativeText(
+            "Saving as .xlsx keeps the cells and loses those objects.\n"
+            "Saving as .noff keeps everything.");
+        QPushButton* keep = box.addButton(QStringLiteral("Save as .noff instead"),
+                                          QMessageBox::AcceptRole);
+        QPushButton* anyway = box.addButton(QStringLiteral("Save as .xlsx anyway"),
+                                            QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(keep);
+        box.exec();
+
+        if (box.clickedButton() == anyway) { m_lossySaveAccepted = true; return true; }
+        if (box.clickedButton() == keep) {
+            QString alt = path;
+            alt.chop(5);                       // ".xlsx"
+            alt += QStringLiteral(".noff");
+            return performSave(alt);           // writes the lossless copy instead
+        }
+        return false;                          // cancelled
+    }
+
+    bool m_lossySaveAccepted { false };
     NativeOffice::CalcModule* m_calc { nullptr };
 };
 
@@ -642,6 +738,16 @@ public:
     bool    docDirty()       const override { return m_impress && m_impress->isDirty(); }
 
     bool saveQuietlyTo(const QString& path) override { return performSave(path); }
+
+    // An automatic write must never land on a presentation in a format this app
+    // rebuilds rather than round-trips: .pptx carries far more than the
+    // exporter models, and a timer-driven rewrite would quietly strip it.
+    // Autosave still protects the work, in a recovery copy alongside.
+    bool canAutoSaveInPlace() const override {
+        const QString path = currentDocPath();
+        return path.isEmpty()
+               || path.endsWith(QStringLiteral(".noff"), Qt::CaseInsensitive);
+    }
 
     bool requestClose() override {
         if (closedCleanlyByAutoSave()) return true;
