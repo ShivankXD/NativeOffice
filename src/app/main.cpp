@@ -643,7 +643,10 @@ private:
     bool confirmLossySave(const QString& path) {
         if (m_autoSaving || m_lossySaveAccepted) return true;
         if (!path.endsWith(QStringLiteral(".xlsx"), Qt::CaseInsensitive)) return true;
-        const int objects = m_calc ? m_calc->sheetObjectCount() : 0;
+        // Only what this write would really lose. A workbook opened from an
+        // .xlsx is saved by putting its own package back, so its charts and
+        // pictures come through and there is nothing to warn anyone about.
+        const int objects = m_calc ? m_calc->objectsLostOnXlsxSave() : 0;
         if (objects <= 0) return true;
 
         QMessageBox box(this);

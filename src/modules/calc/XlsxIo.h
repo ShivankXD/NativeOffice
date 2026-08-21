@@ -75,6 +75,12 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets);
 // Returns false when the workbook cannot be updated this way (the sheet set
 // changed, or a cell needs a style the original file has no entry for); the
 // caller should fall back to exportXlsx().
+// Whether exportXlsxPreserving() would succeed for this workbook: the same
+// checks, run without writing anything. A caller that wants to tell the user
+// what a save is about to lose has to know this before it overwrites the file.
+bool canPreserveXlsx(const std::vector<XlsxSheet>& sheets,
+                     const QByteArray& original);
+
 bool exportXlsxPreserving(const QString& path,
                           const std::vector<XlsxSheet>& sheets,
                           const QByteArray& original);

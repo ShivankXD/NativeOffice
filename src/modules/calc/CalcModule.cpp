@@ -2796,11 +2796,25 @@ void CalcModule::dumpCell(const QString& ref) const {
              qUtf8Printable(m_model->displayValue(col, row)));
 }
 
-int CalcModule::sheetObjectCount() const {
-    int n = 0;
-    for (SpreadsheetModel* m : m_sheets)
-        if (m) n += m->charts().size() + m->images().size();
-    return n;
+// How many drawn objects an .xlsx write would leave behind.
+//
+// Charts and pictures live in parts the exporter cannot produce, so the one
+// thing that keeps them is putting the workbook's own package back, and that
+// keeps exactly the objects the package already held. An object the app added
+// is lost either way; the file's own objects are lost only when the workbook
+// can no longer be written that way and the save rebuilds it from the cells.
+int CalcModule::objectsLostOnXlsxSave() const {
+    int added = 0, imported = 0;
+    for (SpreadsheetModel* m : m_sheets) {
+        if (!m) continue;
+        for (const ChartSpec&  c : m->charts()) { if (c.fromFile) ++imported; else ++added; }
+        for (const SheetImage& i : m->images()) { if (i.fromFile) ++imported; else ++added; }
+    }
+    if (added + imported == 0) return 0;
+
+    std::vector<XlsxSheet> out;
+    buildXlsxSheets(out);
+    return canPreserveXlsx(out, m_originalXlsx) ? added : added + imported;
 }
 
 // Dev capture aid: what is actually sitting on the active sheet right now.
@@ -6364,33 +6378,37 @@ static void jsonToCells(SpreadsheetModel* m, const QJsonArray& cells) {
     }
 }
 
+void CalcModule::buildXlsxSheets(std::vector<XlsxSheet>& out) const {
+    for (auto* s : m_sheets) {
+        XlsxSheet xs;
+        xs.name = s->sheetName();
+        const auto& data = s->cells();
+        for (auto it = data.begin(); it != data.end(); ++it)
+            // A cell that still wears the style it was imported with can
+            // be written with that same index, which is what lets the
+            // original styles.xml (and the rest of the package) be kept.
+            xs.cells.push_back({SpreadsheetModel::keyCol(it->first),
+                                SpreadsheetModel::keyRow(it->first),
+                                it->second.content,
+                                it->second.format,
+                                it->second.keepsOriginalStyle()
+                                    ? it->second.xfIndex : -1});
+        for (const QRect& m : s->merges()) xs.merges.push_back(mergeToRef(m));
+        const auto& cw = s->colWidths();
+        for (auto it = cw.begin(); it != cw.end(); ++it)
+            xs.colWidths.push_back({it.key(), it.value()});
+        const auto& rh = s->rowHeights();
+        for (auto it = rh.begin(); it != rh.end(); ++it)
+            xs.rowHeights.push_back({it.key(), it.value()});
+        out.push_back(std::move(xs));
+    }
+}
+
 bool CalcModule::saveToPath(const QString& path) {
     // ── .xlsx export ─────────────────────────────────────────────────────────
     if (path.endsWith(".xlsx", Qt::CaseInsensitive)) {
         std::vector<XlsxSheet> out;
-        for (auto* s : m_sheets) {
-            XlsxSheet xs;
-            xs.name = s->sheetName();
-            const auto& data = s->cells();
-            for (auto it = data.begin(); it != data.end(); ++it)
-                // A cell that still wears the style it was imported with can
-                // be written with that same index, which is what lets the
-                // original styles.xml (and the rest of the package) be kept.
-                xs.cells.push_back({SpreadsheetModel::keyCol(it->first),
-                                    SpreadsheetModel::keyRow(it->first),
-                                    it->second.content,
-                                    it->second.format,
-                                    it->second.keepsOriginalStyle()
-                                        ? it->second.xfIndex : -1});
-            for (const QRect& m : s->merges()) xs.merges.push_back(mergeToRef(m));
-            const auto& cw = s->colWidths();
-            for (auto it = cw.begin(); it != cw.end(); ++it)
-                xs.colWidths.push_back({it.key(), it.value()});
-            const auto& rh = s->rowHeights();
-            for (auto it = rh.begin(); it != rh.end(); ++it)
-                xs.rowHeights.push_back({it.key(), it.value()});
-            out.push_back(std::move(xs));
-        }
+        buildXlsxSheets(out);
         // Preferred: put the original package back with only the cells
         // replaced, so charts and pictures survive. Falls back to a full
         // rebuild when the workbook cannot be updated that way.

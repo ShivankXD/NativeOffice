@@ -937,6 +937,7 @@ void parsePicture(QXmlStreamReader& r, const Mapper& m, DrawCtx& ctx) {
     img.geom   = ctx.objectGeom();
     img.frac   = haveXfrm ? m.map(x, y, cx, cy) : m.box;
     img.data   = bytes;
+    img.fromFile = true;
     ctx.images.push_back(img);
 }
 
@@ -975,6 +976,7 @@ void parseGraphicFrame(QXmlStreamReader& r, const Mapper& m, DrawCtx& ctx) {
     spec.anchor = ctx.anchor;
     spec.geom   = ctx.objectGeom();
     spec.frac   = haveXfrm ? m.map(x, y, cx, cy) : m.box;
+    spec.fromFile = true;
     ctx.charts.push_back(spec);
 }
 

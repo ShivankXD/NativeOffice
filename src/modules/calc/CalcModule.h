@@ -37,6 +37,7 @@
 
 #include "Cell.h"
 #include <QPointer>
+#include <vector>
 
 #include "ChartSpec.h"
 #include "DataCleanser.h"   // for the Op enum in the slot signature
@@ -59,6 +60,7 @@ class QStackedWidget;
 namespace NativeOffice {
 
 class SpreadsheetModel;
+struct XlsxSheet;
 class CalcHeaderView;
 class MarchingAntsOverlay;
 class SelectionOverlay;
@@ -113,14 +115,16 @@ public:
     [[nodiscard]] QAction* pasteAction() const noexcept { return m_pasteAct; }
     [[nodiscard]] QAction* deleteAction()const noexcept { return m_deleteAct;}
 
-    // ── Dev capture aids (NATIVEOFFICE_CALC_GRAB) ────────────────────────────
+    // How many charts and pictures an .xlsx write would leave behind, so the
+    // save path can name what it is about to lose, and stay quiet when it is
+    // about to lose nothing.
+    [[nodiscard]] int objectsLostOnXlsxSave() const;
+
+    // ── Dev capture aids (NATIVEOFFICE_CALC_GRAB) ──────────────────────
     // Switching sheets and reporting what sits on one, so chart and picture
     // import can be checked offscreen instead of by driving the UI.
     void activateSheet(int index) { switchToSheet(index); }
     void dumpSheetObjects() const;
-    // Charts + pictures across every sheet, so the save path can tell the user
-    // what an .xlsx write would drop.
-    [[nodiscard]] int sheetObjectCount() const;
     void dumpCell(const QString& ref) const;
     void scrollToCell(int col, int row);
     // Sends a real Ctrl+wheel event to the grid so the zoom path is exercised
@@ -318,6 +322,9 @@ private:
     void rebuildChartObjects();
     // Rebuild each live chart's series after the underlying data changed.
     void refreshChartsData();
+    // The workbook as the .xlsx writers want it. Shared by the save itself and
+    // by the question of what a save would cost, so the two cannot disagree.
+    void buildXlsxSheets(std::vector<XlsxSheet>& out) const;
     // Copy live chart geometries/types back into the active model's specs.
     void syncChartSpecs();
     ChartObject* createChartObject(const ChartSpec& spec);

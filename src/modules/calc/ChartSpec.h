@@ -94,6 +94,12 @@ struct ChartSpec {
     bool    showDataLabels { false };
     QString valueAxisFormat;         // number-format code for the value axis
 
+    // True when this chart was read out of an .xlsx. It decides whether a
+    // save can keep it: the exporter cannot write a chart part, so the only
+    // chart that survives is one whose part is already in the package being
+    // put back. A chart built in the app has no part to put back.
+    bool    fromFile { false };
+
     [[nodiscard]] bool isExplicit() const { return !series.isEmpty(); }
 };
 
@@ -104,6 +110,7 @@ struct SheetImage {
     QRect      geom;     // fallback geometry when the anchor has no `to`
     QByteArray data;     // encoded image (png/jpeg/gif as it came out of the file)
     QRectF     frac { 0, 0, 1, 1 };   // sub-rect of the anchor (see SheetShape)
+    bool       fromFile { false };    // read out of an .xlsx (see ChartSpec)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

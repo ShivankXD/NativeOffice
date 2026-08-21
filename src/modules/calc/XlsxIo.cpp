@@ -1418,9 +1418,14 @@ bool buildPreservedSheetData(const XlsxSheet& sh, QByteArray& out) {
 
 } // namespace
 
-bool exportXlsxPreserving(const QString& path,
-                          const std::vector<XlsxSheet>& sheets,
-                          const QByteArray& original) {
+// Everything the preserving write does except the writing. `outBytes` may be
+// null, which makes this a dry run: the same checks and the same failure
+// points, no package assembled and nothing put on disk. That is what lets the
+// save path ask whether a workbook's charts would survive without keeping a
+// second copy of the rules that would drift out of step with these.
+static bool rebuildPreservedPackage(const std::vector<XlsxSheet>& sheets,
+                                    const QByteArray& original,
+                                    QByteArray* outBytes) {
     if (original.isEmpty() || sheets.empty()) return false;
 
     ZipReader zip;
@@ -1469,15 +1474,30 @@ bool exportXlsxPreserving(const QString& path,
         replaced.insert(sheetParts[i], xml);
     }
 
+    if (!outBytes) return true;      // a dry run, and every check passed
+
     // Write the package back out: every original part, with the worksheets
     // swapped for the regenerated ones.
     ZipWriter out;
     for (const QString& name : zip.names())
         out.add(name, replaced.contains(name) ? replaced.value(name) : zip.file(name));
+    *outBytes = out.finish();
+    return true;
+}
+
+bool canPreserveXlsx(const std::vector<XlsxSheet>& sheets,
+                     const QByteArray& original) {
+    return rebuildPreservedPackage(sheets, original, nullptr);
+}
+
+bool exportXlsxPreserving(const QString& path,
+                          const std::vector<XlsxSheet>& sheets,
+                          const QByteArray& original) {
+    QByteArray bytes;
+    if (!rebuildPreservedPackage(sheets, original, &bytes)) return false;
 
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly)) return false;
-    const QByteArray bytes = out.finish();
     const bool ok = f.write(bytes) == bytes.size();
     f.close();
     return ok;
