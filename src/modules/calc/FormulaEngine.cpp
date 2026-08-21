@@ -201,14 +201,25 @@ bool FormulaEngine::Parser::match(char c) {
 QString FormulaEngine::Parser::readRefToken() {
     skipWs();
     const int start = pos;
+
+    // A '$' may precede the column letters, the row digits, or both. It only
+    // pins the reference against fill-down, which nothing here does yet, so the
+    // marker is consumed and dropped: $A$1, $A1, A$1 and A1 all name one cell.
+    if (pos < src.size() && src[pos] == QLatin1Char('$')) ++pos;
+    const int letterStart = pos;
     while (pos < src.size() && src[pos].isLetter()) ++pos;
     const int afterLetters = pos;
+
+    if (pos < src.size() && src[pos] == QLatin1Char('$')) ++pos;
+    const int digitStart = pos;
     while (pos < src.size() && src[pos].isDigit()) ++pos;
-    if (afterLetters == start || pos == afterLetters) {
+
+    if (afterLetters == letterStart || pos == digitStart) {
         pos = start;          // not a valid ref token
         return {};
     }
-    return src.mid(start, pos - start);
+    return src.mid(letterStart, afterLetters - letterStart)
+         + src.mid(digitStart,  pos - digitStart);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +376,13 @@ FormulaEngine::Value FormulaEngine::Parser::parsePrimary() {
 
     if (c == '"')
         return parseString();
+
+    // A reference written absolutely starts with '$' rather than a letter.
+    if (c == '$') {
+        const QString tok = readRefToken();
+        if (tok.isEmpty()) { syntaxError = true; return Value::error("#ERR"); }
+        return parseRefToValue(QString(), tok);
+    }
 
     if (QChar(c).isLetter()) {
         // Identifier → function call, TRUE/FALSE, sheet-qualified ref, or cell ref.
@@ -864,6 +882,121 @@ FormulaEngine::callFunction(const QString& fn, QVector<Arg>& args) {
         }
         return Value::error("#N/A");
     }
+    // XLOOKUP(lookup, lookup_array, return_array, [if_not_found], [match_mode])
+    // The modern replacement for VLOOKUP, and by far the most common function
+    // in real workbooks that NativeOffice could not evaluate. Only exact match
+    // (mode 0, the default) and exact-or-next are implemented; the search-order
+    // argument is accepted and ignored.
+    if (fn == "XLOOKUP") {
+        if (args.size() < 3) return Value::error("#VALUE!");
+        const Value key = firstScalar(0);
+        const Arg& look = args[1];
+        const Arg& ret  = args[2];
+        if (look.grid.isEmpty() || ret.grid.isEmpty()) return Value::error("#N/A");
+
+        int matchMode = 0;
+        if (args.size() >= 5) { bool o=false; matchMode = (int)reqNum(firstScalar(4), o); }
+
+        // The lookup range is a single row or a single column; flatten it so
+        // both orientations are handled the same way.
+        const bool lookByRow = look.grid.size() == 1;
+        const int  n = lookByRow ? look.grid[0].size() : look.grid.size();
+        auto lookAt = [&](int i) {
+            return lookByRow ? look.grid[0][i] : look.grid[i][0];
+        };
+        // The return range need not have the same orientation as the lookup.
+        const bool retByRow = ret.grid.size() == 1;
+        const int  rn = retByRow ? ret.grid[0].size() : ret.grid.size();
+        auto retAt = [&](int i) -> Value {
+            if (i < 0 || i >= rn) return Value::error("#REF!");
+            return retByRow ? ret.grid[0][i] : ret.grid[i][0];
+        };
+
+        int hit = -1;
+        for (int i = 0; i < n; ++i)
+            if (valuesEqual(lookAt(i), key)) { hit = i; break; }
+
+        // Exact-or-next-smaller (-1) / next-larger (1) when no exact match.
+        if (hit < 0 && matchMode != 0) {
+            bool ok = false;
+            const double target = reqNum(key, ok);
+            if (ok) {
+                double best = 0; bool haveBest = false;
+                for (int i = 0; i < n; ++i) {
+                    bool o = false;
+                    const double v = reqNum(lookAt(i), o);
+                    if (!o) continue;
+                    const bool cand = matchMode < 0 ? (v <= target) : (v >= target);
+                    if (!cand) continue;
+                    if (!haveBest || (matchMode < 0 ? v > best : v < best)) {
+                        best = v; haveBest = true; hit = i;
+                    }
+                }
+            }
+        }
+
+        if (hit < 0) {
+            // The if_not_found argument is what makes XLOOKUP worth having:
+            // without honouring it a missing key surfaces as an error even
+            // though the sheet asked for a fallback.
+            if (args.size() >= 4) return firstScalar(3);
+            return Value::error("#N/A");
+        }
+        return retAt(hit);
+    }
+
+    // SUMPRODUCT(a, b, ...): element-wise product of equally shaped ranges,
+    // summed. With one argument it is a plain sum, which is how it is often
+    // used with a boolean expression.
+    if (fn == "SUMPRODUCT") {
+        if (args.empty()) return Value::error("#VALUE!");
+        for (const Arg& a : args)
+            if (a.grid.isEmpty() || a.grid[0].isEmpty()) return Value::error("#VALUE!");
+
+        const int rows = args[0].grid.size();
+        const int cols = args[0].grid[0].size();
+        for (const Arg& a : args)
+            if (a.grid.size() != rows || a.grid[0].size() != cols)
+                return Value::error("#VALUE!");
+
+        double total = 0.0;
+        for (int r = 0; r < rows; ++r)
+            for (int c = 0; c < cols; ++c) {
+                double prod = 1.0;
+                for (const Arg& a : args) {
+                    bool o = false;
+                    const double v = reqNum(a.grid[r][c], o);
+                    // Excel treats text and blanks as zero here rather than
+                    // failing the whole expression.
+                    prod *= o ? v : 0.0;
+                }
+                total += prod;
+            }
+        return Value::number(total);
+    }
+
+    // RANK(number, ref, [order]): order 0 or omitted ranks largest first.
+    if (fn == "RANK" || fn == "RANK.EQ") {
+        if (args.size() < 2) return Value::error("#VALUE!");
+        bool ok = false;
+        const double target = reqNum(firstScalar(0), ok);
+        if (!ok) return Value::error("#VALUE!");
+        int order = 0;
+        if (args.size() >= 3) { bool o=false; order = (int)reqNum(firstScalar(2), o); }
+
+        int better = 0; bool found = false;
+        for (const auto& row : args[1].grid)
+            for (const Value& v : row) {
+                bool o = false;
+                const double d = reqNum(v, o);
+                if (!o) continue;
+                if (d == target) found = true;
+                if (order == 0 ? (d > target) : (d < target)) ++better;
+            }
+        if (!found) return Value::error("#N/A");
+        return Value::number(better + 1);
+    }
+
     if (fn == "INDEX") {
         if (args.size() < 2) return Value::error("#VALUE!");
         const Arg& a = args[0];
