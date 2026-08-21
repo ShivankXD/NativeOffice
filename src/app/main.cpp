@@ -3043,14 +3043,21 @@ int main(int argc, char* argv[]) {
     // on finish, so any other launch on top of that was one too many. It also
     // means double-clicking a file while the app is open adds a tab instead of
     // opening a rival copy of the same document.
-    if (protocolUrl.isEmpty()) {
+    // A dev capture runs its own throwaway instance: handing the file to the
+    // copy the developer already has open would capture that window instead,
+    // and would close their document. The capture hooks therefore skip the
+    // handover (and skip claiming the primary slot, so they disturb nothing).
+    const bool devCapture = qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_GRAB")
+                            || qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB");
+
+    if (protocolUrl.isEmpty() && !devCapture) {
         const QString payload =
             cliFiles.isEmpty() ? NativeOffice::InstanceGuard::activatePayload()
                                : NativeOffice::InstanceGuard::openFilesPayload(cliFiles);
         if (guard.forwardToPrimary(payload)) return 0;
     }
 
-    guard.startPrimary();
+    if (!devCapture) guard.startPrimary();
     NativeOffice::InstanceGuard::registerProtocolScheme();
 
     // ── Warm Qt's font cache in the background ──────────────────────────────
@@ -3196,6 +3203,68 @@ int main(int argc, char* argv[]) {
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_IMPRESS"))
         presentEditor(createImpressWindow());
 
+    // Dev-only: open a workbook, print what got materialised onto the sheet and
+    // grab it. This is how chart/picture import is checked without driving the
+    // UI. NATIVEOFFICE_CALC_GRAB is the png path; the file comes from the CLI
+    // argument. NATIVEOFFICE_CALC_SHEET picks a sheet by index.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_GRAB") && openedFromCli) {
+        const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_CALC_GRAB");
+        const int wantSheet = qEnvironmentVariable("NATIVEOFFICE_CALC_SHEET", "0").toInt();
+        QTimer::singleShot(2500, qApp, [grabPath, wantSheet] {
+            NativeOffice::CalcModule* calc = nullptr;
+            for (QWidget* w : QApplication::allWidgets())
+                if (auto* c = qobject_cast<NativeOffice::CalcModule*>(w)) { calc = c; break; }
+            if (!calc) { qWarning("[calc] no CalcModule found"); qApp->quit(); return; }
+
+            if (wantSheet > 0) calc->activateSheet(wantSheet);
+            // Scroll so an object anchored below the fold is actually on screen.
+            if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_SCROLL")) {
+                // "row" or "row,col"
+                const QStringList rc =
+                    qEnvironmentVariable("NATIVEOFFICE_CALC_SCROLL").split(',');
+                calc->scrollToCell(rc.value(1).toInt(), rc.value(0).toInt());
+            }
+
+            // Give the sheet switch and the chart widgets a chance to lay out,
+            // then report and capture. grab() flushes pending layout, so the
+            // report is taken at the same moment as the pixels.
+            QTimer::singleShot(900, qApp, [calc, grabPath] {
+                // Force the document dirty so the autosave timer has something
+                // to write: that is the condition under which an imported
+                // workbook used to be overwritten.
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_DIRTY"))
+                    calc->devMarkDirty();
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_WHEEL")) {
+                    qWarning("[calc] before Ctrl+wheel:");
+                    calc->dumpSheetObjects();
+                    calc->devCtrlWheel(qEnvironmentVariable("NATIVEOFFICE_CALC_WHEEL").toInt());
+                    qWarning("[calc] after Ctrl+wheel:");
+                }
+                calc->dumpSheetObjects();
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_CELL"))
+                    for (const QString& ref :
+                         qEnvironmentVariable("NATIVEOFFICE_CALC_CELL").split(','))
+                        calc->dumpCell(ref.trimmed());
+                // Round-trip check: write the workbook back out so the exporter
+                // can be inspected with the file the user would be left with.
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_SAVEAS")) {
+                    const QString out = qEnvironmentVariable("NATIVEOFFICE_CALC_SAVEAS");
+                    qWarning("[calc] saveToPath(%s) -> %d",
+                             qUtf8Printable(out), int(calc->saveToPath(out)));
+                }
+                const QPixmap pm = calc->grab();
+                if (pm.save(grabPath)) qWarning("[calc] grabbed %s", qUtf8Printable(grabPath));
+                else                   qWarning("[calc] could not write %s", qUtf8Printable(grabPath));
+                // When the run is exercising autosave, stay alive long enough
+                // for several ticks rather than quitting before the first.
+                const int linger = qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_DIRTY") ? 9000 : 0;
+                QTimer::singleShot(linger, qApp, []{
+                    qApp->quit();
+                });
+            });
+        });
+    }
+
     auto& auth = NativeOffice::AuthManager::instance();
     // Bring the one real window to the front. Windows will not raise a window
     // for a process that does not own the foreground, so the minimised case is
@@ -3249,7 +3318,20 @@ int main(int argc, char* argv[]) {
     auto beginUpdateScan = [] {
         NativeOffice::UpdateChecker::instance().checkForUpdates();
     };
-    auto revealShell = [&shell, beginUpdateScan]() {
+    auto revealShell = [&shell, beginUpdateScan, devCapture]() {
+        if (devCapture) {
+            // Parked off the desktop: a real window with a real font engine,
+            // but nothing on screen to interrupt whoever is using the machine,
+            // and nothing covering their clicks either.
+            shell.setAttribute(Qt::WA_ShowWithoutActivating, true);
+            shell.setGeometry(-20000, -20000, 1600, 950);
+            shell.show();
+            shell.setGeometry(-20000, -20000, 1600, 950);
+            QTimer::singleShot(0, &shell, [&shell] {
+                shell.setGeometry(-20000, -20000, 1600, 950);
+            });
+            return;
+        }
         shell.show();
         shell.raise();
         shell.activateWindow();
