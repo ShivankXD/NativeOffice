@@ -84,8 +84,23 @@ struct Cell {
     QString    content;
     CellFormat format;
 
+    // ── Provenance, for a lossless .xlsx round trip ─────────────────────────
+    // The style index this cell carried in the file it was imported from, and
+    // the format that index resolved to. On save, a cell whose format still
+    // matches `xfFormat` is written with `xfIndex` again, so the workbook's own
+    // styles.xml never has to be regenerated - and if styles.xml survives, so
+    // can every other part of the package, charts and pictures included.
+    // -1 means "not imported", i.e. created or restyled in the app.
+    int        xfIndex { -1 };
+    CellFormat xfFormat;
+
     [[nodiscard]] bool isEmpty() const {
         return content.isEmpty() && format.isDefault();
+    }
+
+    // Whether this cell can still be written with its original style index.
+    [[nodiscard]] bool keepsOriginalStyle() const {
+        return xfIndex >= 0 && format == xfFormat;
     }
 
     bool operator==(const Cell& o) const {

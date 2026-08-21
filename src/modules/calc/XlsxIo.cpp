@@ -5,6 +5,7 @@
 // STORED (uncompressed) ZIP so no compressor is needed (Excel reads it fine).
 // ─────────────────────────────────────────────────────────────────────────────
 #include "XlsxIo.h"
+#include "XlsxDrawing.h"
 
 #include "core/watermark/Watermark.h"
 #include "core/watermark/WatermarkOoxml.h"
@@ -23,6 +24,11 @@
 
 namespace NativeOffice {
 namespace {
+
+// Upper bound for a <col> span. Files routinely write max=16384 for the
+// trailing default run, and expanding that into per-column entries would
+// mean 16k pointless overrides on every sheet.
+constexpr int SpreadsheetModelColLimit = 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Raw DEFLATE inflater (RFC 1951) — puff-style, self-contained.
@@ -215,17 +221,36 @@ public:
                     const QByteArray raw(reinterpret_cast<const char*>(d + dataAt),
                                          static_cast<int>(compSz));
                     m_files.insert(name, (method == 0) ? raw : inflateRaw(raw));
+                    m_lower.insert(name.toLower(), name);
+                    m_order << name;
                 }
             }
             p += 46 + fnLen + exLen + cmLen;
         }
         return !m_files.isEmpty();
     }
-    bool has(const QString& name) const { return m_files.contains(name); }
-    QByteArray file(const QString& name) const { return m_files.value(name); }
+    // Part names are matched case-insensitively. ECMA-376 compares them that
+    // way, and files in the wild mix cases between a part and its _rels entry;
+    // an exact match quietly loses every object the sheet points at.
+    // Part names in the order they appear in the archive, so a rewritten
+    // package keeps the original's layout.
+    QStringList names() const { return m_order; }
+
+    bool has(const QString& name) const {
+        return m_files.contains(name) || m_lower.contains(name.toLower());
+    }
+    QByteArray file(const QString& name) const {
+        const auto it = m_files.constFind(name);
+        if (it != m_files.constEnd()) return *it;
+        const auto lit = m_lower.constFind(name.toLower());
+        return lit == m_lower.constEnd() ? QByteArray() : m_files.value(*lit);
+    }
 private:
     QByteArray m_b;
     QHash<QString, QByteArray> m_files;
+    // lowercased name -> the name as actually stored in the archive
+    QHash<QString, QString> m_lower;
+    QStringList m_order;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,26 +273,49 @@ quint32 crc32(const QByteArray& data) {
     return c ^ 0xFFFFFFFFu;
 }
 
+// Raw DEFLATE (ZIP method 8) from Qt's zlib wrapper.
+//
+// qCompress returns: 4 bytes of Qt's own uncompressed-length prefix, then a
+// zlib stream (2-byte header, deflate payload, 4-byte adler32). A ZIP entry
+// wants the deflate payload on its own, so both ends are trimmed. Returns an
+// empty array when the input will not compress usefully.
+inline QByteArray deflateRaw(const QByteArray& src) {
+    if (src.isEmpty()) return {};
+    const QByteArray z = qCompress(src, 9);
+    if (z.size() <= 4 + 2 + 4) return {};
+    const QByteArray raw = z.mid(4 + 2, z.size() - (4 + 2) - 4);
+    return raw.size() < src.size() ? raw : QByteArray();
+}
+
 class ZipWriter {
 public:
     void add(const QString& name, const QByteArray& data) {
         const quint32 crc = crc32(data);
         const quint32 off = static_cast<quint32>(m_out.size());
         const QByteArray nm = name.toUtf8();
-        putU32(0x04034b50); putU16(20); putU16(0); putU16(0);
+
+        // Store the part only when compressing it would not help; the media in
+        // a workbook is already-compressed PNG/JPEG and gains nothing.
+        const QByteArray packed = deflateRaw(data);
+        const bool deflated = !packed.isEmpty();
+        const QByteArray& body = deflated ? packed : data;
+        const quint16 method = deflated ? 8 : 0;
+
+        putU32(0x04034b50); putU16(20); putU16(0); putU16(method);
         putU16(0); putU16(0);                          // mod time/date
-        putU32(crc); putU32(data.size()); putU32(data.size());
+        putU32(crc); putU32(body.size()); putU32(data.size());
         putU16(nm.size()); putU16(0);
-        m_out.append(nm); m_out.append(data);
-        m_dir.push_back({name, crc, static_cast<quint32>(data.size()), off});
+        m_out.append(nm); m_out.append(body);
+        m_dir.push_back({name, crc, static_cast<quint32>(body.size()),
+                         static_cast<quint32>(data.size()), off, method});
     }
     QByteArray finish() {
         const quint32 cdStart = static_cast<quint32>(m_out.size());
         for (const Entry& e : m_dir) {
             const QByteArray nm = e.name.toUtf8();
-            putU32(0x02014b50); putU16(20); putU16(20); putU16(0); putU16(0);
+            putU32(0x02014b50); putU16(20); putU16(20); putU16(0); putU16(e.method);
             putU16(0); putU16(0);
-            putU32(e.crc); putU32(e.size); putU32(e.size);
+            putU32(e.crc); putU32(e.packed); putU32(e.size);
             putU16(nm.size()); putU16(0); putU16(0); putU16(0); putU16(0);
             putU32(0); putU32(e.offset);
             m_out.append(nm);
@@ -279,7 +327,8 @@ public:
         return m_out;
     }
 private:
-    struct Entry { QString name; quint32 crc; quint32 size; quint32 offset; };
+    struct Entry { QString name; quint32 crc; quint32 packed; quint32 size;
+                   quint32 offset; quint16 method; };
     QByteArray m_out;
     QVector<Entry> m_dir;
     void putU16(quint32 v) { m_out.append(char(v & 0xFF)); m_out.append(char((v >> 8) & 0xFF)); }
@@ -306,6 +355,65 @@ QString colLabel(int col) {
     QString s; col += 1;
     while (col > 0) { int rem = (col - 1) % 26; s.prepend(QChar('A' + rem)); col = (col - 1) / 26; }
     return s;
+}
+
+// ── OPC part paths ───────────────────────────────────────────────────────────
+// Relationship targets are written relative to the part that owns them, so
+// "xl/worksheets/sheet1.xml" pointing at "../drawings/drawing1.xml" has to be
+// resolved back to "xl/drawings/drawing1.xml" before the ZIP can be asked for it.
+QString partDir(const QString& part) {
+    const int slash = part.lastIndexOf('/');
+    return slash < 0 ? QString() : part.left(slash);
+}
+
+QString relsPathFor(const QString& part) {
+    const int slash = part.lastIndexOf('/');
+    const QString dir  = slash < 0 ? QString()  : part.left(slash);
+    const QString file = slash < 0 ? part       : part.mid(slash + 1);
+    return (dir.isEmpty() ? QString() : dir + '/') + "_rels/" + file + ".rels";
+}
+
+QString resolveTarget(QString target, const QString& baseDir) {
+    if (target.isEmpty()) return target;
+    if (target.startsWith('/')) return target.mid(1);        // package-absolute
+
+    QStringList base = baseDir.isEmpty() ? QStringList()
+                                         : baseDir.split('/', Qt::SkipEmptyParts);
+    for (const QString& seg : target.split('/', Qt::SkipEmptyParts)) {
+        if (seg == ".") continue;
+        if (seg == "..") { if (!base.isEmpty()) base.removeLast(); continue; }
+        base << seg;
+    }
+    return base.join('/');
+}
+
+// rId -> resolved part path, for every relationship in a .rels part.
+QHash<QString, QString> parseRels(const QByteArray& xml, const QString& baseDir) {
+    QHash<QString, QString> out;
+    QXmlStreamReader r(xml);
+    while (!r.atEnd()) {
+        if (r.readNext() == QXmlStreamReader::StartElement && r.name() == u"Relationship") {
+            const QString id = r.attributes().value("Id").toString();
+            const QString tg = r.attributes().value("Target").toString();
+            // External targets (a linked, not embedded, image) cannot be read
+            // out of this package, so they are dropped rather than resolved.
+            if (r.attributes().value("TargetMode") == u"External") continue;
+            if (!id.isEmpty() && !tg.isEmpty()) out.insert(id, resolveTarget(tg, baseDir));
+        }
+    }
+    return out;
+}
+
+// The first relationship whose Type ends with `suffix`, resolved to a part path.
+QString firstRelOfType(const QByteArray& xml, const char* suffix, const QString& baseDir) {
+    QXmlStreamReader r(xml);
+    while (!r.atEnd()) {
+        if (r.readNext() == QXmlStreamReader::StartElement && r.name() == u"Relationship") {
+            if (r.attributes().value("Type").toString().endsWith(QLatin1String(suffix)))
+                return resolveTarget(r.attributes().value("Target").toString(), baseDir);
+        }
+    }
+    return QString();
 }
 
 // xlsx column width is in default-font character units; row height is in points.
@@ -340,6 +448,10 @@ QColor rgbColor(const QString& rgb) {
 QString attrS(QXmlStreamReader& r, const char* n) {
     return r.attributes().value(n).toString();
 }
+
+// A differential format: the styling a conditional-format rule applies when it
+// matches. Only the parts this app can render are kept.
+struct ImpDxf { QColor bg, fg; bool bold = false; };
 
 struct ImpFont   { bool bold=false, italic=false, underline=false; int size=0; QString name; QColor color; };
 struct ImpFill   { QColor fg; };
@@ -488,8 +600,217 @@ StyleSheetData parseStyles(const QByteArray& xml) {
     return st;
 }
 
+// Parse the <dxfs> block of styles.xml, indexed by dxfId.
+//
+// The trap here: inside a dxf the fill colour is written in <bgColor>, not
+// <fgColor> as it is for an ordinary cell style. Reading fgColor gives an
+// invalid colour and every rule silently paints nothing.
+std::vector<ImpDxf> parseDxfs(const QByteArray& xml) {
+    std::vector<ImpDxf> out;
+    QXmlStreamReader r(xml);
+    bool inDxfs = false, inFont = false, inFill = false;
+    ImpDxf cur;
+    while (!r.atEnd()) {
+        const auto tok = r.readNext();
+        if (tok == QXmlStreamReader::StartElement) {
+            const auto n = r.name();
+            if      (n == u"dxfs") inDxfs = true;
+            else if (!inDxfs)      continue;
+            else if (n == u"dxf")  { cur = ImpDxf{}; inFont = inFill = false; }
+            else if (n == u"font") inFont = true;
+            else if (n == u"fill") inFill = true;
+            else if (n == u"b")    { if (inFont) cur.bold = true; }
+            else if (n == u"color" && inFont) cur.fg = rgbColor(attrS(r, "rgb"));
+            else if (inFill && (n == u"bgColor" || n == u"fgColor")) {
+                const QColor c = rgbColor(attrS(r, "rgb"));
+                // bgColor is the fill in a dxf; fgColor only counts if bgColor
+                // never turns up.
+                if (c.isValid() && (n == u"bgColor" || !cur.bg.isValid())) cur.bg = c;
+            }
+        } else if (tok == QXmlStreamReader::EndElement) {
+            const auto n = r.name();
+            if      (n == u"dxfs") break;
+            else if (n == u"dxf")  out.push_back(cur);
+            else if (n == u"font") inFont = false;
+            else if (n == u"fill") inFill = false;
+        }
+    }
+    return out;
+}
+
+// Replace every whole-word use of a defined name with what it refers to.
+// Quoted text is stepped over so a name that also appears inside a string
+// literal is left alone.
+QString applyDefinedNames(const QString& formula,
+                          const QHash<QString, QString>& names) {
+    if (names.isEmpty() || formula.isEmpty()) return formula;
+
+    QString out;
+    out.reserve(formula.size());
+    int i = 0;
+    const int n = formula.size();
+    while (i < n) {
+        const QChar ch = formula.at(i);
+        if (ch == QLatin1Char('"')) {                 // copy the literal verbatim
+            out += ch;
+            for (++i; i < n; ++i) {
+                out += formula.at(i);
+                if (formula.at(i) == QLatin1Char('"')) { ++i; break; }
+            }
+            continue;
+        }
+        if (ch.isLetter() || ch == QLatin1Char('_')) {
+            const int start = i;
+            while (i < n && (formula.at(i).isLetterOrNumber()
+                             || formula.at(i) == QLatin1Char('_')
+                             || formula.at(i) == QLatin1Char('.'))) ++i;
+            const QString word = formula.mid(start, i - start);
+            // A name followed by '(' is a function call, and one followed by
+            // '!' is a sheet qualifier: neither is a defined-name use.
+            const QChar next = i < n ? formula.at(i) : QChar();
+            const bool isCall = (next == QLatin1Char('(') || next == QLatin1Char('!'));
+            const QString hit = isCall ? QString() : names.value(word.toUpper());
+            out += hit.isEmpty() ? word : hit;
+            continue;
+        }
+        out += ch;
+        ++i;
+    }
+    return out;
+}
+
+// "A1:B2 D5" -> the rectangles it names.
+std::vector<QRect> parseSqref(const QString& sqref) {
+    std::vector<QRect> out;
+    for (const QString& part : sqref.split(' ', Qt::SkipEmptyParts)) {
+        const QStringList ends = part.split(':');
+        int c1, r1, c2, r2;
+        QString a = ends.value(0); a.remove('$');
+        QString b = ends.value(ends.size() > 1 ? 1 : 0); b.remove('$');
+        if (!parseRef(a, c1, r1) || !parseRef(b, c2, r2)) continue;
+        out.push_back(QRect(QPoint(qMin(c1, c2), qMin(r1, r2)),
+                            QPoint(qMax(c1, c2), qMax(r1, r2))));
+    }
+    return out;
+}
+
+// Build a formula this app's engine can evaluate from a cfRule. Excel supplies
+// a ready-made <formula> for some rule types, but the ones it writes lean on
+// ISERROR/ISNUMBER which are not implemented here, so the text rules are
+// rebuilt from the rule's own `text` attribute instead.
+QString cfRuleFormula(const QString& type, const QString& op,
+                      const QString& text, const QStringList& formulas,
+                      const QString& topLeft) {
+    auto quoted = [&] {
+        QString t = text; t.replace('"', QStringLiteral("\"\""));
+        return QStringLiteral("\"") + t + QStringLiteral("\"");
+    };
+    if (type == "containsText")
+        return QStringLiteral("=IFERROR(SEARCH(%1,%2)>0,FALSE)").arg(quoted(), topLeft);
+    if (type == "notContainsText")
+        return QStringLiteral("=IFERROR(SEARCH(%1,%2)>0,FALSE)=FALSE").arg(quoted(), topLeft);
+    if (type == "beginsWith")
+        return QStringLiteral("=LEFT(%1,%2)=%3").arg(topLeft).arg(text.size()).arg(quoted());
+    if (type == "endsWith")
+        return QStringLiteral("=RIGHT(%1,%2)=%3").arg(topLeft).arg(text.size()).arg(quoted());
+    if (type == "cellIs") {
+        const QString a = formulas.value(0);
+        if (a.isEmpty()) return {};
+        static const QHash<QString, QString> ops {
+            {"equal", "="}, {"notEqual", "<>"}, {"greaterThan", ">"},
+            {"lessThan", "<"}, {"greaterThanOrEqual", ">="}, {"lessThanOrEqual", "<="}
+        };
+        if (op == "between" && formulas.size() > 1)
+            return QStringLiteral("=AND(%1>=%2,%1<=%3)").arg(topLeft, a, formulas.value(1));
+        const QString sym = ops.value(op);
+        if (sym.isEmpty()) return {};
+        return QStringLiteral("=%1%2%3").arg(topLeft, sym, a);
+    }
+    if (type == "expression") {
+        const QString f = formulas.value(0);
+        // Written without a leading '=' in the file.
+        return f.isEmpty() ? QString() : (f.startsWith('=') ? f : "=" + f);
+    }
+    // dataBar / colorScale / iconSet draw a graphic rather than a fill, which
+    // this app has no representation for yet, so they are skipped.
+    return {};
+}
+
+
+// Shift a formula's relative cell references by (dCol, dRow).
+//
+// Quoted text is copied through untouched, a name followed by '(' is a function
+// call rather than a reference, and a '$' pins the column or the row it precedes.
+QString shiftFormulaRefs(const QString& formula, int dCol, int dRow) {
+    if (dCol == 0 && dRow == 0) return formula;
+    QString out;
+    out.reserve(formula.size());
+    int i = 0;
+    const int n = formula.size();
+    while (i < n) {
+        const QChar ch = formula.at(i);
+        if (ch == QLatin1Char('"')) {
+            out += ch;
+            for (++i; i < n; ++i) { out += formula.at(i);
+                                    if (formula.at(i) == QLatin1Char('"')) { ++i; break; } }
+            continue;
+        }
+        if (ch == QLatin1Char('$') || ch.isLetter()) {
+            const int start = i;
+            bool colAbs = false, rowAbs = false;
+            int j = i;
+            if (formula.at(j) == QLatin1Char('$')) { colAbs = true; ++j; }
+            const int ls = j;
+            while (j < n && formula.at(j).isLetter()) ++j;
+            const QString letters = formula.mid(ls, j - ls);
+
+            // A function name, or a sheet qualifier: copy it and move on.
+            if (!colAbs && !letters.isEmpty()) {
+                int k = j;
+                while (k < n && formula.at(k).isSpace()) ++k;
+                if (k < n && (formula.at(k) == QLatin1Char('(')
+                              || formula.at(k) == QLatin1Char('!'))) {
+                    out += formula.mid(start, j - start);
+                    i = j;
+                    continue;
+                }
+            }
+
+            int j2 = j;
+            if (j2 < n && formula.at(j2) == QLatin1Char('$')) { rowAbs = true; ++j2; }
+            const int ds = j2;
+            while (j2 < n && formula.at(j2).isDigit()) ++j2;
+            const QString digits = formula.mid(ds, j2 - ds);
+
+            int col = 0, row = 0;
+            if (!letters.isEmpty() && !digits.isEmpty()
+                && parseRef(letters + digits, col, row)) {
+                if (!colAbs) col += dCol;
+                if (!rowAbs) row += dRow;
+                if (col < 0) col = 0;
+                if (row < 0) row = 0;
+                out += (colAbs ? QStringLiteral("$") : QString()) + colLabel(col)
+                     + (rowAbs ? QStringLiteral("$") : QString()) + QString::number(row + 1);
+                i = j2;
+                continue;
+            }
+            out += formula.mid(start, j - start);
+            i = j;
+            continue;
+        }
+        out += ch;
+        ++i;
+    }
+    return out;
+}
+
+struct SharedMaster { QString text; int col; int row; };
+
 void parseWorksheet(const QByteArray& xml, const QStringList& shared,
-                    const StyleSheetData& styles, XlsxSheet& sheet) {
+                    const StyleSheetData& styles, XlsxSheet& sheet,
+                    const std::vector<ImpDxf>& dxfs,
+                    const QHash<QString, QString>& definedNames) {
+    QHash<QString, SharedMaster> sharedMasters;
     QXmlStreamReader r(xml);
     while (!r.atEnd()) {
         if (r.readNext() != QXmlStreamReader::StartElement) continue;
@@ -498,23 +819,105 @@ void parseWorksheet(const QByteArray& xml, const QStringList& shared,
             if (!ref.isEmpty()) sheet.merges.push_back(ref);
             continue;
         }
+        if (r.name() == u"conditionalFormatting") {
+            const std::vector<QRect> ranges = parseSqref(attrS(r, "sqref"));
+            // Every rule in the block shares the block's range, and the rule
+            // formulas are written relative to that range's top-left cell.
+            while (!r.atEnd()) {
+                const auto t = r.readNext();
+                if (t == QXmlStreamReader::EndElement && r.name() == u"conditionalFormatting") break;
+                if (t != QXmlStreamReader::StartElement || r.name() != u"cfRule") continue;
+
+                const QString type = attrS(r, "type");
+                const QString op   = attrS(r, "operator");
+                const QString text = attrS(r, "text");
+                const int dxfId    = attrS(r, "dxfId").isEmpty() ? -1 : attrS(r, "dxfId").toInt();
+
+                QStringList formulas;
+                QColor barColor;
+                while (!r.atEnd()) {
+                    const auto t2 = r.readNext();
+                    if (t2 == QXmlStreamReader::EndElement && r.name() == u"cfRule") break;
+                    if (t2 != QXmlStreamReader::StartElement) continue;
+                    if (r.name() == u"formula")
+                        formulas << r.readElementText(QXmlStreamReader::IncludeChildElements);
+                    else if (r.name() == u"color")
+                        barColor = rgbColor(attrS(r, "rgb"));
+                }
+
+                // dataBar carries its colour in a <color> child rather than
+                // in a dxf, and has no dxfId at all.
+                if (type == "dataBar") {
+                    if (!barColor.isValid()) continue;
+                    for (const QRect& rc : ranges) {
+                        CondFormatRule rule;
+                        rule.range    = rc;
+                        rule.barColor = barColor;
+                        sheet.condRules.push_back(rule);
+                    }
+                    continue;
+                }
+
+                if (dxfId < 0 || dxfId >= (int)dxfs.size()) continue;
+                const ImpDxf& dx = dxfs[dxfId];
+                if (!dx.bg.isValid() && !dx.fg.isValid() && !dx.bold) continue;
+
+                for (const QRect& rc : ranges) {
+                    const QString topLeft = colLabel(rc.left()) + QString::number(rc.top() + 1);
+                    // Rule formulas use defined names exactly as cell formulas
+                    // do, and a rule that fails to parse simply never matches,
+                    // which is why the whole Gantt band stayed blank.
+                    QStringList resolved;
+                    for (const QString& fx : formulas)
+                        resolved << applyDefinedNames(fx, definedNames);
+                    const QString f = cfRuleFormula(type, op, text, resolved, topLeft);
+                    if (f.isEmpty()) continue;
+                    CondFormatRule rule;
+                    rule.range     = rc;
+                    rule.formula   = f;
+                    rule.bgColor   = dx.bg;
+                    rule.textColor = dx.fg;
+                    rule.bold      = dx.bold;
+                    sheet.condRules.push_back(rule);
+                }
+            }
+            continue;
+        }
+        if (r.name() == u"sheetView") {
+            const QString z = attrS(r, "zoomScale");
+            if (!z.isEmpty()) {
+                const int zi = z.toInt();
+                if (zi >= 10 && zi <= 400) sheet.zoomScale = zi;
+            }
+            // Absent means shown; only an explicit "0" hides the grid.
+            const QString g = attrS(r, "showGridLines");
+            if (g == "0" || g == "false") sheet.showGridLines = false;
+            continue;
+        }
         if (r.name() == u"col") {
+            const int mn = attrS(r, "min").toInt();
+            const int mx = std::min(attrS(r, "max").toInt(), SpreadsheetModelColLimit);
             if (attrS(r, "customWidth") == "1") {
-                const int mn = attrS(r, "min").toInt();
-                const int mx = std::min(attrS(r, "max").toInt(), 256);
                 const double w = attrS(r, "width").toDouble();
                 if (mn >= 1 && w > 0)
                     for (int c = mn; c <= mx; ++c)
                         sheet.colWidths.push_back({c - 1, colWidthToPx(w)});
             }
+            // Hidden is its own attribute: a hidden column still carries a
+            // width, and leaving it visible shifts everything to its right.
+            if (mn >= 1 && attrS(r, "hidden") == "1")
+                for (int c = mn; c <= mx; ++c)
+                    sheet.hiddenCols.push_back(c - 1);
             continue;
         }
         if (r.name() == u"row") {
+            const int rowNo = attrS(r, "r").toInt();
             if (attrS(r, "customHeight") == "1") {
-                const int rr = attrS(r, "r").toInt();
                 const double ht = attrS(r, "ht").toDouble();
-                if (rr >= 1 && ht > 0) sheet.rowHeights.push_back({rr - 1, rowHtToPx(ht)});
+                if (rowNo >= 1 && ht > 0) sheet.rowHeights.push_back({rowNo - 1, rowHtToPx(ht)});
             }
+            if (rowNo >= 1 && attrS(r, "hidden") == "1")
+                sheet.hiddenRows.push_back(rowNo - 1);
             continue;   // cells are emitted as separate <c> StartElements
         }
         if (r.name() != u"c") continue;
@@ -523,19 +926,48 @@ void parseWorksheet(const QByteArray& xml, const QStringList& shared,
         const QString type = r.attributes().value("t").toString();
         const QString sAttr = r.attributes().value("s").toString();
         QString formula, value, inlineStr;
+        QString sharedType, sharedIdx;
 
         while (!(r.tokenType() == QXmlStreamReader::EndElement && r.name() == u"c")) {
             if (r.atEnd()) break;
             r.readNext();
             if (r.tokenType() == QXmlStreamReader::StartElement) {
-                if (r.name() == u"f")       formula   = r.readElementText(QXmlStreamReader::IncludeChildElements);
+                if (r.name() == u"f") {
+                    sharedType = attrS(r, "t");
+                    sharedIdx  = attrS(r, "si");
+                    formula    = r.readElementText(QXmlStreamReader::IncludeChildElements);
+                }
                 else if (r.name() == u"v")  value     = r.readElementText(QXmlStreamReader::IncludeChildElements);
                 else if (r.name() == u"is") inlineStr = r.readElementText(QXmlStreamReader::IncludeChildElements);
             }
         }
 
+        // ── Shared formulas ─────────────────────────────────────────
+        // The first cell of a run carries the text; the rest carry only the
+        // shared id and the value Excel cached. Re-emit the master's text,
+        // shifted to this cell, so the formula stays a formula.
+        if (sharedType == QLatin1String("shared") && !sharedIdx.isEmpty()) {
+            int c0 = 0, r0 = 0;
+            if (!formula.isEmpty()) {
+                if (parseRef(ref, c0, r0))
+                sharedMasters.insert(sharedIdx, {formula, c0, r0});
+            } else {
+                const auto it = sharedMasters.constFind(sharedIdx);
+                if (it != sharedMasters.constEnd() && parseRef(ref, c0, r0))
+                formula = shiftFormulaRefs(it->text, c0 - it->col, r0 - it->row);
+            }
+        }
+
         QString content;
         if (!formula.isEmpty()) {
+            // Excel marks functions newer than the file's baseline version with
+            // an "_xlfn." (and worksheet-only ones with "_xlws.") prefix. It is
+            // a forward-compatibility marker in the serialized form only: the
+            // function is plain XLOOKUP. Leaving the prefix on meant every one
+            // of them evaluated to #ERR even once the function was implemented.
+            formula.remove(QStringLiteral("_xlfn."));
+            formula.remove(QStringLiteral("_xlws."));
+            formula = applyDefinedNames(formula, definedNames);
             content = "=" + formula;
         } else if (type == "s") {
             const int idx = value.toInt();
@@ -555,7 +987,8 @@ void parseWorksheet(const QByteArray& xml, const QStringList& shared,
 
         int col = 0, row = 0;
         if ((!content.isEmpty() || !fmt.isDefault()) && parseRef(ref, col, row))
-            sheet.cells.push_back({col, row, content, fmt});
+            sheet.cells.push_back({col, row, content, fmt,
+                                   sAttr.isEmpty() ? -1 : sAttr.toInt()});
     }
 }
 
@@ -580,8 +1013,11 @@ bool importXlsx(const QString& path, std::vector<XlsxSheet>& outSheets) {
     if (zip.has("xl/sharedStrings.xml"))
         shared = parseSharedStrings(zip.file("xl/sharedStrings.xml"));
     StyleSheetData styles;
-    if (zip.has("xl/styles.xml"))
+    std::vector<ImpDxf> dxfs;
+    if (zip.has("xl/styles.xml")) {
         styles = parseStyles(zip.file("xl/styles.xml"));
+        dxfs   = parseDxfs(zip.file("xl/styles.xml"));
+    }
 
     // workbook rels: rId → target part.
     QHash<QString, QString> ridToTarget;
@@ -598,8 +1034,35 @@ bool importXlsx(const QString& path, std::vector<XlsxSheet>& outSheets) {
         }
     }
 
+    // The workbook's colour scheme. Drawings name their colours through it far
+    // more often than they spell out RGB, so a missing theme is why shapes and
+    // chart series used to come out uncoloured.
+    ThemeColors theme;
+    for (const QString& tgt : ridToTarget) {
+        if (tgt.contains(QLatin1String("theme"), Qt::CaseInsensitive)
+            && tgt.endsWith(QLatin1String(".xml"), Qt::CaseInsensitive) && zip.has(tgt)) {
+            theme = parseThemeColors(zip.file(tgt));
+            if (!theme.isEmpty()) break;
+        }
+    }
+
+    // Defined names: NAME -> what it refers to. The built-in _xlnm.* entries
+    // (print areas and the like) are layout metadata, not formula values.
+    QHash<QString, QString> definedNames;
+    if (zip.has("xl/workbook.xml")) {
+        QXmlStreamReader r(zip.file("xl/workbook.xml"));
+        while (!r.atEnd()) {
+            if (r.readNext() == QXmlStreamReader::StartElement && r.name() == u"definedName") {
+                const QString nm = r.attributes().value("name").toString();
+                const QString to = r.readElementText(QXmlStreamReader::IncludeChildElements).trimmed();
+                if (!nm.isEmpty() && !to.isEmpty() && !nm.startsWith(QLatin1String("_xlnm")))
+                    definedNames.insert(nm.toUpper(), to);
+            }
+        }
+    }
+
     // workbook: ordered sheets (name + rId).
-    struct SheetRef { QString name; QString rid; };
+    struct SheetRef { QString name; QString rid; bool hidden = false; };
     QVector<SheetRef> sheetRefs;
     if (zip.has("xl/workbook.xml")) {
         QXmlStreamReader r(zip.file("xl/workbook.xml"));
@@ -609,6 +1072,8 @@ bool importXlsx(const QString& path, std::vector<XlsxSheet>& outSheets) {
                 for (const auto& a : r.attributes()) {
                     if (a.name() == u"name") sr.name = a.value().toString();
                     else if (a.name() == u"id") sr.rid = a.value().toString();  // r:id
+                    else if (a.name() == u"state")
+                        sr.hidden = (a.value() == u"hidden" || a.value() == u"veryHidden");
                 }
                 sheetRefs.push_back(sr);
             }
@@ -620,7 +1085,25 @@ bool importXlsx(const QString& path, std::vector<XlsxSheet>& outSheets) {
         if (part.isEmpty() || !zip.has(part)) continue;
         XlsxSheet sheet;
         sheet.name = sr.name.isEmpty() ? QString("Sheet%1").arg(outSheets.size() + 1) : sr.name;
-        parseWorksheet(zip.file(part), shared, styles, sheet);
+        sheet.hidden = sr.hidden;
+        parseWorksheet(zip.file(part), shared, styles, sheet, dxfs, definedNames);
+
+        // Charts and pictures live in a separate drawing part that the sheet
+        // points at through its relationship file. A sheet has at most one.
+        const QString relsPart = relsPathFor(part);
+        if (zip.has(relsPart)) {
+            const QString drawPart = firstRelOfType(zip.file(relsPart), "/drawing", partDir(part));
+            if (!drawPart.isEmpty() && zip.has(drawPart)) {
+                QHash<QString, QString> drawRels;
+                const QString drawRelsPart = relsPathFor(drawPart);
+                if (zip.has(drawRelsPart))
+                    drawRels = parseRels(zip.file(drawRelsPart), partDir(drawPart));
+                parseSheetDrawing(zip.file(drawPart), drawRels,
+                                  [&zip](const QString& p) { return zip.file(p); },
+                                  sheet.charts, sheet.images, sheet.shapes, theme);
+            }
+        }
+
         outSheets.push_back(std::move(sheet));
     }
 
@@ -856,6 +1339,149 @@ QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles) {
 }
 
 } // namespace
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preserving export, see XlsxIo.h
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+// Replace the <sheetData> element of a worksheet part, leaving every other
+// element (cols, drawing references, merges, pageSetup, the lot) exactly as it
+// was. Returns false when the element cannot be located.
+bool spliceSheetData(QByteArray& xml, const QByteArray& newSheetData) {
+    const int selfClosing = xml.indexOf("<sheetData/>");
+    if (selfClosing >= 0) {
+        xml.replace(selfClosing, int(strlen("<sheetData/>")), newSheetData);
+        return true;
+    }
+    const int open = xml.indexOf("<sheetData");
+    if (open < 0) return false;
+    const int openEnd = xml.indexOf('>', open);
+    if (openEnd < 0) return false;
+    const int close = xml.indexOf("</sheetData>", openEnd);
+    if (close < 0) return false;
+    const int end = close + int(strlen("</sheetData>"));
+    xml.replace(open, end - open, newSheetData);
+    return true;
+}
+
+// The cells of one sheet as a <sheetData> block, re-using each cell's original
+// style index. Returns false if any cell needs a style the file does not have.
+bool buildPreservedSheetData(const XlsxSheet& sh, QByteArray& out) {
+    // Group by row; a row element must list its cells in column order and the
+    // rows must be in row order.
+    QMap<int, QMap<int, const XlsxCell*>> rows;
+    for (const XlsxCell& c : sh.cells) {
+        if (c.content.isEmpty() && c.format.isDefault() && c.xfIndex < 0) continue;
+        rows[c.row][c.col] = &c;
+    }
+
+    QString s = "<sheetData>";
+    for (auto rit = rows.begin(); rit != rows.end(); ++rit) {
+        s += QString("<row r=\"%1\">").arg(rit.key() + 1);
+        for (auto cit = rit.value().begin(); cit != rit.value().end(); ++cit) {
+            const XlsxCell& c = *cit.value();
+            const QString ref = colLabel(c.col) + QString::number(c.row + 1);
+
+            // A cell restyled in the app has no index the original file knows.
+            if (c.xfIndex < 0 && !c.format.isDefault()) return false;
+
+            QString attrs = QString(" r=\"%1\"").arg(ref);
+            if (c.xfIndex >= 0) attrs += QString(" s=\"%1\"").arg(c.xfIndex);
+
+            if (c.content.startsWith('=')) {
+                s += "<c" + attrs + "><f>"
+                   + xmlEscape(c.content.mid(1)) + "</f></c>";
+            } else if (c.content.isEmpty()) {
+                s += "<c" + attrs + "/>";
+            } else {
+                bool isNum = false;
+                const double d = c.content.toDouble(&isNum);
+                if (isNum) {
+                    s += "<c" + attrs + "><v>"
+                       + QString::number(d, 'g', 15) + "</v></c>";
+                } else {
+                    // Inline string: avoids having to rewrite sharedStrings.xml,
+                    // and Excel/WPS read it identically.
+                    s += "<c" + attrs + " t=\"inlineStr\"><is><t xml:space=\"preserve\">"
+                       + xmlEscape(c.content) + "</t></is></c>";
+                }
+            }
+        }
+        s += "</row>";
+    }
+    s += "</sheetData>";
+    out = s.toUtf8();
+    return true;
+}
+
+} // namespace
+
+bool exportXlsxPreserving(const QString& path,
+                          const std::vector<XlsxSheet>& sheets,
+                          const QByteArray& original) {
+    if (original.isEmpty() || sheets.empty()) return false;
+
+    ZipReader zip;
+    if (!zip.open(original)) return false;
+    if (!zip.has("xl/workbook.xml")) return false;
+
+    // Sheet parts in workbook order, exactly as the importer resolves them.
+    QHash<QString, QString> ridToTarget;
+    if (zip.has("xl/_rels/workbook.xml.rels")) {
+        QXmlStreamReader r(zip.file("xl/_rels/workbook.xml.rels"));
+        while (!r.atEnd()) {
+            if (r.readNext() == QXmlStreamReader::StartElement && r.name() == u"Relationship") {
+                const QString id = r.attributes().value("Id").toString();
+                QString tgt = r.attributes().value("Target").toString();
+                if (tgt.startsWith('/')) tgt = tgt.mid(1); else tgt = "xl/" + tgt;
+                ridToTarget.insert(id, tgt);
+            }
+        }
+    }
+    QStringList sheetParts;
+    {
+        QXmlStreamReader r(zip.file("xl/workbook.xml"));
+        while (!r.atEnd()) {
+            if (r.readNext() == QXmlStreamReader::StartElement && r.name() == u"sheet") {
+                QString rid;
+                for (const auto& a : r.attributes())
+                    if (a.name() == u"id") rid = a.value().toString();
+                const QString part = ridToTarget.value(rid);
+                if (part.isEmpty() || !zip.has(part)) return false;
+                sheetParts << part;
+            }
+        }
+    }
+    // The sheet set must line up; anything else (added or removed sheets) needs
+    // the workbook rebuilt, which this path deliberately does not do.
+    if (sheetParts.size() != int(sheets.size())) return false;
+
+    // Regenerate each worksheet.
+    QHash<QString, QByteArray> replaced;
+    for (int i = 0; i < sheetParts.size(); ++i) {
+        QByteArray sheetData;
+        if (!buildPreservedSheetData(sheets[i], sheetData)) return false;
+        QByteArray xml = zip.file(sheetParts[i]);
+        if (xml.isEmpty()) return false;
+        if (!spliceSheetData(xml, sheetData)) return false;
+        replaced.insert(sheetParts[i], xml);
+    }
+
+    // Write the package back out: every original part, with the worksheets
+    // swapped for the regenerated ones.
+    ZipWriter out;
+    for (const QString& name : zip.names())
+        out.add(name, replaced.contains(name) ? replaced.value(name) : zip.file(name));
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    const QByteArray bytes = out.finish();
+    const bool ok = f.write(bytes) == bytes.size();
+    f.close();
+    return ok;
+}
 
 bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
     const int nSheets = std::max<int>(1, static_cast<int>(sheets.size()));
