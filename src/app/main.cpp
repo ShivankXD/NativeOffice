@@ -3243,6 +3243,12 @@ int main(int argc, char* argv[]) {
                     calc->devCtrlWheel(qEnvironmentVariable("NATIVEOFFICE_CALC_WHEEL").toInt());
                     qWarning("[calc] after Ctrl+wheel:");
                 }
+                // A chart made in the app, not read out of the file. The
+                // exporter cannot write one, so this is how the save-cost
+                // report is checked for an object that will be lost.
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_ADDCHART"))
+                    calc->addChartAt(NativeOffice::ChartType::Column,
+                                     QRect(0, 0, 2, 5), QRect(40, 40, 320, 220));
                 calc->dumpSheetObjects();
                 if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_CELL"))
                     for (const QString& ref :

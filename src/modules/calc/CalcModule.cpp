@@ -2831,6 +2831,13 @@ void CalcModule::dumpSheetObjects() const {
              m_model ? m_model->charts().size() : 0,
              m_model ? m_model->images().size() : 0,
              m_model ? m_model->shapes().size() : 0);
+    {
+        std::vector<XlsxSheet> probe;
+        buildXlsxSheets(probe);
+        qWarning("[calc] .xlsx save: package preserved %s, %d object(s) lost",
+                 canPreserveXlsx(probe, m_originalXlsx) ? "yes" : "no",
+                 objectsLostOnXlsxSave());
+    }
 
     int onScreen = 0;
     for (ChartObject* c : m_chartObjs) {
