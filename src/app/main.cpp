@@ -2059,6 +2059,7 @@ private:
 static MainShell* g_shell = nullptr;
 
 static void presentEditor(EditorWindow* win) {
+    if (!win) return;           // the file was refused; nothing to present
     if (g_shell) g_shell->addEditorTab(win);
     else         win->show();   // fallback (should not happen in normal flow)
 }
@@ -2910,11 +2911,43 @@ static void openFromTemplate(NativeOffice::DocumentType type, const QString& nam
 // the PDF tool hub (pre-loaded with that file); everything else is classified
 // by FileRouter::detectFileType(), which reads the content itself.
 // ─────────────────────────────────────────────────────────────────────────────
+// True when `path` claims to be an OOXML package but does not begin with the
+// ZIP signature every one of them starts with.
+static bool looksLikeBrokenOoxml(const QString& path) {
+    static const char* kExts[] = { ".xlsx", ".xlsm", ".docx", ".pptx" };
+    bool claims = false;
+    for (const char* e : kExts)
+        if (path.endsWith(QLatin1String(e), Qt::CaseInsensitive)) { claims = true; break; }
+    if (!claims) return false;
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;   // let the normal path report it
+    const QByteArray head = f.read(2);
+    f.close();
+    return head != QByteArray("PK");
+}
+
 static EditorWindow* createWindowForPath(const QString& path) {
     using NativeOffice::DetectedFileType;
 
     if (path.endsWith(".pdf", Qt::CaseInsensitive))
         return createPdfWindow(path);
+
+    // A mislabelled file used to be routed by its contents, so an HTML error
+    // page saved as .xlsx opened in Writer and took the better part of a minute
+    // to lay out. Nothing about that told the user their download was broken.
+    if (looksLikeBrokenOoxml(path)) {
+        // Parented to the shell so it lands over the app rather than as an
+        // orphan window the user has to hunt for.
+        QMessageBox::warning(
+            g_shell ? static_cast<QWidget*>(g_shell) : nullptr,
+            QStringLiteral("Cannot open this file"),
+            QStringLiteral("\"%1\" is not a valid Office file.\n\n"
+                           "Its name says it is, but the contents are something "
+                           "else. The download was probably incomplete.")
+                .arg(QFileInfo(path).fileName()));
+        return nullptr;
+    }
 
     // Markdown belongs to the Markdown Editor, not Writer: FileRouter classifies
     // it as plain text, which used to open it as a document and throw away the
@@ -3096,7 +3129,8 @@ int main(int argc, char* argv[]) {
         });
         QObject::connect(s, &NativeOffice::StartScreen::fileOpenRequested,
                          s, [s, &shell](const QString& path) {
-            shell.presentInHomeTab(s, createWindowForPath(path));
+            if (EditorWindow* w = createWindowForPath(path))
+                shell.presentInHomeTab(s, w);
         });
         QObject::connect(s, &NativeOffice::StartScreen::templateChosen,
                          s, [s, &shell](NativeOffice::DocumentType type, const QString& name) {
