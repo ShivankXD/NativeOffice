@@ -18,6 +18,14 @@ add_library(CalcModule STATIC
     Cell.h
     XlsxIo.cpp
     XlsxIo.h
+    # Charts and pictures drawn over the cells. Split out of XlsxIo because the
+    # drawing/chart schemas are their own world and the parser needs no ZIP.
+    XlsxDrawing.cpp
+    XlsxDrawing.h
+    # Drawn shapes (banners, buttons, callouts, rules). Rendering them is its
+    # own job: the parser hands over geometry, fill and text, this paints it.
+    ShapeObject.cpp
+    ShapeObject.h
     # JSON/YAML converter. Self-contained: delete these four files and the
     # importStructuredData/copySelectionAsJson/copySelectionAsYaml calls in
     # CalcModule to remove the feature entirely.

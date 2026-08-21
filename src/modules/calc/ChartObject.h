@@ -10,6 +10,7 @@
 #include <QRect>
 #include <QPoint>
 #include <QString>
+#include <functional>
 
 #include "ChartSpec.h"
 
@@ -17,6 +18,7 @@ class QLabel;
 class QToolButton;
 QT_BEGIN_NAMESPACE
 class QChartView;
+class QValueAxis;
 QT_END_NAMESPACE
 
 namespace NativeOffice {
@@ -26,16 +28,31 @@ class SpreadsheetModel;
 class ChartObject : public QFrame {
     Q_OBJECT
 public:
+    // An imported chart can plot cells from a sheet other than the one it sits
+    // on, so the object needs a way to reach sibling sheets by name.
+    using SheetResolver = std::function<SpreadsheetModel*(const QString&)>;
+
     ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget* parent);
+
+    // Must be set before the first rebuild for cross-sheet references to
+    // resolve; without it they fall back to the sheet the chart sits on.
+    void setSheetResolver(SheetResolver r) { m_resolveSheet = std::move(r); }
 
     // Rebuild the chart from the model + range (call after data changes).
     void rebuild();
 
+    // The stored spec with the object's current placement folded back in.
     [[nodiscard]] ChartSpec spec() const;
-    [[nodiscard]] ChartType type() const { return m_type; }
-    [[nodiscard]] QRect     range() const { return m_range; }
+    [[nodiscard]] ChartType type() const { return m_spec.type; }
+    [[nodiscard]] QRect     range() const { return m_spec.range; }
+    [[nodiscard]] const CellAnchor& anchor() const { return m_spec.anchor; }
+    void setAnchor(const CellAnchor& a) { m_spec.anchor = a; }
 
-    void setChartType(ChartType t) { m_type = t; rebuild(); }
+    void setChartType(ChartType t) { m_spec.type = t; rebuild(); }
+
+private:
+    void applyValueAxisFormat(QValueAxis* axis) const;
+public:
 
     // Excel-style: chrome (border + handles + delete) only shows when selected.
     void setSelected(bool on);
@@ -56,10 +73,12 @@ protected:
 
 private:
     SpreadsheetModel* m_model { nullptr };
-    ChartType         m_type  { ChartType::Column };
-    QRect             m_range;
+    // The whole imported description is kept, not just type+range: dragging a
+    // chart round-trips through spec(), and rebuilding it from three fields
+    // would silently throw away an imported chart's series and title.
+    ChartSpec         m_spec;
+    SheetResolver     m_resolveSheet;
 
-    QToolButton* m_closeBtn { nullptr };
     QWidget*     m_grip     { nullptr };
     QChartView*  m_view     { nullptr };
 

@@ -43,12 +43,13 @@ QString chartTypeName(ChartType t) {
     case ChartType::Area:    return "Area";
     case ChartType::Pie:     return "Pie";
     case ChartType::Scatter: return "Scatter";
+    case ChartType::Doughnut:return "Doughnut";
     }
     return "Chart";
 }
 
 ChartType chartTypeFromInt(int v) {
-    if (v < 0 || v > int(ChartType::Scatter)) return ChartType::Column;
+    if (v < 0 || v > int(ChartType::Doughnut)) return ChartType::Column;
     return static_cast<ChartType>(v);
 }
 
@@ -56,8 +57,7 @@ ChartType chartTypeFromInt(int v) {
 ChartObject::ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget* parent)
     : QFrame(parent)
     , m_model(model)
-    , m_type(spec.type)
-    , m_range(spec.range)
+    , m_spec(spec)
 {
     setObjectName("chartObject");
     setFrameShape(QFrame::NoFrame);
@@ -65,32 +65,29 @@ ChartObject::ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget
     // Solid object that swallows clicks (so they don't fall through to the grid).
     setAttribute(Qt::WA_NoMousePropagation);
     setCursor(Qt::SizeAllCursor);   // drag the body to move it (Excel-style)
-    setStyleSheet(
-        "QFrame#chartObject{background:#FFFFFF;border:1px solid #C2C7CE;}");
+    // No card and no border: the chart's own plot area is the whole object, so
+    // it sits on the cells instead of looking like a window opened over them.
+    setStyleSheet("QFrame#chartObject{background:transparent;border:none;}");
 
     auto* v = new QVBoxLayout(this);
-    v->setContentsMargins(1, 1, 1, 1);
+    v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(0);
 
     // ── Chart view (fills the object; transparent to mouse so the body drags) ──
     m_view = new QChartView(this);
     m_view->setRenderHint(QPainter::Antialiasing);
-    m_view->setStyleSheet("background:#FFFFFF;border:none;");
+    // The view is a QGraphicsView: both the widget and its scene background
+    // have to be cleared or it paints its own opaque backdrop first.
+    m_view->setFrameShape(QFrame::NoFrame);
+    m_view->setStyleSheet("background:transparent;border:none;");
+    m_view->setBackgroundBrush(Qt::NoBrush);
+    m_view->viewport()->setAutoFillBackground(false);
     m_view->setAttribute(Qt::WA_TransparentForMouseEvents);
     v->addWidget(m_view, 1);
 
-    // ── Small delete button, top-right corner ──────────────────────────────────
-    m_closeBtn = new QToolButton(this);
-    m_closeBtn->setText("\xE2\x9C\x95");
-    m_closeBtn->setCursor(Qt::ArrowCursor);
-    m_closeBtn->setFixedSize(16, 16);
-    m_closeBtn->setToolTip("Delete chart");
-    m_closeBtn->setFocusPolicy(Qt::NoFocus);
-    m_closeBtn->setStyleSheet(
-        "QToolButton{border:none;background:rgba(255,255,255,210);color:#8A8A8A;"
-        "font-size:11px;border-radius:2px;}"
-        "QToolButton:hover{color:#E8372A;background:#FDECEA;}");
-    connect(m_closeBtn, &QToolButton::clicked, this, [this]{ emit closed(this); });
+    // There is deliberately no close button. A little cross floating over the
+    // sheet made every chart look like a dialog; selecting the object and
+    // pressing Delete, or using its context menu, is how a spreadsheet does it.
 
     // ── Resize grip (bottom-right) ────────────────────────────────────────────
     m_grip = new QWidget(this);
@@ -105,23 +102,22 @@ ChartObject::ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget
 }
 
 void ChartObject::setSelected(bool on) {
-    setStyleSheet(QString("QFrame#chartObject{background:#FFFFFF;border:1px %1;}")
-                      .arg(on ? "solid #1A73E8" : "solid transparent"));
-    if (m_closeBtn) m_closeBtn->setVisible(on);
-    if (m_grip)     m_grip->setVisible(on);
+    // Selected: a thin accent outline and the resize grip. Unselected: nothing
+    // at all, so the object is indistinguishable from part of the sheet.
+    setStyleSheet(on
+        ? QStringLiteral("QFrame#chartObject{background:transparent;border:1px solid #1A73E8;}")
+        : QStringLiteral("QFrame#chartObject{background:transparent;border:none;}"));
+    if (m_grip) m_grip->setVisible(on);
 }
 
 ChartSpec ChartObject::spec() const {
-    ChartSpec s;
-    s.type  = m_type;
-    s.range = m_range;
-    s.geom  = geometry();
+    ChartSpec s = m_spec;      // series, title, categories and anchor survive
+    s.geom = geometry();
     return s;
 }
 
 void ChartObject::resizeEvent(QResizeEvent* e) {
     QFrame::resizeEvent(e);
-    if (m_closeBtn) { m_closeBtn->move(width() - 18, 2); m_closeBtn->raise(); }
     if (m_grip) {
         m_grip->move(width() - m_grip->width(), height() - m_grip->height());
         m_grip->raise();
@@ -211,77 +207,201 @@ bool ChartObject::eventFilter(QObject* w, QEvent* e) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Build the chart from the model range.
 // ─────────────────────────────────────────────────────────────────────────────
+// Translate the file's value-axis number format into the label format Qt uses.
+// Only the shape matters here (currency, thousands, decimals); the full
+// OOXML format grammar is not reimplemented for an axis label.
+void ChartObject::applyValueAxisFormat(QValueAxis* axis) const {
+    if (!axis) return;
+    const QString code = m_spec.valueAxisFormat;
+    // No format in the file: leave Qt's own label formatting alone. Forcing
+    // "%.0f" here rounded fractional values (a 4.2 GPA axis read as 4).
+    if (code.isEmpty()) return;
+
+    const bool currency  = code.contains('$');
+    const bool percent   = code.contains('%');
+    int decimals = 0;
+    const int dot = code.indexOf('.');
+    if (dot >= 0)
+        for (int i = dot + 1; i < code.size() && (code[i] == '0' || code[i] == '#'); ++i)
+            ++decimals;
+
+    // Qt's axis label format is printf-style and cannot group thousands, while
+    // its own locale-aware formatting (used when no format is set) can but has
+    // no way to carry a currency symbol. So: keep the symbol when the file asks
+    // for one, and otherwise leave the labels to the locale so large numbers
+    // read as 1,500,000 rather than 1500000.
+    if (!currency && !percent) return;
+
+    QString fmt = QStringLiteral("%.") + QString::number(decimals) + QLatin1Char('f');
+    if (currency) fmt.prepend(QLatin1Char('$'));
+    if (percent)  fmt.append(QLatin1Char('%'));
+    axis->setLabelFormat(fmt);
+}
+
 void ChartObject::rebuild() {
     if (!m_model) return;
-    const int c1 = m_range.left(), c2 = m_range.right();
-    const int r1 = m_range.top(),  r2 = m_range.bottom();
 
-    auto disp  = [&](int c, int r) { return m_model->displayValue(c, r); };
-    auto isNum = [&](int c, int r) {
-        const QString d = disp(c, r);
-        if (d.isEmpty()) return false;
-        bool ok = false; d.toDouble(&ok); return ok;
+    struct Series { QString name; QVector<double> vals; QColor color; QVector<QColor> pointColors; };
+    QStringList     cats;
+    QVector<Series> series;
+    QString         explicitTitle = m_spec.title;
+
+    // Reading a range out of whichever sheet a reference names. A chart that
+    // came from a file often plots a different sheet than the one it sits on.
+    auto sheetFor = [&](const QString& name) -> SpreadsheetModel* {
+        if (name.isEmpty() || !m_resolveSheet) return m_model;
+        SpreadsheetModel* m = m_resolveSheet(name);
+        return m ? m : m_model;
+    };
+    // Cells of a range in reading order, so a row range and a column range both
+    // come back as a flat list of points.
+    auto readRange = [&](SpreadsheetModel* m, const QRect& r) {
+        QStringList out;
+        if (!m || r.isNull()) return out;
+        for (int row = r.top(); row <= r.bottom(); ++row)
+            for (int col = r.left(); col <= r.right(); ++col)
+                out << m->displayValue(col, row);
+        return out;
     };
 
-    // Header row: top row carries text labels and there is data below it.
-    bool headerRow = false;
-    if (r2 > r1)
-        for (int c = c1; c <= c2; ++c)
-            if (!disp(c, r1).isEmpty() && !isNum(c, r1)) { headerRow = true; break; }
-    const int firstDataRow = headerRow ? r1 + 1 : r1;
+    if (m_spec.isExplicit()) {
+        // ── Imported chart: every series names its own range ──────────────
+        SpreadsheetModel* catModel = sheetFor(m_spec.catSheet);
+        cats = readRange(catModel, m_spec.catRange);
+        // Some producers write no cached labels and some write no live range;
+        // whichever exists wins, and the cached copy is the fallback.
+        bool catsEmpty = true;
+        for (const QString& c : cats) if (!c.isEmpty()) { catsEmpty = false; break; }
+        if (catsEmpty && !m_spec.categories.isEmpty()) cats = m_spec.categories;
 
-    // Category column: left column carries text labels.
-    bool catCol = false;
-    if (c2 > c1)
-        for (int r = firstDataRow; r <= r2; ++r)
-            if (!disp(c1, r).isEmpty() && !isNum(c1, r)) { catCol = true; break; }
-    const int firstDataCol = catCol ? c1 + 1 : c1;
+        for (const ChartSeries& cs : m_spec.series) {
+            Series s;
+            s.color        = cs.color;
+            s.pointColors  = cs.pointColors;
+            s.name         = cs.name;
 
-    QStringList cats;
-    for (int r = firstDataRow; r <= r2; ++r)
-        cats << (catCol ? disp(c1, r) : QString::number(r - firstDataRow + 1));
+            // A name given as a reference to a header cell.
+            if (s.name.isEmpty() && !cs.nameRange.isNull()) {
+                const QStringList n = readRange(sheetFor(cs.nameSheet), cs.nameRange);
+                if (!n.isEmpty()) s.name = n.first();
+            }
 
-    struct Series { QString name; QVector<double> vals; };
-    QVector<Series> series;
-    for (int c = firstDataCol; c <= c2; ++c) {
-        Series s;
-        s.name = headerRow ? disp(c, r1) : QString();
-        if (s.name.isEmpty()) s.name = QString("Series %1").arg(c - firstDataCol + 1);
-        for (int r = firstDataRow; r <= r2; ++r) {
-            bool ok = false; const double val = disp(c, r).toDouble(&ok);
-            s.vals << (ok ? val : 0.0);
+            const QStringList raw = readRange(sheetFor(cs.sheet), cs.valRange);
+            bool anyLive = false;
+            for (const QString& v : raw) {
+                bool ok = false;
+                const double d = v.toDouble(&ok);
+                s.vals << (ok ? d : 0.0);
+                if (ok) anyLive = true;
+            }
+            // Nothing readable at the reference: fall back to the values the
+            // producing application cached in the file.
+            if (!anyLive && !cs.cache.isEmpty()) s.vals = cs.cache;
+
+            if (s.name.isEmpty()) s.name = QString("Series %1").arg(series.size() + 1);
+            series << s;
         }
-        series << s;
+
+        // Labels still missing: number the points so the axis is not blank.
+        if (cats.isEmpty() && !series.isEmpty())
+            for (int i = 0; i < series.first().vals.size(); ++i)
+                cats << QString::number(i + 1);
+
+    } else {
+        // ── In-app chart: one contiguous block, scanned for a header row ───
+        const int c1 = m_spec.range.left(), c2 = m_spec.range.right();
+        const int r1 = m_spec.range.top(),  r2 = m_spec.range.bottom();
+
+        auto disp  = [&](int c, int r) { return m_model->displayValue(c, r); };
+        auto isNum = [&](int c, int r) {
+            const QString d = disp(c, r);
+            if (d.isEmpty()) return false;
+            bool ok = false; d.toDouble(&ok); return ok;
+        };
+
+        // Header row: top row carries text labels and there is data below it.
+        bool headerRow = false;
+        if (r2 > r1)
+            for (int c = c1; c <= c2; ++c)
+                if (!disp(c, r1).isEmpty() && !isNum(c, r1)) { headerRow = true; break; }
+        const int firstDataRow = headerRow ? r1 + 1 : r1;
+
+        // Category column: left column carries text labels.
+        bool catCol = false;
+        if (c2 > c1)
+            for (int r = firstDataRow; r <= r2; ++r)
+                if (!disp(c1, r).isEmpty() && !isNum(c1, r)) { catCol = true; break; }
+        const int firstDataCol = catCol ? c1 + 1 : c1;
+
+        for (int r = firstDataRow; r <= r2; ++r)
+            cats << (catCol ? disp(c1, r) : QString::number(r - firstDataRow + 1));
+
+        for (int c = firstDataCol; c <= c2; ++c) {
+            Series s;
+            s.name = headerRow ? disp(c, r1) : QString();
+            if (s.name.isEmpty()) s.name = QString("Series %1").arg(c - firstDataCol + 1);
+            for (int r = firstDataRow; r <= r2; ++r) {
+                bool ok = false; const double val = disp(c, r).toDouble(&ok);
+                s.vals << (ok ? val : 0.0);
+            }
+            series << s;
+        }
+
+        if (explicitTitle.isEmpty() && headerRow && catCol)
+            explicitTitle = disp(c1, r1);
     }
 
     auto* chart = new QChart();
     chart->setAnimationOptions(QChart::SeriesAnimations);
     chart->setBackgroundRoundness(0);
-    chart->setBackgroundBrush(QBrush(Qt::white));   // opaque — cover the cells
+    // The chart draws straight onto the sheet rather than onto a white card of
+    // its own, so the cells it spans stay visible behind it and it reads as an
+    // object sitting on the grid instead of a window opened over it.
+    chart->setLocalizeNumbers(true);      // groups thousands on unformatted axes
+    chart->setBackgroundVisible(false);
+    chart->setPlotAreaBackgroundVisible(false);
+    chart->setBackgroundBrush(Qt::NoBrush);
     chart->setMargins(QMargins(4, 2, 4, 2));
-    chart->legend()->setVisible(series.size() > 1 || m_type == ChartType::Pie);
-    chart->legend()->setAlignment(Qt::AlignBottom);
+    // An imported chart says whether it has a legend and where; one built in
+    // the app keeps the old default of a bottom legend when it needs one.
+    if (m_spec.isExplicit()) {
+        chart->legend()->setVisible(m_spec.showLegend);
+        switch (m_spec.legendPos) {
+        case 'r': chart->legend()->setAlignment(Qt::AlignRight);  break;
+        case 'l': chart->legend()->setAlignment(Qt::AlignLeft);   break;
+        case 't': chart->legend()->setAlignment(Qt::AlignTop);    break;
+        default:  chart->legend()->setAlignment(Qt::AlignBottom); break;
+        }
+    } else {
+        chart->legend()->setVisible(series.size() > 1
+                                    || m_spec.type == ChartType::Pie
+                                    || m_spec.type == ChartType::Doughnut);
+        chart->legend()->setAlignment(Qt::AlignBottom);
+    }
 
-    const QString cornerTitle = (headerRow && catCol) ? disp(c1, r1) : QString();
-    chart->setTitle(cornerTitle.isEmpty()
-                        ? QString("%1 Chart").arg(chartTypeName(m_type))
-                        : cornerTitle);
+    // No title unless there is one to show.
+    if (!explicitTitle.isEmpty())
+        chart->setTitle(explicitTitle);
+    else if (!m_spec.isExplicit())
+        chart->setTitle(QString("%1 Chart").arg(chartTypeName(m_spec.type)));
 
-    switch (m_type) {
+    switch (m_spec.type) {
     case ChartType::Column:
     case ChartType::Bar: {
-        QAbstractBarSeries* bs = (m_type == ChartType::Column)
+        QAbstractBarSeries* bs = (m_spec.type == ChartType::Column)
             ? static_cast<QAbstractBarSeries*>(new QBarSeries())
             : static_cast<QAbstractBarSeries*>(new QHorizontalBarSeries());
         for (const auto& s : series) {
             auto* set = new QBarSet(s.name);
             for (double v : s.vals) *set << v;
+            if (s.color.isValid()) set->setColor(s.color);
             bs->append(set);
         }
         chart->addSeries(bs);
         auto* axCat = new QBarCategoryAxis(); axCat->append(cats);
-        auto* axVal = new QValueAxis(); 
-        if (m_type == ChartType::Column) {
+        auto* axVal = new QValueAxis();
+        applyValueAxisFormat(axVal);
+        if (m_spec.type == ChartType::Column) {
             chart->addAxis(axCat, Qt::AlignBottom);
             chart->addAxis(axVal, Qt::AlignLeft);
         } else {
@@ -290,6 +410,10 @@ void ChartObject::rebuild() {
         }
         bs->attachAxis(axCat);
         bs->attachAxis(axVal);
+        // Round tick values, applied after attaching: applyNiceNumbers() works
+        // on the axis's current range, which only exists once it is bound to
+        // the series. Called earlier it silently does nothing.
+        axVal->applyNiceNumbers();
         break;
     }
     case ChartType::Line:
@@ -298,33 +422,48 @@ void ChartObject::rebuild() {
             auto* ls = new QLineSeries();
             ls->setName(s.name);
             for (int i = 0; i < s.vals.size(); ++i) ls->append(i, s.vals[i]);
-            if (m_type == ChartType::Area) {
+            if (m_spec.type == ChartType::Area) {
                 auto* as = new QAreaSeries(ls);
                 as->setName(s.name);
+                if (s.color.isValid()) as->setColor(s.color);
                 chart->addSeries(as);
             } else {
+                if (s.color.isValid()) ls->setColor(s.color);
                 chart->addSeries(ls);
             }
         }
         auto* axCat = new QBarCategoryAxis(); axCat->append(cats);
-        auto* axVal = new QValueAxis(); 
+        auto* axVal = new QValueAxis();
+        applyValueAxisFormat(axVal);
         chart->addAxis(axCat, Qt::AlignBottom);
         chart->addAxis(axVal, Qt::AlignLeft);
         for (auto* s : chart->series()) { s->attachAxis(axCat); s->attachAxis(axVal); }
+        axVal->applyNiceNumbers();
         break;
     }
-    case ChartType::Pie: {
+    case ChartType::Pie:
+    case ChartType::Doughnut: {
         auto* ps = new QPieSeries();
         const Series first = series.isEmpty() ? Series{} : series.first();
-        for (int i = 0; i < cats.size() && i < first.vals.size(); ++i)
-            ps->append(cats[i], first.vals[i]);
+        for (int i = 0; i < cats.size() && i < first.vals.size(); ++i) {
+            QPieSlice* slice = ps->append(cats[i], first.vals[i]);
+            // Pie and doughnut charts colour each slice separately.
+            if (i < first.pointColors.size() && first.pointColors[i].isValid())
+                slice->setBrush(first.pointColors[i]);
+        }
         // The size has to be stated. Left to itself with labels outside, Qt
         // shrinks the pie to make room for them, and with several categories
         // that collapsed it to nothing: the labels piled up in the middle of an
         // empty chart and no wedge was drawn at all.
-        ps->setPieSize(0.62);
+        // With labels outside, Qt shrinks the pie to make room for them and
+        // several categories collapsed it to nothing, so the size is stated.
+        // A chart that asks for no data labels gets a bigger pie and lets the
+        // legend name the slices, which is what Excel and WPS draw.
+        const bool wantLabels = !m_spec.isExplicit() || m_spec.showDataLabels;
+        ps->setPieSize(wantLabels ? 0.62 : 0.78);
+        if (m_spec.type == ChartType::Doughnut) ps->setHoleSize(0.35);
         ps->setLabelsPosition(QPieSlice::LabelOutside);
-        ps->setLabelsVisible(true);
+        ps->setLabelsVisible(wantLabels);
         chart->addSeries(ps);
         break;
     }
@@ -334,6 +473,7 @@ void ChartObject::rebuild() {
             ss->setName(s.name);
             ss->setMarkerSize(11);
             for (int i = 0; i < s.vals.size(); ++i) ss->append(i, s.vals[i]);
+            if (s.color.isValid()) ss->setColor(s.color);
             chart->addSeries(ss);
         }
         auto* axX = new QValueAxis();
