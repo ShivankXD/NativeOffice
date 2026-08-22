@@ -5,6 +5,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "XlsxDrawing.h"
 
+#include <QImage>
+
 #include <QMap>
 #include <QPainterPath>
 #include <QtMath>
@@ -165,6 +167,35 @@ QColor readColorElement(QXmlStreamReader& r, const ThemeColors& theme) {
 
 // The first colour anywhere inside the element the reader is sitting on,
 // consuming it. Used for solidFill wrappers and for a chart series' spPr.
+// The first colour in a subtree, and the relationship id of a picture fill when
+// there is one instead.
+//
+// A chart series can be filled with an image rather than a colour: it is how a
+// template gets tapered, shaded bars, and how the "Grade Distribution" chart in
+// the corpus is drawn. Reading only solid fills left such a series with no
+// colour at all, so it fell through to Qt's default and an entire chart came
+// out blue when Excel drew it green.
+QColor readFirstFill(QXmlStreamReader& r, const ThemeColors& theme, QString* blipRel) {
+    QColor found;
+    int depth = 1;
+    while (!r.atEnd() && depth > 0) {
+        const auto tok = r.readNext();
+        if (tok == QXmlStreamReader::StartElement) {
+            if (!found.isValid() && isColorElement(localName(r))) {
+                found = readColorElement(r, theme);   // consumes its own subtree
+                continue;
+            }
+            if (blipRel && blipRel->isEmpty() && localName(r) == QLatin1String("blip"))
+                for (const auto& a : r.attributes())
+                    if (a.name() == QLatin1String("embed")) *blipRel = a.value().toString();
+            ++depth;
+        } else if (tok == QXmlStreamReader::EndElement) {
+            --depth;
+        }
+    }
+    return found;
+}
+
 QColor readFirstColor(QXmlStreamReader& r, const ThemeColors& theme) {
     QColor found;
     int depth = 1;
@@ -218,6 +249,18 @@ ChartType chartTypeFor(const QString& element, const QString& barDir) {
     return ChartType::Column;
 }
 
+// The colour a series with no fill of its own should take: the workbook's
+// accents in order, or Office's own palette when the theme has none. Anything
+// is better than Qt's default, which is a colour the file never mentioned.
+QColor seriesAccent(const ThemeColors& theme, int index) {
+    static const char* kOffice[6] = {
+        "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47"
+    };
+    const int slot = index % 6;
+    const QColor themed = theme.value(QStringLiteral("accent%1").arg(slot + 1));
+    return themed.isValid() ? themed : QColor(QLatin1String(kOffice[slot]));
+}
+
 bool isPlotElement(const QString& n) {
     return n.endsWith(QLatin1String("Chart"))
            && (n == QLatin1String("barChart")      || n == QLatin1String("bar3DChart")
@@ -235,7 +278,8 @@ bool isPlotElement(const QString& n) {
 // Chart part
 // ─────────────────────────────────────────────────────────────────────────────
 bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
-                    const ThemeColors& theme) {
+                    const ThemeColors& theme,
+                    const std::function<QColor(const QString&)>& blipColor) {
     QXmlStreamReader r(chartXml);
     QStringList path;
 
@@ -274,6 +318,25 @@ bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
             cur.pointColors.reserve(n);
             for (int i = 0; i < n; ++i) cur.pointColors << dptColors.value(i);
         }
+
+        // A series with no fill of its own still has to be drawn as something.
+        //
+        // First choice is the commonest of its own per-point colours: a bar
+        // chart can only paint one colour per series, and the colour the file
+        // uses most is the one it means. Failing that, the workbook's accent
+        // palette in series order, which is what the file would have resolved
+        // its own defaults through. Only if there is no theme at all does this
+        // fall through, and then to Office's own palette rather than to Qt's.
+        if (!cur.color.isValid() && !dptColors.isEmpty()) {
+            QHash<QRgb, int> tally;
+            for (auto it = dptColors.begin(); it != dptColors.end(); ++it)
+                if (it.value().isValid()) ++tally[it.value().rgb()];
+            int best = 0;
+            for (auto it = tally.begin(); it != tally.end(); ++it)
+                if (it.value() > best) { best = it.value(); cur.color = QColor(it.key()); }
+        }
+        if (!cur.color.isValid())
+            cur.color = seriesAccent(theme, spec.series.size());
 
         // Categories are shared by every series; take the first one that has them.
         if (spec.categories.isEmpty() && !catCache.pts.isEmpty())
@@ -366,8 +429,13 @@ bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
 
             if (n == QLatin1String("spPr")) {
                 const bool forPoint = inside(path, "dPt");
-                const QColor c = readFirstColor(r, theme);
+                QString blipRel;
+                QColor c = readFirstFill(r, theme, &blipRel);
                 path.removeLast();
+                // Filled with a picture: take the colour the picture actually
+                // reads as, which is far closer than falling through to a
+                // default nothing in the file asked for.
+                if (!c.isValid() && !blipRel.isEmpty() && blipColor) c = blipColor(blipRel);
                 if (c.isValid()) {
                     if (forPoint && pendingDptIdx >= 0) dptColors.insert(pendingDptIdx, c);
                     else if (!forPoint && !cur.color.isValid()) cur.color = c;
@@ -775,6 +843,74 @@ ShapeGeom shapeGeomFor(const QString& prst) {
     return kMap.value(prst, ShapeGeom::Rect);
 }
 
+// The relationships of an arbitrary part, resolved to package-absolute paths.
+// XlsxDrawing is handed the DRAWING's relationships; a chart part has its own,
+// and a picture fill on a series points into those.
+QHash<QString, QString> parseRelsFor(const QString& part,
+                                     const std::function<QByteArray(const QString&)>& fetch) {
+    const int slash = part.lastIndexOf(QLatin1Char('/'));
+    const QString dir  = slash < 0 ? QString() : part.left(slash);
+    const QString file = slash < 0 ? part : part.mid(slash + 1);
+    const QString relsPath =
+        (dir.isEmpty() ? QString() : dir + QLatin1Char('/')) + QLatin1String("_rels/")
+        + file + QLatin1String(".rels");
+
+    QHash<QString, QString> out;
+    const QByteArray xml = fetch(relsPath);
+    if (xml.isEmpty()) return out;
+
+    QXmlStreamReader r(xml);
+    while (!r.atEnd()) {
+        if (r.readNext() != QXmlStreamReader::StartElement) continue;
+        if (localName(r) != QLatin1String("Relationship")) continue;
+        const auto a = r.attributes();
+        if (a.value(QLatin1String("TargetMode")) == QLatin1String("External")) continue;
+        const QString id = a.value(QLatin1String("Id")).toString();
+        QString tgt = a.value(QLatin1String("Target")).toString();
+        if (id.isEmpty() || tgt.isEmpty()) continue;
+        if (tgt.startsWith(QLatin1Char('/'))) { out.insert(id, tgt.mid(1)); continue; }
+        QStringList base = dir.isEmpty() ? QStringList()
+                                         : dir.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+        for (const QString& seg : tgt.split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
+            if (seg == QLatin1String("."))  continue;
+            if (seg == QLatin1String("..")) { if (!base.isEmpty()) base.removeLast(); continue; }
+            base << seg;
+        }
+        out.insert(id, base.join(QLatin1Char('/')));
+    }
+    return out;
+}
+
+// What an image reads as, as one colour: the mean of its opaque pixels.
+//
+// A bar filled with a picture cannot be reproduced exactly by a chart library
+// that paints a solid brush, but the picture's own colour is much closer than
+// any default. Transparent pixels are excluded or a shape drawn on a clear
+// background would average towards nothing.
+QColor averageColor(const QByteArray& imageBytes) {
+    if (imageBytes.isEmpty()) return {};
+    QImage img;
+    if (!img.loadFromData(imageBytes)) return {};
+    if (img.isNull()) return {};
+    // Scaled down first: the mean does not need every pixel, and a large image
+    // on every chart load would be felt.
+    if (img.width() > 64 || img.height() > 64)
+        img = img.scaled(64, 64, Qt::KeepAspectRatio, Qt::FastTransformation);
+    img = img.convertToFormat(QImage::Format_ARGB32);
+
+    qint64 r = 0, g = 0, b = 0, n = 0;
+    for (int y = 0; y < img.height(); ++y) {
+        const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+        for (int x = 0; x < img.width(); ++x) {
+            const QRgb px = line[x];
+            if (qAlpha(px) < 128) continue;
+            r += qRed(px); g += qGreen(px); b += qBlue(px); ++n;
+        }
+    }
+    if (n == 0) return {};
+    return QColor(int(r / n), int(g / n), int(b / n));
+}
+
 // ── One shape ───────────────────────────────────────────────────────────────
 // Consumes the sp / cxnSp element the reader sits on.
 void parseShapeElement(QXmlStreamReader& r, const Mapper& m, const DrawCtx& ctx,
@@ -983,8 +1119,20 @@ void parseGraphicFrame(QXmlStreamReader& r, const Mapper& m, DrawCtx& ctx) {
     const QString part = ctx.rels.value(rid);
     if (part.isEmpty()) return;
     const QByteArray bytes = ctx.fetch(part);
+    if (bytes.isEmpty()) return;
+
+    // A picture fill on a series points into the CHART part's own relationships,
+    // not the drawing's, so they have to be loaded before the chart is parsed.
+    const QHash<QString, QString> chartRels =
+        parseRelsFor(part, ctx.fetch);
+    auto blipColor = [&](const QString& embedId) -> QColor {
+        const QString imgPart = chartRels.value(embedId);
+        if (imgPart.isEmpty()) return {};
+        return averageColor(ctx.fetch(imgPart));
+    };
+
     ChartSpec spec;
-    if (bytes.isEmpty() || !parseChartPart(bytes, spec, ctx.theme)) return;
+    if (!parseChartPart(bytes, spec, ctx.theme, blipColor)) return;
 
     spec.anchor = ctx.anchor;
     spec.geom   = ctx.objectGeom();

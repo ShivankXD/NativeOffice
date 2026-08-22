@@ -16,6 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QByteArray>
+#include <QColor>
 #include <QHash>
 #include <QString>
 #include <functional>
@@ -62,8 +63,14 @@ void parseSheetDrawing(const QByteArray& drawingXml,
 // Parse a single xl/charts/chartN.xml into `spec` (type, title, categories and
 // series). Placement is not touched: that comes from the drawing anchor.
 // Returns false when the part holds no plottable series.
+// `blipColor` resolves a picture fill on a series to a single colour, given the
+// relationship id from its <a:blip r:embed>. A chart series can be filled with
+// an image rather than a colour, and without this such a series has no colour
+// at all and falls through to a default the file never asked for. Optional: a
+// caller that cannot fetch parts just passes nothing.
 bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
-                    const ThemeColors& theme = {});
+                    const ThemeColors& theme = {},
+                    const std::function<QColor(const QString&)>& blipColor = {});
 
 // EMU (English Metric Units, 914400 per inch) -> pixels at 96 DPI.
 int emuToPx(qint64 emu);

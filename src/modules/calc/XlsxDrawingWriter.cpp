@@ -120,6 +120,8 @@ struct WSeries {
     QString         nameRef;    // empty => write the name literally
     QString         valRef;     // empty => write only the cache
     QVector<double> vals;
+    QColor          color;      // invalid => let the reader pick
+    QVector<QColor> pointColors;
 };
 
 struct Plot {
@@ -159,6 +161,8 @@ bool flatten(const ChartSpec& spec, const QString& sheetName,
                                cs.nameRange);
             w.valRef  = absRef(cs.sheet.isEmpty() ? sheetName : cs.sheet, cs.valRange);
             w.vals    = cs.cache;
+            w.color       = cs.color;
+            w.pointColors = cs.pointColors;
             // No cached copy in the spec: read the values back off the sheet so
             // the part still carries a cache.
             if (w.vals.isEmpty() && !cs.valRange.isNull() && disp)
@@ -229,6 +233,30 @@ QString numSource(const QString& ref, const QVector<double>& vals) {
          + cache + "</c:numCache></c:numRef>";
 }
 
+// <c:spPr> goes immediately after <c:tx> in every CT_*Ser. Empty when the
+// series has no colour, so a chart with none keeps whatever the reader picks.
+QString seriesFill(const WSeries& s) {
+    if (!s.color.isValid()) return {};
+    return QString("<c:spPr><a:solidFill><a:srgbClr val=\"%1\"/></a:solidFill>"
+                   "<a:ln><a:noFill/></a:ln></c:spPr>")
+        .arg(s.color.name(QColor::HexRgb).mid(1).toUpper());
+}
+
+// Per-point colours, for the types that colour each point separately. Sits
+// after spPr (and after explosion, which is not written) and before dLbls.
+QString seriesPoints(const WSeries& s) {
+    QString out;
+    for (int i = 0; i < s.pointColors.size(); ++i) {
+        if (!s.pointColors.at(i).isValid()) continue;
+        out += QString("<c:dPt><c:idx val=\"%1\"/><c:bubble3D val=\"0\"/>"
+                       "<c:spPr><a:solidFill><a:srgbClr val=\"%2\"/></a:solidFill>"
+                       "<a:ln><a:noFill/></a:ln></c:spPr></c:dPt>")
+                   .arg(i)
+                   .arg(s.pointColors.at(i).name(QColor::HexRgb).mid(1).toUpper());
+    }
+    return out;
+}
+
 QString seriesName(const WSeries& s) {
     if (s.nameRef.isEmpty())
         return "<c:tx><c:v>" + xmlEsc(s.name) + "</c:v></c:tx>";
@@ -269,7 +297,9 @@ QString buildPlot(const Plot& p) {
             // cat, val.
             body += QString("<c:ser><c:idx val=\"%1\"/><c:order val=\"%1\"/>").arg(i)
                   + seriesName(p.series.at(i))
+                  + seriesFill(p.series.at(i))
                   + "<c:invertIfNegative val=\"0\"/>"
+                  + seriesPoints(p.series.at(i))
                   + dLbls(p.dataLabels)
                   + "<c:cat>" + cat + "</c:cat>"
                   + "<c:val>" + numSource(p.series.at(i).valRef, p.series.at(i).vals) + "</c:val>"
@@ -289,7 +319,9 @@ QString buildPlot(const Plot& p) {
             // smooth.
             body += QString("<c:ser><c:idx val=\"%1\"/><c:order val=\"%1\"/>").arg(i)
                   + seriesName(p.series.at(i))
+                  + seriesFill(p.series.at(i))
                   + "<c:marker><c:symbol val=\"none\"/></c:marker>"
+                  + seriesPoints(p.series.at(i))
                   + dLbls(p.dataLabels)
                   + "<c:cat>" + cat + "</c:cat>"
                   + "<c:val>" + numSource(p.series.at(i).valRef, p.series.at(i).vals) + "</c:val>"
@@ -307,6 +339,8 @@ QString buildPlot(const Plot& p) {
             // CT_AreaSer: idx, order, tx, spPr, dPt, dLbls, cat, val.
             body += QString("<c:ser><c:idx val=\"%1\"/><c:order val=\"%1\"/>").arg(i)
                   + seriesName(p.series.at(i))
+                  + seriesFill(p.series.at(i))
+                  + seriesPoints(p.series.at(i))
                   + dLbls(p.dataLabels)
                   + "<c:cat>" + cat + "</c:cat>"
                   + "<c:val>" + numSource(p.series.at(i).valRef, p.series.at(i).vals) + "</c:val>"
@@ -328,6 +362,8 @@ QString buildPlot(const Plot& p) {
             // CT_PieSer: idx, order, tx, spPr, explosion, dPt, dLbls, cat, val.
             body += QString("<c:ser><c:idx val=\"%1\"/><c:order val=\"%1\"/>").arg(i)
                   + seriesName(p.series.at(i))
+                  + seriesFill(p.series.at(i))
+                  + seriesPoints(p.series.at(i))
                   + dLbls(p.dataLabels)
                   + "<c:cat>" + cat + "</c:cat>"
                   + "<c:val>" + numSource(p.series.at(i).valRef, p.series.at(i).vals) + "</c:val>"
@@ -348,7 +384,11 @@ QString buildPlot(const Plot& p) {
             // is how ChartObject draws it.
             body += QString("<c:ser><c:idx val=\"%1\"/><c:order val=\"%1\"/>").arg(i)
                   + seriesName(p.series.at(i))
-                  + "<c:spPr><a:ln w=\"0\"><a:noFill/></a:ln></c:spPr>"
+                  + (p.series.at(i).color.isValid()
+                        ? QString("<c:spPr><a:solidFill><a:srgbClr val=\"%1\"/></a:solidFill>"
+                                  "<a:ln w=\"0\"><a:noFill/></a:ln></c:spPr>")
+                              .arg(p.series.at(i).color.name(QColor::HexRgb).mid(1).toUpper())
+                        : QString("<c:spPr><a:ln w=\"0\"><a:noFill/></a:ln></c:spPr>"))
                   + "<c:marker><c:symbol val=\"circle\"/><c:size val=\"5\"/></c:marker>"
                   + dLbls(p.dataLabels)
                   + "<c:xVal>" + cat + "</c:xVal>"
