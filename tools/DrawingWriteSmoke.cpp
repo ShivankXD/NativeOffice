@@ -250,6 +250,67 @@ static void validatePackage(const QString& path, const QString& label) {
     }
     check(badOrder.isEmpty(), label + ": chart series are in schema order"
                             + (badOrder.isEmpty() ? QString() : " (" + badOrder + ")"));
+
+    // 5. <graphic> inside a graphicFrame must be in the DrawingML MAIN
+    // namespace, not the spreadsheet-drawing one.
+    //
+    // Written as <xdr:graphic> the file is still well-formed, and our own
+    // reader still finds the chart because it matches on local name. Excel
+    // refuses to open the workbook at all: not a repair prompt, a flat
+    // refusal. This is checked by namespace URI rather than by prefix, since
+    // the prefix is the file's to choose.
+    static const QString kMainNs = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    QString badNs;
+    for (const QString& n : parts) {
+        if (!n.startsWith("xl/drawings/drawing") || !n.endsWith(".xml")) continue;
+        QXmlStreamReader r(bytes.value(n));
+        while (!r.atEnd()) {
+            if (r.readNext() != QXmlStreamReader::StartElement) continue;
+            if (r.name() != u"graphic") continue;
+            if (r.namespaceUri() != kMainNs && badNs.isEmpty())
+                badNs = n + ": <graphic> is in " + r.namespaceUri().toString();
+        }
+    }
+    check(badNs.isEmpty(), label + ": graphicFrame graphics use the main namespace"
+                         + (badNs.isEmpty() ? QString() : " (" + badNs + ")"));
+
+    // 6. A worksheet's children must follow the CT_Worksheet sequence.
+    //
+    // <headerFooter> comes BEFORE <drawing>, which comes before
+    // <legacyDrawingHF>. Emitting the drawing first is what made every
+    // from-scratch export unopenable in Excel between 1.5.0 and 1.7.6.
+    static const QStringList kWsOrder = {
+        "sheetPr", "dimension", "sheetViews", "sheetFormatPr", "cols", "sheetData",
+        "sheetCalcPr", "sheetProtection", "protectedRanges", "scenarios", "autoFilter",
+        "sortState", "dataConsolidate", "customSheetViews", "mergeCells", "phoneticPr",
+        "conditionalFormatting", "dataValidations", "hyperlinks", "printOptions",
+        "pageMargins", "pageSetup", "headerFooter", "rowBreaks", "colBreaks",
+        "customProperties", "cellWatches", "ignoredErrors", "smartTags", "drawing",
+        "legacyDrawing", "legacyDrawingHF", "drawingHF", "picture", "oleObjects",
+        "controls", "webPublishItems", "tableParts", "extLst",
+    };
+    QString wsBad;
+    for (const QString& n : parts) {
+        if (!n.startsWith("xl/worksheets/sheet") || !n.endsWith(".xml")) continue;
+        QXmlStreamReader r(bytes.value(n));
+        int depth = 0, last = -1;
+        while (!r.atEnd()) {
+            const auto tok = r.readNext();
+            if (tok == QXmlStreamReader::StartElement) {
+                if (++depth != 2) continue;
+                const QString el = r.name().toString();
+                const int pos = kWsOrder.indexOf(el);
+                if (pos < 0) continue;              // not an element we police
+                if (pos < last && wsBad.isEmpty())
+                    wsBad = n + ": <" + el + "> comes too late";
+                else if (pos >= last) last = pos;
+            } else if (tok == QXmlStreamReader::EndElement) {
+                --depth;
+            }
+        }
+    }
+    check(wsBad.isEmpty(), label + ": worksheet elements are in schema order"
+                         + (wsBad.isEmpty() ? QString() : " (" + wsBad + ")"));
 }
 
 // ── The rebuild path ────────────────────────────────────────────────────────
@@ -495,13 +556,22 @@ int main(int argc, char** argv) {
     QTemporaryDir tmp;
     if (!tmp.isValid()) { out << "no temp dir\n"; return 2; }
 
-    testRebuild(tmp.path());
-    testPictureRebuild(tmp.path());
-    testEveryType(tmp.path());
+    // A second argument keeps the written workbooks somewhere they can be
+    // opened by hand (or by Excel) instead of vanishing with the temp dir.
+    QString dir = tmp.path();
+    if (argc > 2) {
+        dir = QString::fromLocal8Bit(argv[2]);
+        QDir().mkpath(dir);
+        out << "writing artifacts to " << dir << "\n";
+    }
+
+    testRebuild(dir);
+    testPictureRebuild(dir);
+    testEveryType(dir);
     if (argc > 1) {
         const QString corpus = QString::fromLocal8Bit(argv[1]);
-        testNoChartsUnchanged(corpus, tmp.path());
-        testPreserving(corpus, tmp.path());
+        testNoChartsUnchanged(corpus, dir);
+        testPreserving(corpus, dir);
     }
     else out << "\n[preserving] skipped (pass a directory of .xlsx files)\n";
 

@@ -140,6 +140,12 @@ foreach(_d IN LISTS _qtcore_inc2)
     endif()
 endforeach()
 
+# Dev-only check for the crash-recovery snapshots. The feature only matters
+# when the process died, so nobody exercises it by hand and a break in it is
+# invisible until someone loses work.
+qt_add_executable(RecoverySmoke tools/RecoverySmoke.cpp)
+target_link_libraries(RecoverySmoke PRIVATE NativeOfficeCore Qt6::Widgets)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Installation rules (future-proofing)
 # ─────────────────────────────────────────────────────────────────────────────
