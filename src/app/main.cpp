@@ -2483,7 +2483,7 @@ QMenuBar::item:pressed {
         QMessageBox::about(win, "About NativeOffice",
             "<h3>NativeOffice Impress</h3>"
             "<p>A high-performance, cross-platform presentation tool.</p>"
-            "<p>Version 1.7.5</p>"
+            "<p>Version 1.7.6</p>"
             "<p>NativeOffice is your go to OfficeSuite!</p>");
     });
 
@@ -3002,7 +3002,7 @@ int main(int argc, char* argv[]) {
     // IMPORTANT: Set org/app before the first QSettings use (including
     // RecentFilesManager singleton construction triggered below)
     app.setApplicationName("NativeOffice");
-    app.setApplicationVersion("1.7.5");
+    app.setApplicationVersion("1.7.6");
     app.setOrganizationName("NativeOffice");
     app.setOrganizationDomain("nativeoffice.app");
 
@@ -3243,9 +3243,9 @@ int main(int argc, char* argv[]) {
                     calc->devCtrlWheel(qEnvironmentVariable("NATIVEOFFICE_CALC_WHEEL").toInt());
                     qWarning("[calc] after Ctrl+wheel:");
                 }
-                // A chart made in the app, not read out of the file. The
-                // exporter cannot write one, so this is how the save-cost
-                // report is checked for an object that will be lost.
+                // A chart made in the app, not read out of the file. Since
+                // 1.7.5 the exporter writes one, so this is how a save is
+                // checked with an object the package did not come with.
                 if (qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_ADDCHART"))
                     calc->addChartAt(NativeOffice::ChartType::Column,
                                      QRect(0, 0, 2, 5), QRect(40, 40, 320, 220));
