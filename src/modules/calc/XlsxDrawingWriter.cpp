@@ -123,7 +123,8 @@ struct WSeries {
 };
 
 struct Plot {
-    ChartType   type { ChartType::Column };
+    ChartType     type { ChartType::Column };
+    ChartGrouping grouping { ChartGrouping::Clustered };
     QString     title;              // empty => autoTitleDeleted
     bool        legend { true };
     char        legendPos { 'b' };
@@ -137,6 +138,7 @@ struct Plot {
 bool flatten(const ChartSpec& spec, const QString& sheetName,
              const std::function<QString(int, int)>& disp, Plot& out) {
     out.type       = spec.type;
+    out.grouping   = spec.grouping;
     out.dataLabels = spec.showDataLabels;
 
     if (spec.isExplicit()) {
@@ -256,9 +258,12 @@ QString buildPlot(const Plot& p) {
     case ChartType::Bar: {
         // CT_BarChart: barDir, grouping, varyColors, ser*, dLbls, gapWidth,
         // overlap, axId, axId.
+        const char* grp = p.grouping == ChartGrouping::Stacked        ? "stacked"
+                        : p.grouping == ChartGrouping::PercentStacked ? "percentStacked"
+                                                                      : "clustered";
         body = QString("<c:barChart><c:barDir val=\"%1\"/>"
-                       "<c:grouping val=\"clustered\"/><c:varyColors val=\"0\"/>")
-                   .arg(p.type == ChartType::Bar ? "bar" : "col");
+                       "<c:grouping val=\"%2\"/><c:varyColors val=\"0\"/>")
+                   .arg(p.type == ChartType::Bar ? "bar" : "col", grp);
         for (int i = 0; i < p.series.size(); ++i) {
             // CT_BarSer: idx, order, tx, spPr, invertIfNegative, dPt, dLbls,
             // cat, val.
@@ -270,9 +275,10 @@ QString buildPlot(const Plot& p) {
                   + "<c:val>" + numSource(p.series.at(i).valRef, p.series.at(i).vals) + "</c:val>"
                   + "</c:ser>";
         }
-        body += QString("<c:gapWidth val=\"150\"/><c:overlap val=\"-27\"/>"
-                        "<c:axId val=\"%1\"/><c:axId val=\"%2\"/></c:barChart>")
-                    .arg(kCatAxId, kValAxId);
+        body += QString("<c:gapWidth val=\"150\"/><c:overlap val=\"%1\"/>"
+                        "<c:axId val=\"%2\"/><c:axId val=\"%3\"/></c:barChart>")
+                    .arg(p.grouping == ChartGrouping::Clustered ? "-27" : "100",
+                         kCatAxId, kValAxId);
         break;
     }
     case ChartType::Line: {
@@ -437,13 +443,18 @@ QString buildChartAnchorXml(const ChartSpec& spec,
                 "<xdr:cNvGraphicFramePr/>"
                 "</xdr:nvGraphicFramePr>"
                 "<xdr:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%2\" cy=\"%3\"/></xdr:xfrm>"
-                "<xdr:graphic><a:graphicData "
+                // <a:graphic>, not <xdr:graphic>. The frame is a spreadsheet
+                // drawing element but the graphic inside it belongs to the
+                // DrawingML main namespace, and Excel refuses to open a
+                // workbook that gets this wrong. Our own reader matches on
+                // local name, so a round trip through it cannot catch it.
+                "<a:graphic><a:graphicData "
                 "uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">"
                 "<c:chart "
                 "xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" "
                 "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" "
                 "r:id=\"%4\"/>"
-                "</a:graphicData></xdr:graphic>"
+                "</a:graphicData></a:graphic>"
                 "</xdr:graphicFrame>")
             .arg(QString::number(shapeId),
                  QString::number(pxToEmu(spec.geom.width()  > 0 ? spec.geom.width()  : 420)),

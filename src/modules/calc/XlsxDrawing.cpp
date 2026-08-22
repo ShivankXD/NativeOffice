@@ -252,6 +252,7 @@ bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
     QMap<int, QColor> dptColors;
     bool        sawLegend = false;
     bool        titleDeleted = false;
+    bool        haveGrouping = false;
 
     auto commitSeries = [&] {
         // A series with neither live reference nor cached values plots nothing.
@@ -325,6 +326,18 @@ bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
             // the type, so only its direction counts.
             if (n == QLatin1String("barDir") && pendingBarDir.isEmpty())
                 pendingBarDir = r.attributes().value(QLatin1String("val")).toString();
+
+            // Same reasoning for the grouping: the first plot element wins.
+            if (n == QLatin1String("grouping") && !haveGrouping) {
+                const QString g = r.attributes().value(QLatin1String("val")).toString();
+                if      (g == QLatin1String("stacked"))
+                    spec.grouping = ChartGrouping::Stacked;
+                else if (g == QLatin1String("percentStacked"))
+                    spec.grouping = ChartGrouping::PercentStacked;
+                else
+                    spec.grouping = ChartGrouping::Clustered;
+                haveGrouping = true;
+            }
 
             if (n == QLatin1String("ser") && inside(path, "plotArea")) {
                 inSer = true;

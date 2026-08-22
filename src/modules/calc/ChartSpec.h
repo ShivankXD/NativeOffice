@@ -30,6 +30,14 @@ namespace NativeOffice {
 
 enum class ChartType { Column = 0, Bar, Line, Area, Pie, Scatter, Doughnut };
 
+// How the series of a bar, line or area chart sit relative to each other.
+//
+// This was ignored, and everything was drawn side by side. A stacked chart read
+// that way does not look like the wrong style, it looks broken: four series
+// across four categories become sixteen hairline bars instead of four solid
+// ones, which is what NativeOffice showed next to Excel on the same workbook.
+enum class ChartGrouping { Clustered = 0, Stacked, PercentStacked };
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Where an object sits, expressed the way a spreadsheet thinks about it: two
 // corners, each one a cell plus an offset inside that cell. This is OOXML's
@@ -92,6 +100,8 @@ struct ChartSpec {
     bool    showLegend  { true };
     char    legendPos   { 'b' };     // r / l / t / b
     bool    showDataLabels { false };
+    // Only meaningful for bar, line and area charts.
+    ChartGrouping grouping { ChartGrouping::Clustered };
     QString valueAxisFormat;         // number-format code for the value axis
 
     // True when this chart was read out of an .xlsx. It decides whether a

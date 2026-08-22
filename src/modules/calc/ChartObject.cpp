@@ -25,6 +25,10 @@
 #include <QtCharts/QAbstractBarSeries>
 #include <QtCharts/QBarSeries>
 #include <QtCharts/QHorizontalBarSeries>
+#include <QtCharts/QStackedBarSeries>
+#include <QtCharts/QPercentBarSeries>
+#include <QtCharts/QHorizontalStackedBarSeries>
+#include <QtCharts/QHorizontalPercentBarSeries>
 #include <QtCharts/QBarSet>
 #include <QtCharts/QLineSeries>
 #include <QtCharts/QAreaSeries>
@@ -363,15 +367,33 @@ void ChartObject::rebuild() {
     switch (m_spec.type) {
     case ChartType::Column:
     case ChartType::Bar: {
-        QAbstractBarSeries* bs = (m_spec.type == ChartType::Column)
-            ? static_cast<QAbstractBarSeries*>(new QBarSeries())
-            : static_cast<QAbstractBarSeries*>(new QHorizontalBarSeries());
+        // Stacking is a different SERIES CLASS in Qt Charts, not a property, so
+        // the grouping has to be known before anything is built. Drawing a
+        // stacked chart side by side turns four solid bars into sixteen
+        // hairlines, which is how this workbook looked next to Excel.
+        const bool horiz = (m_spec.type == ChartType::Bar);
+        QAbstractBarSeries* bs = nullptr;
+        switch (m_spec.grouping) {
+        case ChartGrouping::Stacked:
+            bs = horiz ? static_cast<QAbstractBarSeries*>(new QHorizontalStackedBarSeries())
+                       : static_cast<QAbstractBarSeries*>(new QStackedBarSeries());
+            break;
+        case ChartGrouping::PercentStacked:
+            bs = horiz ? static_cast<QAbstractBarSeries*>(new QHorizontalPercentBarSeries())
+                       : static_cast<QAbstractBarSeries*>(new QPercentBarSeries());
+            break;
+        case ChartGrouping::Clustered:
+            bs = horiz ? static_cast<QAbstractBarSeries*>(new QHorizontalBarSeries())
+                       : static_cast<QAbstractBarSeries*>(new QBarSeries());
+            break;
+        }
         for (const auto& s : series) {
             auto* set = new QBarSet(s.name);
             for (double v : s.vals) *set << v;
             if (s.color.isValid()) set->setColor(s.color);
             bs->append(set);
         }
+
         chart->addSeries(bs);
         auto* axCat = new QBarCategoryAxis(); axCat->append(cats);
         auto* axVal = new QValueAxis();

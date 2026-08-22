@@ -1329,15 +1329,23 @@ QByteArray buildWorksheet(const XlsxSheet& sheet, StyleTable& styles,
             xml += QString("<mergeCell ref=\"%1\"/>").arg(m);
         xml += "</mergeCells>";
     }
-    // The drawing is referenced last: the schema requires <drawing> after
-    // <mergeCells>, and Excel rejects the sheet if the order is wrong.
-    if (hasDrawing) xml += "<drawing r:id=\"rIdDraw\"/>";
-    if (NativeOffice::Watermark::enabledForExport()) {
-        // Schema order matters here: drawing, then headerFooter, then
-        // legacyDrawingHF. Excel rejects the sheet otherwise.
+    // Schema order, and it is not advisory: CT_Worksheet is an xsd:sequence
+    // that runs ... pageSetup, headerFooter, rowBreaks, ... , drawing,
+    // legacyDrawing, legacyDrawingHF. So headerFooter comes BEFORE drawing.
+    //
+    // This used to emit drawing first, with a comment asserting that was what
+    // Excel wanted. It was the wrong way round, and Excel refused to open the
+    // file at all: not a repair prompt, a flat refusal. Every workbook created
+    // from scratch here and saved as .xlsx was unopenable in Excel from 1.5.0,
+    // when the export mark first put a <drawing> on the sheet, until 1.7.6.
+    // Nothing caught it because the preserving save (which splices into the
+    // original worksheet and never comes through here) is the path a workbook
+    // opened FROM Excel takes, and that one was fine.
+    if (NativeOffice::Watermark::enabledForExport())
         xml += NativeOffice::Watermark::Ooxml::xlsxHeaderFooterXml();
+    if (hasDrawing) xml += "<drawing r:id=\"rIdDraw\"/>";
+    if (NativeOffice::Watermark::enabledForExport())
         xml += "<legacyDrawingHF r:id=\"rIdWmVml\"/>";
-    }
 
     xml += "</worksheet>";
     return xml.toUtf8();
