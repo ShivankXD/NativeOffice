@@ -540,6 +540,8 @@ private:
     // the last snapshot without serializing the workbook to find out.
     quint64 m_editSeq { 0 };
     void offerCrashRecovery();
+    // Resolves a cell reference for a linked text box; see the definition.
+    [[nodiscard]] QString valueAtRef(const QString& ref) const;
     // Pictures that were read out of the workbook rather than added here.
     //
     // syncImageSpecs() rebuilds every SheetImage from the live widgets, and a

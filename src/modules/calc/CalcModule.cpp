@@ -2916,6 +2916,46 @@ void CalcModule::rebuildImageObjects() {
 }
 
 // ── Shapes on the sheet ─────────────────────────────────────────────────────
+// What a cell reference like "$AP$26" or "'Sheet 2'!$B$4" currently displays.
+//
+// Used by linked text boxes. Returns an empty string when the reference cannot
+// be read, which the caller treats as "leave the shape as it is" rather than as
+// an error: a broken link should not blank a shape that has something to show.
+QString CalcModule::valueAtRef(const QString& ref) const {
+    QString body = ref;
+    QString sheet;
+    const int bang = ref.lastIndexOf(QLatin1Char('!'));
+    if (bang >= 0) {
+        sheet = ref.left(bang);
+        body  = ref.mid(bang + 1);
+        if (sheet.size() >= 2 && sheet.startsWith(QLatin1Char('\''))
+            && sheet.endsWith(QLatin1Char('\''))) {
+            sheet = sheet.mid(1, sheet.size() - 2);
+            sheet.replace(QLatin1String("''"), QLatin1String("'"));
+        }
+    }
+    body.remove(QLatin1Char('$'));
+    if (body.isEmpty()) return {};
+
+    int i = 0, col = 0;
+    while (i < body.size() && body.at(i).isLetter()) {
+        col = col * 26 + (body.at(i).toUpper().toLatin1() - 'A' + 1);
+        ++i;
+    }
+    if (i == 0) return {};
+    bool ok = false;
+    const int row = body.mid(i).toInt(&ok);
+    if (!ok || row < 1) return {};
+
+    const SpreadsheetModel* m = sheet.isEmpty() ? m_model : sheetByName(sheet);
+    if (!m) m = m_model;
+    if (!m) return {};
+    // Through the model's DisplayRole, not displayValue(): the number format is
+    // applied there, and a linked text box showing a ratio has to read "83%"
+    // the way the sheet does, not "0.826086956521739".
+    return m->index(row - 1, col - 1).data(Qt::DisplayRole).toString();
+}
+
 void CalcModule::rebuildShapeObjects() {
     for (ShapeObject* s : m_shapeObjs) {
         m_objAnchors.remove(s);
@@ -2926,7 +2966,15 @@ void CalcModule::rebuildShapeObjects() {
     m_shapeObjs.clear();
     if (!m_model) return;
 
-    for (const SheetShape& sh : m_model->shapes()) {
+    for (const SheetShape& shIn : m_model->shapes()) {
+        SheetShape sh = shIn;
+        // A linked text box carries a cell reference instead of its text. It is
+        // resolved here rather than in the parser because only the workbook can
+        // say what the cell holds, and the reference may name another sheet.
+        if (!sh.textLink.isEmpty() && !sh.text.isEmpty()) {
+            const QString shown = valueAtRef(sh.textLink);
+            if (!shown.isEmpty()) sh.text[0].runs[0].text = shown;
+        }
         auto* w = new ShapeObject(sh, m_tableView->viewport());
         const QRect fallback = sh.geom.isEmpty() ? QRect(40, 30, 220, 90) : sh.geom;
         m_objAnchors.insert(w, sh.anchor);

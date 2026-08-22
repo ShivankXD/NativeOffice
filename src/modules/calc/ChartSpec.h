@@ -188,13 +188,26 @@ struct SheetShape {
     qreal  lineWidth { 1.0 };
 
     QVector<ShapeParagraph> text;
+
+    // A text box whose contents come from a cell rather than from the file.
+    //
+    // Excel calls this a linked text box and writes it as textlink="$AP$26" on
+    // the shape, with the text itself left out of the drawing entirely. Reading
+    // only the literal runs left the shape empty, and an empty text box with no
+    // fill is not visible, so it was dropped: which is why the doughnut on the
+    // media_heavy sheet had no "83%" or "PASS RATIO" in the middle of it. The
+    // reference is resolved against the sheet when the shape is built.
+    QString textLink;
+
     Qt::Alignment vAlign { Qt::AlignVCenter };
     bool   flipH { false }, flipV { false };
     int    rotation { 0 };             // degrees clockwise
 
     [[nodiscard]] bool isVisible() const {
+        // A linked text box counts even with no runs of its own: its text
+        // arrives later, from the cell it points at.
         return fill.isValid() || !gradient.isEmpty() || line.isValid()
-               || !text.isEmpty() || !fillImage.isEmpty();
+               || !text.isEmpty() || !fillImage.isEmpty() || !textLink.isEmpty();
     }
 };
 

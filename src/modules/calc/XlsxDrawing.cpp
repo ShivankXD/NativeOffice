@@ -923,6 +923,9 @@ void parseShapeElement(QXmlStreamReader& r, const Mapper& m, const DrawCtx& ctx,
 
     ShapeParagraph para;
     ShapeRun       run;
+    // The formatting a linked text box's text will be drawn in; see below.
+    ShapeRun       linkRun;
+    bool           haveLinkRun = false;
 
     auto flushRun = [&] {
         if (!run.text.isEmpty()) para.runs.push_back(run);
@@ -994,9 +997,27 @@ void parseShapeElement(QXmlStreamReader& r, const Mapper& m, const DrawCtx& ctx,
             // A list style is a table of defaults for levels the shape does not
             // use. Reading it would overwrite the run being built with the
             // defaults of level nine.
-            if (n == QLatin1String("lstStyle") || n == QLatin1String("endParaRPr")
-                || n == QLatin1String("extLst")) {
+            if (n == QLatin1String("lstStyle") || n == QLatin1String("extLst")) {
                 skipSubtree(r);
+                continue;
+            }
+
+            // endParaRPr is the formatting of the paragraph mark. Normally that
+            // is of no interest, but a linked text box has no runs at all, so
+            // it is the only place the font, size and colour of the text that
+            // arrives from the cell are recorded.
+            if (n == QLatin1String("endParaRPr")) {
+                if (!out.textLink.isEmpty()) {
+                    const auto a  = r.attributes();
+                    const int  sz = a.value(QLatin1String("sz")).toInt();
+                    if (sz > 0) linkRun.size = sz / 100.0;
+                    linkRun.bold   = a.value(QLatin1String("b")) == QLatin1String("1");
+                    linkRun.italic = a.value(QLatin1String("i")) == QLatin1String("1");
+                    readRunProps(r, theme, linkRun);
+                    haveLinkRun = true;
+                } else {
+                    skipSubtree(r);
+                }
                 continue;
             }
 
@@ -1045,6 +1066,16 @@ void parseShapeElement(QXmlStreamReader& r, const Mapper& m, const DrawCtx& ctx,
         }
     }
     flushPara();
+
+    // A linked text box has no runs of its own. Give it one, empty, carrying
+    // the formatting from endParaRPr, so whoever resolves the link has
+    // somewhere to put the text and it is drawn the way the file asked.
+    if (!out.textLink.isEmpty() && out.text.isEmpty()) {
+        ShapeParagraph lp;
+        lp.align = para.align;
+        lp.runs.push_back(haveLinkRun ? linkRun : ShapeRun{});
+        out.text.push_back(lp);
+    }
 
     out.frac = haveXfrm ? m.map(x, y, cx, cy) : m.box;
 }
@@ -1170,6 +1201,10 @@ void parseContainer(QXmlStreamReader& r, const Mapper& parent, DrawCtx& ctx) {
             if (n == QLatin1String("graphicFrame")) { parseGraphicFrame(r, child, ctx);  continue; }
             if (n == QLatin1String("sp") || n == QLatin1String("cxnSp")) {
                 SheetShape sh;
+                // Read before the element is consumed: Excel puts a linked text
+                // box's cell reference here and leaves the text itself out.
+                sh.textLink =
+                    r.attributes().value(QLatin1String("textlink")).toString();
                 parseShapeElement(r, child, ctx, sh);
                 if (sh.isVisible()) {
                     sh.anchor = ctx.anchor;
