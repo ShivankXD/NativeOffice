@@ -481,6 +481,121 @@ private:
 // colour, font and alignment ourselves for full Excel fidelity. Gridlines are
 // still drawn by the view (setShowGrid).
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Text overflow, the way a spreadsheet does it
+//
+// A label longer than its column spills across the empty cells beside it rather
+// than being cut off. Every spreadsheet behaves this way, and without it a
+// sheet title reads as "St" and a caption as "Exam ...", which is exactly what
+// NativeOffice showed next to Excel on the same workbook.
+//
+// The spill cannot just be drawn wider by the cell that owns the text. Cells
+// paint left to right and each fills its own background first, so anything the
+// owner drew past its edge is erased by the neighbour a moment later. Instead
+// EVERY cell asks whether a cell beside it owns text reaching this far and
+// draws that text itself, clipped to its own rectangle. The pieces line up
+// because each lays the text out in the same rectangle: the one spanning the
+// whole spill.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+
+// How far the scan looks, both for an owner and for room to spill into. Bounded
+// because this runs for every painted cell, and twenty-four columns is already
+// wider than any label still meant to be read.
+constexpr int kSpillScan = 24;
+
+struct Spill {
+    int     owner { -1 };   // column owning the text, -1 when nothing spills
+    QRect   rect;           // rectangle the text is laid out in
+    QString text;
+    int     align { 0 };
+    QFont   font;
+};
+
+// Left-ish alignment spills right, right-ish spills left, centred spills both
+// ways, which is what a title centred over a block does.
+bool leftish(int a)  { return !(a & (Qt::AlignRight | Qt::AlignHCenter)); }
+bool rightish(int a) { return  (a & Qt::AlignRight)   != 0; }
+bool centred(int a)  { return  (a & Qt::AlignHCenter) != 0; }
+
+Spill spillFor(const QTableView* view, const SpreadsheetModel* model,
+               int row, int col, const QFont& baseFont) {
+    Spill none;
+    if (!view || !model) return none;
+
+    auto textAt  = [&](int c) { return model->index(row, c).data(Qt::DisplayRole).toString(); };
+    auto empty   = [&](int c) { return textAt(c).isEmpty(); };
+    auto alignAt = [&](int c) {
+        const int a = model->index(row, c).data(Qt::TextAlignmentRole).toInt();
+        return a ? a : int(Qt::AlignLeft | Qt::AlignVCenter);
+    };
+
+    // Which cell owns the text painted through this one?
+    int owner = -1;
+    if (!empty(col)) {
+        owner = col;
+    } else {
+        // Nothing here, so look outward. The first non-empty cell in each
+        // direction is the only candidate: anything past it is blocked.
+        for (int c = col - 1; c >= 0 && col - c <= kSpillScan; --c) {
+            if (empty(c)) continue;
+            const int a = alignAt(c);
+            if (leftish(a) || centred(a)) owner = c;
+            break;
+        }
+        if (owner < 0)
+            for (int c = col + 1; c - col <= kSpillScan; ++c) {
+                if (empty(c)) continue;
+                const int a = alignAt(c);
+                if (rightish(a) || centred(a)) owner = c;
+                break;
+            }
+    }
+    if (owner < 0) return none;
+
+    const Cell ocell = model->cellAt(owner, row);
+    if (ocell.format.wrap) return none;              // wrapped text stays put
+    if (view->columnSpan(row, owner) > 1) return none;  // a merge already has room
+
+    Spill sp;
+    sp.text  = textAt(owner);
+    sp.align = alignAt(owner);
+    sp.font  = baseFont;
+    const QVariant fv = model->index(row, owner).data(Qt::FontRole);
+    if (fv.isValid()) sp.font = fv.value<QFont>();
+
+    const int indentPx = std::max(0, ocell.format.indent) * 12;
+    const int needed   = QFontMetrics(sp.font).horizontalAdvance(sp.text) + 6 + indentPx;
+    const int ownWidth = view->columnWidth(owner);
+    if (needed <= ownWidth) return none;             // it fits, nothing spills
+
+    int left  = view->columnViewportPosition(owner);
+    int right = left + ownWidth;
+    if (leftish(sp.align) || centred(sp.align))
+        for (int c = owner + 1; c - owner <= kSpillScan && right - left < needed; ++c) {
+            if (!empty(c)) break;
+            right = view->columnViewportPosition(c) + view->columnWidth(c);
+        }
+    if (rightish(sp.align) || centred(sp.align))
+        for (int c = owner - 1; c >= 0 && owner - c <= kSpillScan && right - left < needed; --c) {
+            if (!empty(c)) break;
+            left = view->columnViewportPosition(c);
+        }
+
+    // Never wider than the text needs, or a centred label drifts off its cell.
+    if (right - left > needed) {
+        if      (rightish(sp.align)) left  = right - needed;
+        else if (!centred(sp.align)) right = left  + needed;
+    }
+
+    sp.owner = owner;
+    sp.rect  = QRect(left, view->rowViewportPosition(row),
+                     right - left, view->rowHeight(row));
+    return sp;
+}
+
+} // namespace
+
 class CalcItemDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -571,8 +686,38 @@ public:
                 to.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
                 p->drawText(QRectF(r), text, to);
             } else {
-                const QString shown = QFontMetrics(f).elidedText(text, Qt::ElideRight, r.width());
-                p->drawText(r, align, shown);
+                // Spills into the empty cells beside it when it does not fit,
+                // and is cut off only when there is nowhere left to go.
+                const Spill sp = spillFor(qobject_cast<const QTableView*>(opt.widget),
+                                          model, idx.row(), idx.column(), f);
+                if (sp.owner == idx.column()) {
+                    p->setClipRect(opt.rect);
+                    p->drawText(sp.rect.adjusted(3 + indentPx, 0, -3, 0), sp.align, sp.text);
+                    p->setClipping(false);
+                } else {
+                    const QString shown =
+                        QFontMetrics(f).elidedText(text, Qt::ElideRight, r.width());
+                    p->drawText(r, align, shown);
+                }
+            }
+        }
+
+        // A cell with nothing in it still has to draw the part of a neighbour's
+        // label that reaches this far; see the note above spillFor().
+        if (text.isEmpty() && !fmt.wrap && model) {
+            const Spill sp = spillFor(qobject_cast<const QTableView*>(opt.widget),
+                                      model, idx.row(), idx.column(), opt.font);
+            if (sp.owner >= 0 && sp.owner != idx.column()) {
+                const Cell oc = model->cellAt(sp.owner, idx.row());
+                const QVariant fgv =
+                    model->index(idx.row(), sp.owner).data(Qt::ForegroundRole);
+                const QColor fg = fgv.canConvert<QColor>() ? fgv.value<QColor>() : QColor();
+                p->setClipRect(opt.rect);
+                p->setFont(sp.font);
+                p->setPen(fg.isValid() ? fg : QColor("#1C1E26"));
+                p->drawText(sp.rect.adjusted(3 + std::max(0, oc.format.indent) * 12, 0, -3, 0),
+                            sp.align, sp.text);
+                p->setClipping(false);
             }
         }
 
