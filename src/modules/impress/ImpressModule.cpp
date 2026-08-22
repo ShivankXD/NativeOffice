@@ -5,6 +5,9 @@
 // JSON-based file persistence (.noff, schema v2).
 // ─────────────────────────────────────────────────────────────────────────────
 #include "ImpressModule.h"
+
+#include <QTemporaryFile>
+#include <QDir>
 #include "ImpressRibbon.h"
 #include "ImpressStatusBar.h"
 #include "SlidePanelWidget.h"
@@ -134,6 +137,19 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────
+// Every edit goes through here.
+//
+// m_editSeq moves even when the deck is already dirty, because
+// documentModified() only fires on the first edit after a save and so cannot
+// tell crash recovery that there is something new to snapshot.
+void ImpressModule::markDirty() {
+    ++m_editSeq;
+    if (!m_dirty) {
+        m_dirty = true;
+        emit documentModified();
+    }
+}
+
 ImpressModule::ImpressModule(QWidget* parent)
     : QWidget(parent)
 {
@@ -147,6 +163,20 @@ ImpressModule::ImpressModule(QWidget* parent)
     buildUi();
     applyStyles();
     setObjectName("impressModule");
+
+    // Crash recovery. Thirty seconds, and skipped entirely when nothing has
+    // changed, so a deck of image-heavy slides is not re-serialized for nothing.
+    m_recovery = new CrashRecovery(QStringLiteral("impress"), this);
+    m_recovery->setSource([this]{ return m_editSeq; },
+                          [this]{ return buildNoffBytes(); });
+    m_recovery->start(30);
+    QTimer::singleShot(0, this, [this]{
+        // Building the starting deck is not unsaved work.
+        m_editSeq = 0;
+        m_recovery->setSource([this]{ return m_editSeq; },
+                              [this]{ return buildNoffBytes(); });
+    });
+    QTimer::singleShot(600, this, [this]{ offerCrashRecovery(); });
 
     // Dev-only capture hook (same pattern as PdfModule): PrintWindow-based
     // external captures drop drawPixmap content on this machine, so
@@ -337,7 +367,7 @@ void ImpressModule::buildUi() {
     connect(m_ribbon, &ImpressRibbon::slideAnimationSelected, this, [this](SlideAnimation a) {
         if (m_currentIdx < 0 || m_currentIdx >= static_cast<int>(m_slideData.size())) return;
         m_slideData[m_currentIdx].slideAnimation = a;
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
         commitUndoStep();
         previewSlideAnimation(a);   // play it once so the user sees it applied
     });
@@ -368,7 +398,7 @@ void ImpressModule::buildUi() {
         if (on && m_slideNumberPos.x() < 0)
             m_slideNumberPos = QPointF(-1, -1);   // (re)default to bottom-right
         applySlideNumbers();
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
     });
     connect(m_ribbon, &ImpressRibbon::dateTimeRequested, this, [this] {
         insertPresetText(QDate::currentDate().toString("MMM d, yyyy"), 20.0, false, QColor("#2C3140"));
@@ -418,7 +448,7 @@ void ImpressModule::buildUi() {
             m_slideData[i] = snap;
             m_slidePanel->refreshSlide(static_cast<int>(i));
         }
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
         commitUndoStep();
     };
     connect(m_ribbon, &ImpressRibbon::templatesRequested, this, &ImpressModule::showTemplatesGallery);
@@ -536,7 +566,7 @@ void ImpressModule::buildUi() {
 
         if (slideIdx == m_currentIdx) m_scenes[slideIdx]->loadFromData(m_slideData[slideIdx]);
         m_slidePanel->refreshSlide(slideIdx);
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
         commitUndoStep();
     });
 
@@ -560,7 +590,7 @@ void ImpressModule::buildUi() {
     connect(m_notesEdit, &QTextEdit::textChanged, this, [this] {
         if (m_currentIdx < 0 || m_ignoreChange) return;
         m_slideData[m_currentIdx].notes = m_notesEdit->toPlainText();
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
         m_undoDebounce->start();
     });
 }
@@ -637,7 +667,7 @@ QWidget* ImpressModule::buildCommentsPanel() {
         if (r >= static_cast<int>(cs.size())) return;
         cs.erase(cs.begin() + r);
         refreshComments();
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
         commitUndoStep();
     });
 
@@ -680,7 +710,7 @@ QWidget* ImpressModule::buildCommentsPanel() {
         m_slideData[m_currentIdx].comments.push_back({ "You", t });
         m_commentInput->clear();
         refreshComments();
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
         commitUndoStep();
     };
     connect(insertBtn, &QPushButton::clicked, this, insertComment);
@@ -1033,7 +1063,7 @@ void ImpressModule::applyTemplate(const SlideData& tpl) {
     m_slideData[m_currentIdx] = d;
     m_scenes[m_currentIdx]->loadFromData(d);
     m_slidePanel->refreshSlide(m_currentIdx);
-    if (!m_dirty) { m_dirty = true; emit documentModified(); }
+    markDirty();
     commitUndoStep();
 }
 
@@ -1069,10 +1099,7 @@ void ImpressModule::createSlide(const SlideData& data) {
     connect(scene, &QGraphicsScene::changed, this, [this, scene](const QList<QRectF>&) {
         const int cur = indexOfScene(scene);
         if (cur >= 0) m_slidePanel->refreshSlide(cur);
-        if (!m_ignoreChange && !m_dirty) {
-            m_dirty = true;
-            emit documentModified();
-        }
+        if (!m_ignoreChange) markDirty();
         if (!m_ignoreChange && !m_restoringUndo)
             m_undoDebounce->start();
     });
@@ -1081,7 +1108,7 @@ void ImpressModule::createSlide(const SlideData& data) {
     // don't fire QGraphicsScene::changed, so track them via sceneModified too.
     connect(scene, &SlideScene::sceneModified, this, [this] {
         if (m_ignoreChange) return;
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
         if (!m_restoringUndo) m_undoDebounce->start();
     });
 
@@ -1112,7 +1139,7 @@ void ImpressModule::connectSceneSlideNumber(SlideScene* scene) {
     connect(scene, &SlideScene::slideNumberMoved, this, [this](const QPointF& p) {
         m_slideNumberPos = p;
         applySlideNumbers();
-        if (!m_dirty) { m_dirty = true; emit documentModified(); }
+        markDirty();
     });
 }
 
@@ -1222,8 +1249,7 @@ void ImpressModule::removeTrailingSlides(int n) {
         m_currentIdx = -1;                 // force switchToSlide to re-attach
         switchToSlide(static_cast<int>(m_scenes.size()) - 1);
     }
-    m_dirty = true;
-    emit documentModified();
+    markDirty();
     commitUndoStep();
 }
 
@@ -1280,8 +1306,7 @@ void ImpressModule::removeSlideAt(int index) {
                                 : qMax(0, m_currentIdx - (index < m_currentIdx ? 1 : 0));
     m_currentIdx = -1;                        // force switchToSlide to re-attach
     switchToSlide(want);
-    m_dirty = true;
-    emit documentModified();
+    markDirty();
 }
 
 void ImpressModule::switchToSlide(int index) {
@@ -1370,7 +1395,7 @@ void ImpressModule::deleteCurrentSlide() {
     applySlideNumbers();   // renumber the remaining slides (1..N)
     // Removing a slide changes no scene content, so no QGraphicsScene::changed
     // fires — mark dirty explicitly or the deletion is lost with no save prompt.
-    if (!m_dirty) { m_dirty = true; emit documentModified(); }
+    markDirty();
     commitUndoStep();
 }
 
@@ -1398,7 +1423,7 @@ void ImpressModule::moveSlide(int fromIndex, int toIndex) {
     switchToSlide(toIndex);
     applySlideNumbers();   // renumber after the reorder
     // Reordering touches no scene content, so mark dirty explicitly.
-    if (!m_dirty) { m_dirty = true; emit documentModified(); }
+    markDirty();
     commitUndoStep();
 }
 
@@ -1414,7 +1439,7 @@ void ImpressModule::applyTransitionToCurrentSlide(SlideTransition transition) {
     m_slideData[m_currentIdx].transition = transition;
     // A transition is slide metadata, not scene content — mark dirty explicitly
     // (the apply-to-all variant already does this).
-    if (!m_dirty) { m_dirty = true; emit documentModified(); }
+    markDirty();
     commitUndoStep();
     previewTransition(transition);   // play it once so the user sees it applied
 }
@@ -1423,7 +1448,7 @@ void ImpressModule::applyTransitionToAllSlides(SlideTransition transition) {
     if (m_slideData.empty()) return;
     for (auto& slide : m_slideData)
         slide.transition = transition;
-    if (!m_dirty) { m_dirty = true; emit documentModified(); }
+    markDirty();
     commitUndoStep();
     previewTransition(transition);
 }
@@ -2995,26 +3020,68 @@ void ImpressModule::deckFromJson(const QJsonObject& root) {
     refreshSlideNumberState();
 }
 
-bool ImpressModule::saveToPath(const QString& path) {
+// The whole deck as .noff bytes.
+//
+// Split out of saveToPath() because crash recovery needs the same bytes without
+// a file to put them in, and a second serializer would drift from this one.
+QByteArray ImpressModule::buildNoffBytes() {
     syncCurrentSceneToData();
+    return QByteArray("<!-- NativeOffice Impress Presentation (.noff) -->\n")
+         + QJsonDocument(deckToJson()).toJson(QJsonDocument::Indented);
+}
 
+bool ImpressModule::saveToPath(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
         return false;
 
-    QTextStream out(&f);
-    out.setEncoding(QStringConverter::Utf8);
-    out << "<!-- NativeOffice Impress Presentation (.noff) -->\n";
-    out << QJsonDocument(deckToJson()).toJson(QJsonDocument::Indented);
+    const QByteArray bytes = buildNoffBytes();
+    // Compared against -1, not against the length: the file is open in text
+    // mode, so on Windows each newline becomes two bytes on the way out and the
+    // count coming back is not the count going in.
+    if (f.write(bytes) < 0) { f.close(); return false; }
     f.close();
 
     m_currentPath = path;
     m_dirty       = false;
+    if (m_recovery) {
+        m_recovery->setDocumentPath(path);
+        m_recovery->discard();   // an explicit save supersedes any snapshot
+    }
     emit filePathChanged(path);
     return true;
 }
 
+// Offer back whatever a session that did not close normally left behind.
+//
+// Loaded through loadFromPath() from a temporary file, like any other .noff,
+// rather than through a second parser written for this one job.
+void ImpressModule::offerCrashRecovery() {
+    if (!m_recovery) return;
+    QByteArray bytes;
+    if (!m_recovery->offerLeftover(bytes)) return;
+
+    QTemporaryFile tmp(QDir::tempPath() + QStringLiteral("/noff-recover-XXXXXX.noff"));
+    tmp.setAutoRemove(true);
+    if (!tmp.open()) return;
+    if (tmp.write(bytes) != bytes.size()) return;
+    tmp.flush();
+    const QString tmpPath = tmp.fileName();
+    tmp.close();
+
+    const QString bound = m_currentPath;    // recovery keeps the document's path
+    if (!loadFromPath(tmpPath)) return;
+    m_currentPath = bound;
+    m_dirty       = true;                   // recovered work is still unsaved
+    ++m_editSeq;
+    m_recovery->setDocumentPath(bound);
+    emit documentModified();
+    emit filePathChanged(bound);
+}
+
 bool ImpressModule::loadFromPath(const QString& path) {
+    // Snapshots follow the document that is actually open.
+    if (m_recovery) m_recovery->setDocumentPath(path);
     // PowerPoint packages are ZIP archives beginning with the "PK" signature —
     // import those via the .pptx reader instead of the JSON (.noff) parser.
     {

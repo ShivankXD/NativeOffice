@@ -15,6 +15,11 @@ add_library(NativeOfficeCore STATIC
     auth/SecureStore.h
     common/BrandBar.cpp
     common/BrandBar.h
+    # Periodic snapshots of unsaved work. Shared by all three editors so the
+    # rule that a snapshot only ever lands in our own directory, in our own
+    # format, is written once rather than three times.
+    common/CrashRecovery.cpp
+    common/CrashRecovery.h
     settings/UsageStats.cpp
     settings/UsageStats.h
     settings/ActivityLog.cpp

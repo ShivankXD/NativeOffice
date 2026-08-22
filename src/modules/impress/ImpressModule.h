@@ -44,6 +44,8 @@ class QLabel;
 class QToolButton;
 class QVariantAnimation;
 
+#include "core/common/CrashRecovery.h"
+
 namespace NativeOffice {
 
 class ImpressRibbon;
@@ -211,7 +213,19 @@ private:
 
     // ── File state ──────────────────────────────────────────────────────
     QString m_currentPath;
+
     bool    m_dirty        { false };
+    // Crash recovery. A presentation had no periodic snapshot of any kind,
+    // so until it was saved by hand a crash lost everything in it. The
+    // snapshot only ever lands in our own directory in our own format;
+    // see core/common/CrashRecovery.h for why that is not negotiable.
+    CrashRecovery* m_recovery { nullptr };
+    // Moves on every edit, so recovery can tell whether anything changed
+    // since the last snapshot without serializing the deck to find out.
+    quint64 m_editSeq { 0 };
+    void offerCrashRecovery();
+    void markDirty();
+    [[nodiscard]] QByteArray buildNoffBytes();
     bool    m_ignoreChange { false };
 
     // ── Undo/redo ───────────────────────────────────────────────────────

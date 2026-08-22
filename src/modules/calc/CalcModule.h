@@ -33,6 +33,8 @@
 #include <QVector>
 #include <QHash>
 #include <QSet>
+
+#include "core/common/CrashRecovery.h"
 #include <functional>
 
 #include "Cell.h"
@@ -119,6 +121,10 @@ public:
     // save path can name what it is about to lose, and stay quiet when it is
     // about to lose nothing.
     [[nodiscard]] int objectsLostOnXlsxSave() const;
+
+    // The workbook as .noff bytes, shared by an explicit save and by the
+    // crash-recovery snapshot.
+    [[nodiscard]] QByteArray buildNoffBytes();
 
     // ── Dev capture aids (NATIVEOFFICE_CALC_GRAB) ──────────────────────
     // Switching sheets and reporting what sits on one, so chart and picture
@@ -524,6 +530,16 @@ private:
     // Encoded bytes for each picture widget, so the image survives a save and
     // a sheet switch without going back to the file it came from.
     QHash<QWidget*, QByteArray> m_imageData;
+
+    // Crash recovery. A spreadsheet had no periodic snapshot of any kind, so
+    // until it was saved by hand a crash lost everything in it. The snapshot
+    // only ever lands in our own directory in our own format; see
+    // core/common/CrashRecovery.h for why that is not negotiable.
+    CrashRecovery* m_recovery { nullptr };
+    // Moves on every edit, so recovery can tell whether anything changed since
+    // the last snapshot without serializing the workbook to find out.
+    quint64 m_editSeq { 0 };
+    void offerCrashRecovery();
     // Pictures that were read out of the workbook rather than added here.
     //
     // syncImageSpecs() rebuilds every SheetImage from the live widgets, and a

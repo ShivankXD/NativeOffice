@@ -220,11 +220,15 @@ void WriterModule::buildUi() {
     // app exit deletes it; a crash leaves it for recovery on next launch.
     // Interval is user-configurable in Home → Settings.
     const QSettings settings;
-    m_autosaveTimer = new QTimer(this);
-    m_autosaveTimer->setInterval(qBound(5, settings.value("writer/autosaveSec", 20).toInt(), 300) * 1000);
-    connect(m_autosaveTimer, &QTimer::timeout, this, &WriterModule::writeRecovery);
-    m_autosaveTimer->start();
-    connect(qApp, &QCoreApplication::aboutToQuit, this, [this]{ QFile::remove(recoveryFilePath()); });
+    m_recovery = new CrashRecovery(QStringLiteral("writer"), this);
+    m_recovery->setSource(
+        [this] { return m_editSeq; },
+        [this]() -> QByteArray {
+            if (!m_editor || !m_dirty) return {};
+            if (m_editor->document()->isEmpty()) return {};
+            return buildNoffString().toUtf8();
+        });
+    m_recovery->start(qBound(5, settings.value("writer/autosaveSec", 20).toInt(), 300));
 
     rootLayout->addWidget(new BrandBar(this));   // unified full-width brand tray
     rootLayout->addWidget(m_ribbon);
@@ -392,6 +396,9 @@ void WriterModule::buildUi() {
 // ─────────────────────────────────────────────────────────────────────────────
 void WriterModule::onContentsChanged() {
     if (m_ignoreChange) return;
+    // Bumped on every change, not only the first: documentModified() fires once
+    // per save cycle and so cannot tell crash recovery there is new work.
+    ++m_editSeq;
     if (!m_dirty) {
         m_dirty = true;
         emit documentModified();
@@ -438,7 +445,7 @@ bool WriterModule::saveToPath(const QString& path) {
         m_currentPath = path;
         m_dirty       = false;
         emit filePathChanged(path);
-        QFile::remove(recoveryFilePath());
+        if (m_recovery) { m_recovery->setDocumentPath(path); m_recovery->discard(); }
         return true;
     }
 
@@ -456,62 +463,31 @@ bool WriterModule::saveToPath(const QString& path) {
     emit filePathChanged(path);
 
     // A clean save supersedes any crash-recovery snapshot for this document.
-    QFile::remove(recoveryFilePath());
+    if (m_recovery) { m_recovery->setDocumentPath(path); m_recovery->discard(); }
     return true;
 }
 
 // ── Autosave + crash recovery ────────────────────────────────────────────────
-QString WriterModule::recoveryFilePath() const {
-    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (dir.isEmpty()) dir = QDir::tempPath();
-    dir += "/recovery";
-    QDir().mkpath(dir);
-    const QString key = m_currentPath.isEmpty()
-                            ? QStringLiteral("untitled")
-                            : QString::number(qHash(m_currentPath), 16);
-    return dir + "/" + key + ".noff";
-}
-
+// The mechanics live in core/common/CrashRecovery, shared with Calc and
+// Impress. Writer used to key every untitled document to one file called
+// untitled.noff, so with two blank documents open each overwrote the other's
+// snapshot and only one of them could ever be recovered.
 void WriterModule::writeRecovery() {
-    if (!m_editor || !m_dirty) return;          // nothing unsaved → no snapshot
-    if (m_editor->document()->isEmpty()) return;
-    QFile f(recoveryFilePath());
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) return;
-    QTextStream out(&f);
-    out.setEncoding(QStringConverter::Utf8);
-    out << buildNoffString();
-    f.close();
+    if (m_recovery) m_recovery->snapshot();
 }
 
 void WriterModule::checkCrashRecovery() {
-    const QString rp = recoveryFilePath();
-    if (!QFileInfo::exists(rp)) return;          // clean previous session
+    if (!m_recovery) return;
+    QByteArray bytes;
+    if (!m_recovery->offerLeftover(bytes)) return;
 
-    const QString name = m_currentPath.isEmpty()
-                             ? QStringLiteral("an untitled document")
-                             : QFileInfo(m_currentPath).fileName();
-    const auto choice = QMessageBox::question(
-        this, tr("Recover Unsaved Changes"),
-        tr("NativeOffice found unsaved changes for %1 from a previous session "
-           "that didn't close normally.\n\nRecover them?").arg(name),
-        QMessageBox::Yes | QMessageBox::No);
-
-    if (choice == QMessageBox::Yes) {
-        QFile f(rp);
-        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QTextStream in(&f);
-            in.setEncoding(QStringConverter::Utf8);
-            const QString content = in.readAll();
-            f.close();
-            const QString keep = m_currentPath;      // recovery keeps the bound path
-            loadNoffString(content);
-            m_currentPath = keep;
-            m_dirty = true;                          // recovered = still unsaved
-            emit documentModified();
-        }
-    } else {
-        QFile::remove(rp);
-    }
+    const QString keep = m_currentPath;          // recovery keeps the bound path
+    loadNoffString(QString::fromUtf8(bytes));
+    m_currentPath = keep;
+    m_dirty = true;                              // recovered = still unsaved
+    ++m_editSeq;
+    m_recovery->setDocumentPath(keep);
+    emit documentModified();
 }
 
 // Parse a .noff string (strip header, pull style sidecar, set HTML, re-tag).
@@ -545,6 +521,8 @@ void WriterModule::loadNoffString(QString content) {
 }
 
 bool WriterModule::loadFromPath(const QString& path) {
+    // Snapshots follow the document that is actually open.
+    if (m_recovery) m_recovery->setDocumentPath(path);
     if (path.endsWith(".docx", Qt::CaseInsensitive)) {
         m_ignoreChange = true;
         const bool ok = DocxIo::importDocx(path, m_editor->document());

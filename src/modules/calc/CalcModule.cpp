@@ -4,6 +4,8 @@
 // Sprint 8: JSON-based file persistence (.noff) with CSV fallback.
 // ─────────────────────────────────────────────────────────────────────────────
 #include "CalcModule.h"
+
+#include <QTemporaryFile>
 #include "SpreadsheetModel.h"
 #include "CalcHeaderView.h"
 #include "CalcIcons.h"
@@ -1059,7 +1061,51 @@ CalcModule::CalcModule(QWidget* parent)
     // sheet wrongly prompts to save. A real edit afterwards re-dirties it.
     QTimer::singleShot(0, this, [this]{
         if (m_currentPath.isEmpty()) { m_dirty = false; emit documentModified(); }
+        // The counter starts here, after the initial grid has settled, so
+        // building an empty workbook is not mistaken for unsaved work.
+        m_editSeq = 0;
+        if (m_recovery) m_recovery->setSource([this]{ return m_editSeq; },
+                                              [this]{ return buildNoffBytes(); });
     });
+
+    // Crash recovery. Thirty seconds rather than Writer's twenty: a workbook
+    // serializes to a great deal more than a page of text, and the snapshot is
+    // skipped entirely when nothing has changed.
+    m_recovery = new CrashRecovery(QStringLiteral("calc"), this);
+    m_recovery->setSource([this]{ return m_editSeq; },
+                          [this]{ return buildNoffBytes(); });
+    m_recovery->start(30);
+    // Offered once the window is up, so the prompt has something to sit on.
+    QTimer::singleShot(600, this, [this]{ offerCrashRecovery(); });
+}
+
+// Offer back whatever a session that did not close normally left behind.
+//
+// The snapshot is loaded through loadFromPath() like any other .noff, from a
+// temporary file, rather than through a second parser written for this: the
+// loader is long and has been fixed a lot, and a private copy of it would be
+// the one nobody remembers to fix.
+void CalcModule::offerCrashRecovery() {
+    if (!m_recovery) return;
+    QByteArray bytes;
+    if (!m_recovery->offerLeftover(bytes)) return;
+
+    QTemporaryFile tmp(QDir::tempPath() + QStringLiteral("/noff-recover-XXXXXX.noff"));
+    tmp.setAutoRemove(true);
+    if (!tmp.open()) return;
+    if (tmp.write(bytes) != bytes.size()) return;
+    tmp.flush();
+    const QString tmpPath = tmp.fileName();
+    tmp.close();
+
+    const QString bound = m_currentPath;    // recovery keeps the document's path
+    if (!loadFromPath(tmpPath)) return;
+    m_currentPath = bound;
+    m_dirty       = true;                   // recovered work is still unsaved
+    ++m_editSeq;
+    m_recovery->setDocumentPath(bound);
+    emit documentModified();
+    emit filePathChanged(bound);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1543,6 +1589,10 @@ void CalcModule::rebuildTabBar() {
 }
 
 void CalcModule::markDirty() {
+    // Bumped even when the document is already dirty: documentModified() only
+    // fires on the first edit after a save, so it cannot tell crash recovery
+    // that there is something new to snapshot. This counter can.
+    ++m_editSeq;
     if (!m_dirty) {
         m_dirty = true;
         emit documentModified();
@@ -6444,6 +6494,7 @@ bool CalcModule::saveToPath(const QString& path) {
             return false;
         m_currentPath = path;
         m_dirty       = false;
+        if (m_recovery) { m_recovery->setDocumentPath(path); m_recovery->discard(); }
         emit filePathChanged(path);
         return true;
     }
@@ -6477,6 +6528,7 @@ bool CalcModule::saveToPath(const QString& path) {
         cf.close();
         m_currentPath = path;
         m_dirty       = false;
+        if (m_recovery) { m_recovery->setDocumentPath(path); m_recovery->discard(); }
         emit filePathChanged(path);
         return true;
     }
@@ -6485,6 +6537,28 @@ bool CalcModule::saveToPath(const QString& path) {
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
         return false;
 
+    const QByteArray bytes = buildNoffBytes();
+    // Compared against -1, not against the length: the file is open in text
+    // mode, so on Windows each newline becomes two bytes on the way out and the
+    // count coming back is not the count going in.
+    if (f.write(bytes) < 0) { f.close(); return false; }
+    f.close();
+
+    m_currentPath = path;
+    m_dirty       = false;
+    if (m_recovery) {
+        m_recovery->setDocumentPath(path);
+        m_recovery->discard();   // an explicit save supersedes any snapshot
+    }
+    emit filePathChanged(path);
+    return true;
+}
+
+// The whole workbook as .noff bytes.
+//
+// Split out of saveToPath() because crash recovery needs the same bytes without
+// a file to put them in, and a second serializer would drift from this one.
+QByteArray CalcModule::buildNoffBytes() {
     syncChartSpecs();          // capture the active sheet's live chart geometries
     QJsonArray sheetsArr;
     for (auto* s : m_sheets) {
@@ -6545,20 +6619,14 @@ bool CalcModule::saveToPath(const QString& path) {
     root["activeSheet"] = m_activeSheet;
     root["sheets"]      = sheetsArr;
 
-    QTextStream out(&f);
-    out.setEncoding(QStringConverter::Utf8);
-    out << "<!-- NativeOffice Calc Spreadsheet (.noff) -->\n";
-    out << QJsonDocument(root).toJson(QJsonDocument::Indented);
-    f.close();
-
-    m_currentPath = path;
-    m_dirty       = false;
-    emit filePathChanged(path);
-    return true;
+    return QByteArray("<!-- NativeOffice Calc Spreadsheet (.noff) -->\n")
+         + QJsonDocument(root).toJson(QJsonDocument::Indented);
 }
 
 bool CalcModule::loadFromPath(const QString& path) {
     const bool isXlsx = path.endsWith(".xlsx", Qt::CaseInsensitive);
+    // Snapshots follow the document that is actually open.
+    if (m_recovery) m_recovery->setDocumentPath(path);
 
     // Read .xlsx (binary) up front so we can bail before tearing down on failure.
     std::vector<XlsxSheet> xlsxSheets;

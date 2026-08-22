@@ -26,6 +26,8 @@ class QTimer;
 class QScrollArea;
 class QListWidget;
 
+#include "core/common/CrashRecovery.h"
+
 namespace NativeOffice {
 
 class WriterRibbon;
@@ -125,7 +127,6 @@ private:
     // Sprint 24: autosave + crash recovery
     QString buildNoffString() const;  // header + style sidecar + HTML
     void    loadNoffString(QString content);  // parse sidecar + set HTML
-    QString recoveryFilePath() const; // per-document recovery file location
     void    writeRecovery();          // timed snapshot of unsaved changes
     void    checkCrashRecovery();     // offer to restore a leftover recovery file
 
@@ -153,7 +154,10 @@ private:
     QTextEdit*       m_editor    { nullptr };   // == m_paper (QTextEdit API surface)
     PagedTextEdit*   m_paper     { nullptr };   // same object, paged-specific calls
     QTimer*          m_statusTimer { nullptr };  // debounce for updateStatus
-    QTimer*          m_autosaveTimer { nullptr }; // periodic crash-recovery snapshot
+    CrashRecovery*   m_recovery { nullptr };      // periodic crash-recovery snapshot
+    // Moves on every edit. documentModified() only fires on the first edit
+    // after a save, so it cannot tell recovery there is something new.
+    quint64          m_editSeq { 0 };
 
     QFont          m_baseFont;                // body font at 100% zoom
     int            m_zoom         { 100 };
