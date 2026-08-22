@@ -382,6 +382,71 @@ static void testPictureRebuild(const QString& dir) {
     check(found, "the picture came back with its bytes intact");
 }
 
+// Colours have to survive the trip out and back.
+//
+// A series can carry one colour of its own and a colour per point, and both are
+// written now: a chart regenerated without them comes back in a default palette
+// the file never mentioned. This also guards the schema positions, since
+// <c:spPr> and <c:dPt> each sit at a fixed point in the series sequence and
+// Excel refuses the file when they do not.
+static void testColoursRoundTrip(const QString& dir) {
+    out << "\n[rebuild] series and per-point colours survive\n";
+
+    XlsxSheet sh = makeSheet();
+    sh.cellText  = tableReader();
+
+    // An explicit chart, the shape an imported one takes.
+    ChartSpec cs;
+    cs.type     = ChartType::Column;
+    cs.geom     = QRect(40, 40, 420, 280);
+    cs.anchor.fromCol = 4;  cs.anchor.fromRow = 1;
+    cs.anchor.toCol   = 10; cs.anchor.toRow   = 15;
+    cs.catRange = QRect(0, 1, 1, 3);
+    cs.catSheet = QStringLiteral("Data");
+    cs.hasTitle = false;
+
+    ChartSeries a;
+    a.name     = QStringLiteral("Sales");
+    a.sheet    = QStringLiteral("Data");
+    a.valRange = QRect(1, 1, 1, 3);
+    a.cache    = { 120.0, 90.0, 140.0 };
+    a.color    = QColor("#59BD94");
+    cs.series.push_back(a);
+
+    ChartSeries b;
+    b.name     = QStringLiteral("Costs");
+    b.sheet    = QStringLiteral("Data");
+    b.valRange = QRect(2, 1, 1, 3);
+    b.cache    = { 80.0, 55.0, 70.0 };
+    b.pointColors = { QColor("#BBE192"), QColor("#59BD94"), QColor("#F4F4F7") };
+    cs.series.push_back(b);
+
+    sh.charts.push_back(cs);
+
+    const QString path = dir + "/colours.xlsx";
+    std::vector<XlsxSheet> sheets { sh }, back;
+    check(exportXlsx(path, sheets), "exportXlsx wrote the file");
+    validatePackage(path, "colours");
+    if (!importXlsx(path, back) || back.empty() || back[0].charts.empty()) {
+        check(false, "reads back with a chart");
+        return;
+    }
+    const ChartSpec& got = back[0].charts.front();
+    check(got.series.size() == 2,
+          QString("two series came back (got %1)").arg(got.series.size()));
+    if (got.series.size() != 2) return;
+
+    check(got.series[0].color.name().compare("#59bd94", Qt::CaseInsensitive) == 0,
+          QString("the series colour survived (got %1)").arg(got.series[0].color.name()));
+    check(got.series[1].pointColors.size() == 3,
+          QString("three point colours came back (got %1)")
+              .arg(got.series[1].pointColors.size()));
+    if (got.series[1].pointColors.size() == 3)
+        check(got.series[1].pointColors[0].name().compare("#bbe192", Qt::CaseInsensitive) == 0
+              && got.series[1].pointColors[2].name().compare("#f4f4f7", Qt::CaseInsensitive) == 0,
+              "and they came back in the right order");
+}
+
 // Every chart type, to catch a plot element whose schema order is wrong.
 static void testEveryType(const QString& dir) {
     out << "\n[rebuild] every chart type round-trips\n";
@@ -567,6 +632,7 @@ int main(int argc, char** argv) {
 
     testRebuild(dir);
     testPictureRebuild(dir);
+    testColoursRoundTrip(dir);
     testEveryType(dir);
     if (argc > 1) {
         const QString corpus = QString::fromLocal8Bit(argv[1]);
