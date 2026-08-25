@@ -17,6 +17,7 @@
 
 #include <QByteArray>
 #include <QColor>
+#include <QVector>
 #include <QHash>
 #include <QString>
 #include <functional>
@@ -63,14 +64,26 @@ void parseSheetDrawing(const QByteArray& drawingXml,
 // Parse a single xl/charts/chartN.xml into `spec` (type, title, categories and
 // series). Placement is not touched: that comes from the drawing anchor.
 // Returns false when the part holds no plottable series.
-// `blipColor` resolves a picture fill on a series to a single colour, given the
-// relationship id from its <a:blip r:embed>. A chart series can be filled with
-// an image rather than a colour, and without this such a series has no colour
-// at all and falls through to a default the file never asked for. Optional: a
-// caller that cannot fetch parts just passes nothing.
+// What a picture fill on a chart series reads as.
+//
+// Excel stretches the picture into each bar, so the bar shows the image's
+// shading over its own height. `average` is the one colour it comes to;
+// `stops` and `positions` are that shading sampled top to bottom, in the same
+// parallel-array form SheetShape uses for a gradient.
+struct FillPicture {
+    QColor          average;
+    QVector<QColor> stops;
+    QVector<qreal>  positions;   // 0..1, parallel to stops
+};
+
+// `blipPicture` resolves a picture fill on a series, given the relationship id
+// from its <a:blip r:embed>. A chart series can be filled with an image rather
+// than a colour, and without this such a series has no colour at all and falls
+// through to a default the file never asked for. Optional: a caller that
+// cannot fetch parts just passes nothing.
 bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
                     const ThemeColors& theme = {},
-                    const std::function<QColor(const QString&)>& blipColor = {});
+                    const std::function<FillPicture(const QString&)>& blipPicture = {});
 
 // EMU (English Metric Units, 914400 per inch) -> pixels at 96 DPI.
 int emuToPx(qint64 emu);

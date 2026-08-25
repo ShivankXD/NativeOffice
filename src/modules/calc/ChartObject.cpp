@@ -15,6 +15,8 @@
 #include <QResizeEvent>
 #include <QContextMenuEvent>
 #include <QPainter>
+#include <QLinearGradient>
+#include <QBrush>
 #include <QVector>
 #include <QStringList>
 #include <QMargins>
@@ -56,6 +58,48 @@ QString chartTypeName(ChartType t) {
 ChartType chartTypeFromInt(int v) {
     if (v < 0 || v > int(ChartType::Doughnut)) return ChartType::Column;
     return static_cast<ChartType>(v);
+}
+
+// An axis label font that fits the axis it is on.
+//
+// Qt hides a label rather than overlapping it with its neighbour, so an axis
+// with more categories than room shows only some of them: the corpus's
+// four-category bar chart, 148 pixels tall, showed exactly one. What decides it
+// is the space per category ALONG the axis the categories run down, so that is
+// what the size is taken from.
+//
+// `spanPx` is the chart's extent along that axis and `categories` how many
+// share it. The plot area is roughly two fifths of a small chart once the
+// title, the legend and the other axis have taken theirs, and a label needs
+// about three times its point size in pixels before Qt will place it beside
+// another. Both are estimates, checked against the corpus, where the
+// alternative was one label out of four.
+static QFont axisLabelFont(QFont base, int spanPx, int categories) {
+    // A value axis places as many ticks as it has room for and is not at risk
+    // of dropping any, so it keeps the font it was given. Sizing it too was a
+    // mistake the first time round: it came out LARGER than the default, took
+    // height from the plot, and cost the category axis the room this was
+    // supposed to win it.
+    if (categories <= 0) return base;
+    // The floor is 4pt, which is small, but the alternative is worse than
+    // small: Qt shows ONE of four categories rather than four cramped ones, and
+    // a chart labelled only "Class 3" reads as though it has a single bar.
+    base.setPointSizeF(qBound(4.0, (spanPx * 0.4) / categories / 3.2, 10.0));
+    return base;
+}
+
+// The brush a series filled with a picture should be painted with.
+//
+// Excel stretches the picture into each bar, so the bar carries the image's
+// shading over its own height. A chart library that paints a brush cannot give
+// the bar the picture's silhouette, but ObjectBoundingMode makes a gradient
+// stretch into each bar exactly the same way, which is the shading part of it.
+static QBrush pictureBrush(const QVector<QColor>& stops, const QVector<qreal>& pos) {
+    QLinearGradient g(0, 0, 0, 1);
+    g.setCoordinateMode(QGradient::ObjectBoundingMode);
+    for (int i = 0; i < stops.size() && i < pos.size(); ++i)
+        if (stops.at(i).isValid()) g.setColorAt(qBound(0.0, pos.at(i), 1.0), stops.at(i));
+    return QBrush(g);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,7 +290,10 @@ void ChartObject::applyValueAxisFormat(QValueAxis* axis) const {
 void ChartObject::rebuild() {
     if (!m_model) return;
 
-    struct Series { QString name; QVector<double> vals; QColor color; QVector<QColor> pointColors; };
+    struct Series {
+        QString name; QVector<double> vals; QColor color; QVector<QColor> pointColors;
+        QVector<QColor> gradient; QVector<qreal> gradientPos;   // picture fill
+    };
     QStringList     cats;
     QVector<Series> series;
     QString         explicitTitle = m_spec.title;
@@ -283,6 +330,8 @@ void ChartObject::rebuild() {
             Series s;
             s.color        = cs.color;
             s.pointColors  = cs.pointColors;
+            s.gradient     = cs.fillGradient;
+            s.gradientPos  = cs.fillGradientPos;
             s.name         = cs.name;
 
             // A name given as a reference to a header cell.
@@ -390,7 +439,8 @@ void ChartObject::rebuild() {
         for (const auto& s : series) {
             auto* set = new QBarSet(s.name);
             for (double v : s.vals) *set << v;
-            if (s.color.isValid()) set->setColor(s.color);
+            if (s.gradient.size() >= 2)      set->setBrush(pictureBrush(s.gradient, s.gradientPos));
+            else if (s.color.isValid())      set->setColor(s.color);
             bs->append(set);
         }
 
@@ -407,6 +457,20 @@ void ChartObject::rebuild() {
         }
         bs->attachAxis(axCat);
         bs->attachAxis(axVal);
+        // A horizontal bar chart runs its categories DOWN the chart, so their
+        // room is its height; a column chart runs them across, so it is width.
+        const int catSpan = horiz ? height() : width();
+        // Applied after attaching, for the same reason applyNiceNumbers() is:
+        // QChart::addAxis() runs the chart theme over the axis and puts its own
+        // label font back. Set before, the size is silently discarded, and a
+        // chart short enough to sit beside another one shows one category label
+        // out of four because Qt drops the ones that would overlap.
+        // setTruncateLabels stops the other half of it, the "..." that appears
+        // when a label is cut to the room available.
+        axCat->setTruncateLabels(false);
+        axVal->setTruncateLabels(false);
+        axCat->setLabelsFont(axisLabelFont(chart->font(), catSpan, cats.size()));
+        axVal->setLabelsFont(axisLabelFont(chart->font(), horiz ? width() : height(), 0));
         // Round tick values, applied after attaching: applyNiceNumbers() works
         // on the axis's current range, which only exists once it is bound to
         // the series. Called earlier it silently does nothing.
@@ -435,6 +499,17 @@ void ChartObject::rebuild() {
         chart->addAxis(axCat, Qt::AlignBottom);
         chart->addAxis(axVal, Qt::AlignLeft);
         for (auto* s : chart->series()) { s->attachAxis(axCat); s->attachAxis(axVal); }
+        // Applied after attaching, for the same reason applyNiceNumbers() is:
+        // QChart::addAxis() runs the chart theme over the axis and puts its own
+        // label font back. Set before, the size is silently discarded, and a
+        // chart short enough to sit beside another one shows one category label
+        // out of four because Qt drops the ones that would overlap.
+        // setTruncateLabels stops the other half of it, the "..." that appears
+        // when a label is cut to the room available.
+        axCat->setTruncateLabels(false);
+        axVal->setTruncateLabels(false);
+        axCat->setLabelsFont(axisLabelFont(chart->font(), width(), cats.size()));
+        axVal->setLabelsFont(axisLabelFont(chart->font(), height(), 0));
         axVal->applyNiceNumbers();
         break;
     }
@@ -477,6 +552,17 @@ void ChartObject::rebuild() {
         auto* axY = new QValueAxis();
         chart->addAxis(axX, Qt::AlignBottom);
         chart->addAxis(axY, Qt::AlignLeft);
+        // Applied after attaching, for the same reason applyNiceNumbers() is:
+        // QChart::addAxis() runs the chart theme over the axis and puts its own
+        // label font back. Set before, the size is silently discarded, and a
+        // chart short enough to sit beside another one shows one category label
+        // out of four because Qt drops the ones that would overlap.
+        // setTruncateLabels stops the other half of it, the "..." that appears
+        // when a label is cut to the room available.
+        axX->setTruncateLabels(false);
+        axY->setTruncateLabels(false);
+        axX->setLabelsFont(axisLabelFont(chart->font(), width(), 0));
+        axY->setLabelsFont(axisLabelFont(chart->font(), height(), 0));
         for (auto* s : chart->series()) { s->attachAxis(axX); s->attachAxis(axY); }
         break;
     }

@@ -71,6 +71,12 @@ struct ChartSeries {
     QString         nameSheet;
     QVector<double> cache;
     QColor          color;       // explicit series colour from the file
+    // A series filled with a picture rather than a colour. `color` is what the
+    // picture averages to; these are the shading it carries from top to bottom,
+    // which is stretched into each bar the way Excel stretches the image.
+    // Empty for an ordinary solid fill.
+    QVector<QColor> fillGradient;
+    QVector<qreal>  fillGradientPos;
     // Pie and doughnut charts colour each slice separately, so the file gives
     // per-point colours (c:dPt) rather than one colour for the series.
     QVector<QColor> pointColors;

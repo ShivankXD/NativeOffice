@@ -279,7 +279,7 @@ bool isPlotElement(const QString& n) {
 // ─────────────────────────────────────────────────────────────────────────────
 bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
                     const ThemeColors& theme,
-                    const std::function<QColor(const QString&)>& blipColor) {
+                    const std::function<FillPicture(const QString&)>& blipPicture) {
     QXmlStreamReader r(chartXml);
     QStringList path;
 
@@ -432,10 +432,18 @@ bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
                 QString blipRel;
                 QColor c = readFirstFill(r, theme, &blipRel);
                 path.removeLast();
-                // Filled with a picture: take the colour the picture actually
-                // reads as, which is far closer than falling through to a
-                // default nothing in the file asked for.
-                if (!c.isValid() && !blipRel.isEmpty() && blipColor) c = blipColor(blipRel);
+                // Filled with a picture: take what the picture actually reads
+                // as, which is far closer than falling through to a default
+                // nothing in the file asked for. The shading goes with it, so
+                // each bar can be given the image's own top-to-bottom shade.
+                if (!c.isValid() && !blipRel.isEmpty() && blipPicture) {
+                    const FillPicture fp = blipPicture(blipRel);
+                    c = fp.average;
+                    if (!forPoint && !fp.stops.isEmpty()) {
+                        cur.fillGradient    = fp.stops;
+                        cur.fillGradientPos = fp.positions;
+                    }
+                }
                 if (c.isValid()) {
                     if (forPoint && pendingDptIdx >= 0) dptColors.insert(pendingDptIdx, c);
                     else if (!forPoint && !cur.color.isValid()) cur.color = c;
@@ -881,34 +889,66 @@ QHash<QString, QString> parseRelsFor(const QString& part,
     return out;
 }
 
-// What an image reads as, as one colour: the mean of its opaque pixels.
+// The shading an image carries from top to bottom, as gradient stops.
 //
-// A bar filled with a picture cannot be reproduced exactly by a chart library
-// that paints a solid brush, but the picture's own colour is much closer than
-// any default. Transparent pixels are excluded or a shape drawn on a clear
-// background would average towards nothing.
-QColor averageColor(const QByteArray& imageBytes) {
-    if (imageBytes.isEmpty()) return {};
+// A bar filled with a picture cannot be given the picture's silhouette by a
+// chart library that paints a brush, but it can be given its shading: a
+// gradient in object-bounding coordinates is stretched into each bar exactly
+// the way Excel stretches the image. Each row is averaged over its opaque
+// pixels, so the transparent margins of a tapered shape do not wash it out.
+FillPicture samplePicture(const QByteArray& imageBytes) {
+    FillPicture out;
+    if (imageBytes.isEmpty()) return out;
     QImage img;
-    if (!img.loadFromData(imageBytes)) return {};
-    if (img.isNull()) return {};
-    // Scaled down first: the mean does not need every pixel, and a large image
-    // on every chart load would be felt.
-    if (img.width() > 64 || img.height() > 64)
-        img = img.scaled(64, 64, Qt::KeepAspectRatio, Qt::FastTransformation);
+    if (!img.loadFromData(imageBytes) || img.isNull()) return out;
+    if (img.height() > 128)
+        img = img.scaledToHeight(128, Qt::SmoothTransformation);
     img = img.convertToFormat(QImage::Format_ARGB32);
 
-    qint64 r = 0, g = 0, b = 0, n = 0;
-    for (int y = 0; y < img.height(); ++y) {
-        const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
-        for (int x = 0; x < img.width(); ++x) {
-            const QRgb px = line[x];
-            if (qAlpha(px) < 128) continue;
-            r += qRed(px); g += qGreen(px); b += qBlue(px); ++n;
+    // Each band is composited over white before it is averaged, and only fully
+    // transparent pixels are skipped.
+    //
+    // This matters more than it sounds. The shading in these images is in the
+    // ALPHA, not in the colour: the corpus's cone is one flat #58BC93 from top
+    // to bottom, fading out through alpha from 212 to 133. Averaging only the
+    // opaque pixels, as a first attempt did, samples eight identical greens and
+    // produces a gradient with no gradient in it. What the eye sees is the
+    // colour over the background, so that is what is sampled.
+    const int kBands = 8;
+    qint64 tr = 0, tg = 0, tb = 0, tn = 0;
+    for (int band = 0; band < kBands; ++band) {
+        const int y0 = band * img.height() / kBands;
+        const int y1 = qMax(y0 + 1, (band + 1) * img.height() / kBands);
+        qint64 r = 0, g = 0, b = 0, n = 0;
+        for (int y = y0; y < y1 && y < img.height(); ++y) {
+            const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+            for (int x = 0; x < img.width(); ++x) {
+                const int a = qAlpha(line[x]);
+                if (a == 0) continue;          // outside the shape altogether
+                r += (qRed(line[x])   * a + 255 * (255 - a)) / 255;
+                g += (qGreen(line[x]) * a + 255 * (255 - a)) / 255;
+                b += (qBlue(line[x])  * a + 255 * (255 - a)) / 255;
+                ++n;
+            }
         }
+        if (n == 0) continue;
+        tr += r; tg += g; tb += b; tn += n;
+        out.stops    << QColor(int(r / n), int(g / n), int(b / n));
+        out.positions << (kBands == 1 ? 0.0 : double(band) / (kBands - 1));
     }
-    if (n == 0) return {};
-    return QColor(int(r / n), int(g / n), int(b / n));
+    if (tn > 0) out.average = QColor(int(tr / tn), int(tg / tn), int(tb / tn));
+    // A single band, or eight bands that all came out the same, is a flat
+    // colour: carrying it as a gradient only costs a brush.
+    if (out.stops.size() >= 2) {
+        bool varies = false;
+        for (const QColor& c : out.stops)
+            if (c != out.stops.first()) { varies = true; break; }
+        if (!varies) { out.stops.clear(); out.positions.clear(); }
+    } else {
+        out.stops.clear();
+        out.positions.clear();
+    }
+    return out;
 }
 
 // ── One shape ───────────────────────────────────────────────────────────────
@@ -1156,14 +1196,14 @@ void parseGraphicFrame(QXmlStreamReader& r, const Mapper& m, DrawCtx& ctx) {
     // not the drawing's, so they have to be loaded before the chart is parsed.
     const QHash<QString, QString> chartRels =
         parseRelsFor(part, ctx.fetch);
-    auto blipColor = [&](const QString& embedId) -> QColor {
+    auto blipPicture = [&](const QString& embedId) -> FillPicture {
         const QString imgPart = chartRels.value(embedId);
         if (imgPart.isEmpty()) return {};
-        return averageColor(ctx.fetch(imgPart));
+        return samplePicture(ctx.fetch(imgPart));
     };
 
     ChartSpec spec;
-    if (!parseChartPart(bytes, spec, ctx.theme, blipColor)) return;
+    if (!parseChartPart(bytes, spec, ctx.theme, blipPicture)) return;
 
     spec.anchor = ctx.anchor;
     spec.geom   = ctx.objectGeom();
