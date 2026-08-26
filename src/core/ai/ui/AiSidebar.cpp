@@ -17,6 +17,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPainter>
+#include <QIcon>
 #include <QPainterPath>
 #include <QResizeEvent>
 #include <QPropertyAnimation>
@@ -24,6 +25,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTextEdit>
+#include <QToolButton>
 #include <QTimer>
 #include <QDesktopServices>
 #include <QDialog>
@@ -46,8 +48,115 @@ constexpr int kHeaderHeight = 54;
 // sidebar" for the purpose of revealing the close button.
 constexpr int kCloseRevealBand = 56;
 
-const char* kPanelBg   = "#0F131B";
-const char* kPanelEdge = "rgba(255,255,255,0.07)";
+// Near-black with a violet cast, not the blue-grey the panel used to be. The
+// assistant is the one surface in the suite that is deliberately its own place
+// rather than a shade of the editor beside it.
+const char* kPanelBg    = "#07070C";
+const char* kRailBg     = "#050509";
+const char* kPanelEdge  = "rgba(255,255,255,0.06)";
+const char* kCardBg     = "#0D0D15";
+const char* kCardEdge   = "rgba(255,255,255,0.07)";
+const char* kAccent     = "#8B5CF6";   // violet, the one accent
+const char* kAccentSoft = "#B9A5FF";
+const char* kTextHigh   = "#F4F4F8";
+const char* kTextMid    = "#9299AD";
+const char* kTextLow    = "#6A7185";
+
+// ── icons ───────────────────────────────────────────────────────────────────
+// Drawn rather than shipped: they are a dozen simple glyphs, they have to take
+// the colour of whatever they sit on, and a resource per icon per state is a
+// lot of files to keep in step with a palette.
+QPixmap glyph(const QString& kind, const QColor& c, int px) {
+    QPixmap pm(px, px);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    QPen pen(c, px * 0.085);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    const double w = px, h = px;
+
+    if (kind == QLatin1String("sparkle")) {
+        // A four-point star, the shape everything AI has settled on.
+        QPainterPath s1;
+        s1.moveTo(w * 0.50, h * 0.14);
+        s1.quadTo(w * 0.56, h * 0.44, w * 0.86, h * 0.50);
+        s1.quadTo(w * 0.56, h * 0.56, w * 0.50, h * 0.86);
+        s1.quadTo(w * 0.44, h * 0.56, w * 0.14, h * 0.50);
+        s1.quadTo(w * 0.44, h * 0.44, w * 0.50, h * 0.14);
+        p.fillPath(s1, c);
+    } else if (kind == QLatin1String("history")) {
+        p.drawArc(QRectF(w * 0.18, h * 0.18, w * 0.64, h * 0.64), 60 * 16, 280 * 16);
+        p.drawLine(QPointF(w * 0.50, h * 0.32), QPointF(w * 0.50, h * 0.52));
+        p.drawLine(QPointF(w * 0.50, h * 0.52), QPointF(w * 0.66, h * 0.60));
+        p.drawLine(QPointF(w * 0.30, h * 0.14), QPointF(w * 0.30, h * 0.30));
+        p.drawLine(QPointF(w * 0.30, h * 0.30), QPointF(w * 0.46, h * 0.30));
+    } else if (kind == QLatin1String("chat")) {
+        QPainterPath b;
+        b.addRoundedRect(QRectF(w * 0.14, h * 0.20, w * 0.72, h * 0.50), w * 0.14, w * 0.14);
+        b.moveTo(w * 0.32, h * 0.68);
+        b.lineTo(w * 0.30, h * 0.86);
+        b.lineTo(w * 0.48, h * 0.70);
+        p.drawPath(b);
+    } else if (kind == QLatin1String("doc")) {
+        p.drawRoundedRect(QRectF(w * 0.24, h * 0.14, w * 0.52, h * 0.72), w * 0.08, w * 0.08);
+        for (int i = 0; i < 3; ++i)
+            p.drawLine(QPointF(w * 0.36, h * (0.34 + i * 0.16)),
+                       QPointF(w * 0.64, h * (0.34 + i * 0.16)));
+    } else if (kind == QLatin1String("pencil")) {
+        p.drawLine(QPointF(w * 0.22, h * 0.78), QPointF(w * 0.30, h * 0.56));
+        p.drawLine(QPointF(w * 0.30, h * 0.56), QPointF(w * 0.64, h * 0.22));
+        p.drawLine(QPointF(w * 0.64, h * 0.22), QPointF(w * 0.78, h * 0.36));
+        p.drawLine(QPointF(w * 0.78, h * 0.36), QPointF(w * 0.44, h * 0.70));
+        p.drawLine(QPointF(w * 0.44, h * 0.70), QPointF(w * 0.22, h * 0.78));
+    } else if (kind == QLatin1String("bulb")) {
+        p.drawArc(QRectF(w * 0.26, h * 0.14, w * 0.48, h * 0.48), 0, 360 * 16);
+        p.drawLine(QPointF(w * 0.42, h * 0.62), QPointF(w * 0.42, h * 0.74));
+        p.drawLine(QPointF(w * 0.58, h * 0.62), QPointF(w * 0.58, h * 0.74));
+        p.drawLine(QPointF(w * 0.40, h * 0.80), QPointF(w * 0.60, h * 0.80));
+    } else if (kind == QLatin1String("clip")) {
+        // One open hook, drawn as a path. Two arcs meeting at their ends closed
+        // into a ring and the button read as a nought.
+        QPainterPath c1;
+        c1.moveTo(w * 0.66, h * 0.34);
+        c1.lineTo(w * 0.38, h * 0.62);
+        c1.quadTo(w * 0.26, h * 0.74, w * 0.36, h * 0.84);
+        c1.quadTo(w * 0.46, h * 0.94, w * 0.58, h * 0.82);
+        c1.lineTo(w * 0.82, h * 0.58);
+        c1.quadTo(w * 0.96, h * 0.44, w * 0.80, h * 0.26);
+        c1.quadTo(w * 0.62, h * 0.10, w * 0.48, h * 0.24);
+        c1.lineTo(w * 0.22, h * 0.50);
+        p.drawPath(c1);
+    } else if (kind == QLatin1String("send")) {
+        QPainterPath t;
+        t.moveTo(w * 0.14, h * 0.50);
+        t.lineTo(w * 0.86, h * 0.18);
+        t.lineTo(w * 0.58, h * 0.86);
+        t.lineTo(w * 0.48, h * 0.58);
+        t.closeSubpath();
+        p.fillPath(t, c);
+    } else if (kind == QLatin1String("shield")) {
+        QPainterPath sh;
+        sh.moveTo(w * 0.50, h * 0.12);
+        sh.lineTo(w * 0.82, h * 0.26);
+        sh.lineTo(w * 0.82, h * 0.52);
+        sh.quadTo(w * 0.82, h * 0.78, w * 0.50, h * 0.90);
+        sh.quadTo(w * 0.18, h * 0.78, w * 0.18, h * 0.52);
+        sh.lineTo(w * 0.18, h * 0.26);
+        sh.closeSubpath();
+        p.drawPath(sh);
+    } else if (kind == QLatin1String("chevron")) {
+        p.drawLine(QPointF(w * 0.28, h * 0.40), QPointF(w * 0.50, h * 0.62));
+        p.drawLine(QPointF(w * 0.50, h * 0.62), QPointF(w * 0.72, h * 0.40));
+    } else if (kind == QLatin1String("arrow")) {
+        p.drawLine(QPointF(w * 0.20, h * 0.50), QPointF(w * 0.76, h * 0.50));
+        p.drawLine(QPointF(w * 0.56, h * 0.30), QPointF(w * 0.78, h * 0.50));
+        p.drawLine(QPointF(w * 0.78, h * 0.50), QPointF(w * 0.56, h * 0.70));
+    }
+    return pm;
+}
 
 // The card a user turn sits on. Assistant turns get none: the reply is the
 // substance of the panel and putting it in a grey slab of its own makes a
@@ -152,6 +261,7 @@ AiSidebar::AiSidebar(QWidget* parent)
     setAttribute(Qt::WA_StyledBackground, true);
     setStyleSheet(QStringLiteral("#aiSidebar { background:%1; border-left:1px solid %2; }")
                       .arg(QLatin1String(kPanelBg), QLatin1String(kPanelEdge)));
+    // The rail and the column share this; children paint over it.
     // The rail costs 56px that used to belong to the conversation, and the
     // openers sit two to a row, so the old 300 minimum left them about 90px
     // each and clipped their own titles.
@@ -391,7 +501,8 @@ QWidget* AiSidebar::buildHeader() {
 
     auto* name = new QLabel(QStringLiteral("Stasis"), m_header);
     name->setStyleSheet(QStringLiteral(
-        "color:#C9CFDB; font:600 12.5px 'Segoe UI'; background:transparent;"));
+        "color:%1; font:700 17px 'Segoe UI'; background:transparent;")
+        .arg(QLatin1String(kTextHigh)));
 
     // "In Writer". Sits above the chat and changes as the user moves between
     // tabs, so the panel never silently acts on a surface you are not looking at.
@@ -401,8 +512,8 @@ QWidget* AiSidebar::buildHeader() {
     m_modeChip->setFixedHeight(20);
     m_modeChip->setAlignment(Qt::AlignCenter);
     m_modeChip->setStyleSheet(QStringLiteral(
-        "color:#79839A; font:11px 'Segoe UI'; background:transparent;"
-        "border:none; padding:0;"));
+        "color:%1; font:11.5px 'Segoe UI'; background:transparent;"
+        "border:none; padding:0;").arg(QLatin1String(kTextMid)));
 
     // Start a fresh conversation.
     //
@@ -449,12 +560,13 @@ QWidget* AiSidebar::buildHeader() {
     // it currently is on the second, which is the line that changes as the user
     // moves between tabs and the one worth its own space.
     auto* kind = new QLabel(QStringLiteral("AI Assistant"), m_header);
-    kind->setFixedHeight(19);
+    kind->setFixedHeight(21);
     kind->setAlignment(Qt::AlignCenter);
     kind->setStyleSheet(QStringLiteral(
-        "color:#AFA3FF; font:600 10px 'Segoe UI';"
-        "background:rgba(124,92,255,0.16); border:none;"
-        "border-radius:9px; padding:0 8px;"));
+        "color:%1; font:600 10.5px 'Segoe UI';"
+        "background:rgba(139,92,246,0.20);"
+        "border:1px solid rgba(139,92,246,0.34);"
+        "border-radius:10px; padding:0 10px;").arg(QLatin1String(kAccentSoft)));
 
     auto* rows = new QVBoxLayout();
     rows->setContentsMargins(0, 0, 0, 0);
@@ -489,10 +601,10 @@ QWidget* AiSidebar::buildRail() {
     auto* rail = new QWidget(this);
     rail->setObjectName(QStringLiteral("aiRail"));
     rail->setAttribute(Qt::WA_StyledBackground, true);
-    rail->setFixedWidth(56);
+    rail->setFixedWidth(62);
     rail->setStyleSheet(QStringLiteral(
-        "#aiRail { background:#0B0E15; border-right:1px solid %1; }")
-        .arg(QLatin1String(kPanelEdge)));
+        "#aiRail { background:%1; border-right:1px solid %2; }")
+        .arg(QLatin1String(kRailBg), QLatin1String(kPanelEdge)));
 
     auto* v = new QVBoxLayout(rail);
     v->setContentsMargins(0, 14, 0, 16);
@@ -511,27 +623,38 @@ QWidget* AiSidebar::buildRail() {
     // nothing behind them, which is worse than not offering them at all.
     m_railAssist  = railButton(rail, QStringLiteral("Assist"),  true);
     m_railHistory = railButton(rail, QStringLiteral("History"), false);
+    m_railAssist->setIcon(QIcon(glyph(QStringLiteral("sparkle"),
+                                      QColor(kAccentSoft), 20)));
+    m_railHistory->setIcon(QIcon(glyph(QStringLiteral("history"),
+                                       QColor(kTextMid), 20)));
+
     v->addWidget(m_railAssist,  0, Qt::AlignHCenter);
     v->addWidget(m_railHistory, 0, Qt::AlignHCenter);
     v->addStretch(1);
 
-    connect(m_railAssist,  &QPushButton::clicked, this, [this] { showAssist(); });
-    connect(m_railHistory, &QPushButton::clicked, this, [this] { showHistory(); });
+    connect(m_railAssist,  &QToolButton::clicked, this, [this] { showAssist(); });
+    connect(m_railHistory, &QToolButton::clicked, this, [this] { showHistory(); });
     return rail;
 }
 
-QPushButton* AiSidebar::railButton(QWidget* parent, const QString& text, bool on) {
-    auto* b = new QPushButton(text, parent);
+QToolButton* AiSidebar::railButton(QWidget* parent, const QString& text, bool on) {
+    auto* b = new QToolButton(parent);
+    b->setText(text);
     b->setCheckable(true);
     b->setChecked(on);
     b->setCursor(Qt::PointingHandCursor);
     b->setFocusPolicy(Qt::NoFocus);
-    b->setFixedSize(50, 50);
+    b->setFixedSize(54, 54);
+    // Text under icon. A QPushButton puts them side by side and no amount of
+    // padding moves them, which ran the label off the edge of the rail.
+    b->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    b->setIconSize(QSize(19, 19));
     b->setStyleSheet(QStringLiteral(
-        "QPushButton { border:none; background:transparent; color:#79839A;"
-        "  font:600 10px 'Segoe UI'; border-radius:10px; }"
-        "QPushButton:hover { background:rgba(255,255,255,0.06); color:#C9CFDB; }"
-        "QPushButton:checked { background:rgba(124,92,255,0.16); color:#C4B5FF; }"));
+        "QToolButton { border:none; background:transparent; color:%1;"
+        "  font:600 9px 'Segoe UI'; border-radius:12px; padding:6px 0 4px 0; }"
+        "QToolButton:hover { background:rgba(255,255,255,0.05); color:#C9CFDB; }"
+        "QToolButton:checked { background:rgba(139,92,246,0.18); color:%2; }")
+        .arg(QLatin1String(kTextLow), QLatin1String(kAccentSoft)));
     return b;
 }
 
@@ -582,12 +705,13 @@ QWidget* AiSidebar::buildHistoryPage() {
     m_historyList->setUniformItemSizes(false);
     m_historyList->setStyleSheet(QStringLiteral(
         "QListWidget { background:transparent; border:none; outline:none; }"
-        "QListWidget::item { color:#C9CFDB; background:rgba(255,255,255,0.03);"
-        "  border:1px solid rgba(255,255,255,0.05); border-radius:9px;"
-        "  padding:9px 10px; }"
-        "QListWidget::item:hover { background:rgba(255,255,255,0.07); }"
-        "QListWidget::item:selected { background:rgba(124,92,255,0.20);"
-        "  border:1px solid rgba(124,92,255,0.45); color:#F2F0FF; }"
+        "QListWidget::item { color:#C9CFDB; background:#0D0D15;"
+        "  border:1px solid rgba(255,255,255,0.07); border-radius:11px;"
+        "  padding:10px 11px; }"
+        "QListWidget::item:hover { background:#12121C;"
+        "  border:1px solid rgba(139,92,246,0.35); }"
+        "QListWidget::item:selected { background:rgba(139,92,246,0.20);"
+        "  border:1px solid rgba(139,92,246,0.50); color:#F4F4F8; }"
         "QScrollBar:vertical { width:8px; background:transparent; margin:0; }"
         "QScrollBar::handle:vertical { background:#333C4D; border-radius:4px;"
         "  min-height:30px; }"
@@ -693,9 +817,15 @@ QWidget* AiSidebar::buildFooter() {
     h->setContentsMargins(16, 0, 16, 10);
     h->setSpacing(6);
 
+    auto* shield = new QLabel(w);
+    shield->setPixmap(glyph(QStringLiteral("shield"), QColor(kTextLow), 13));
+    shield->setStyleSheet(QStringLiteral("background:transparent;"));
+    h->addWidget(shield, 0);
+
     auto* note = new QLabel(QStringLiteral("Your data stays private and secure."), w);
     note->setStyleSheet(QStringLiteral(
-        "color:#5E6879; font:10.5px 'Segoe UI'; background:transparent;"));
+        "color:%1; font:10.5px 'Segoe UI'; background:transparent;")
+        .arg(QLatin1String(kTextLow)));
     h->addWidget(note, 0);
     h->addStretch(1);
 
@@ -703,9 +833,9 @@ QWidget* AiSidebar::buildFooter() {
     learn->setCursor(Qt::PointingHandCursor);
     learn->setFocusPolicy(Qt::NoFocus);
     learn->setStyleSheet(QStringLiteral(
-        "QPushButton { border:none; background:transparent; color:#7C8AA8;"
+        "QPushButton { border:none; background:transparent; color:%1;"
         "  font:10.5px 'Segoe UI'; }"
-        "QPushButton:hover { color:#AFA3FF; }"));
+        "QPushButton:hover { color:#FFFFFF; }").arg(QLatin1String(kAccentSoft)));
     connect(learn, &QPushButton::clicked, this, [] {
         QDesktopServices::openUrl(
             QUrl(QStringLiteral("https://nativeoffice.online/privacy")));
@@ -729,7 +859,7 @@ QWidget* AiSidebar::buildHero() {
     auto* mark = new QLabel(m_hero);
     QPixmap px(QStringLiteral(":/assets/stasis-mark-256.png"));
     if (!px.isNull())
-        mark->setPixmap(px.scaledToHeight(96, Qt::SmoothTransformation));
+        mark->setPixmap(px.scaledToHeight(76, Qt::SmoothTransformation));
     mark->setAlignment(Qt::AlignCenter);
     mark->setStyleSheet(QStringLiteral("background:transparent;"));
     auto* markFade = new QGraphicsOpacityEffect(mark);
@@ -738,11 +868,16 @@ QWidget* AiSidebar::buildHero() {
     v->addWidget(mark, 0, Qt::AlignCenter);
 
     v->addSpacing(18);
-    auto* powered = new QLabel(QStringLiteral("Powered by Stasis"), m_hero);
+    // Rich text so the name carries the accent and the rest does not.
+    auto* powered = new QLabel(m_hero);
+    powered->setTextFormat(Qt::RichText);
+    powered->setText(QStringLiteral(
+        "<span style='color:%1;'>Powered by </span>"
+        "<span style='color:%2;'>Stasis</span>")
+        .arg(QLatin1String(kTextHigh), QLatin1String(kAccentSoft)));
     powered->setAlignment(Qt::AlignCenter);
     powered->setStyleSheet(QStringLiteral(
-        "color:#E6E9F0; font:600 15px 'Segoe UI'; letter-spacing:0.4px;"
-        "background:transparent;"));
+        "font:600 19px 'Segoe UI'; background:transparent;"));
     v->addWidget(powered);
 
     v->addSpacing(7);
@@ -751,10 +886,11 @@ QWidget* AiSidebar::buildHero() {
     hint->setAlignment(Qt::AlignCenter);
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral(
-        "color:#79839A; font:12px 'Segoe UI'; background:transparent;"));
+        "color:%1; font:12.5px 'Segoe UI'; background:transparent;")
+        .arg(QLatin1String(kTextMid)));
     v->addWidget(hint);
 
-    v->addSpacing(20);
+    v->addSpacing(22);
 
     // Four openers. They are not decoration: an empty panel with a blinking
     // caret is the hardest possible thing to start using, and naming what it
@@ -770,52 +906,84 @@ QWidget* AiSidebar::buildHero() {
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
 
-    struct Opener { const char* title; const char* blurb; const char* seed; const char* tint; };
+    struct Opener { const char* title; const char* blurb; const char* seed;
+                    const char* icon; const char* tint; };
     static const Opener kOpeners[4] = {
-        { "Ask Anything", "Questions answered, in the chat.",
-          "", "#7C5CFF" },
-        { "Summarize",    "The long version, made short.",
-          "Summarize this in a few sentences: ", "#3B82F6" },
-        { "Write Better", "Sharpen what is already there.",
-          "Rewrite this so it reads better: ", "#22C7A9" },
-        { "Brainstorm",   "Ideas to pick over before you commit.",
-          "Give me a few angles on ", "#F59E0B" },
+        { "Ask Anything", "Instant answers, in the chat.",
+          "", "chat", "#8B5CF6" },
+        { "Summarize",    "Long documents, made short.",
+          "Summarize this in a few sentences: ", "doc", "#3B82F6" },
+        { "Write Better", "Improve or rewrite what is there.",
+          "Rewrite this so it reads better: ", "pencil", "#22C7A9" },
+        { "Brainstorm",   "Ideas before you commit.",
+          "Give me a few angles on ", "bulb", "#F59E0B" },
     };
 
     for (int i = 0; i < 4; ++i) {
         const Opener& o = kOpeners[i];
+        const QColor tint(o.tint);
         auto* card = new QPushButton(m_hero);
         card->setCursor(Qt::PointingHandCursor);
         card->setFocusPolicy(Qt::NoFocus);
-        card->setMinimumHeight(74);
+        // A word-wrapped QLabel reports a height hint that does not know the
+        // width it will end up at, so the card's own hint comes out short and
+        // the blurb is cut off at the bottom. The floor is set from what two
+        // wrapped lines actually need.
+        card->setMinimumHeight(126);
         card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         card->setStyleSheet(QStringLiteral(
-            "QPushButton { text-align:left; padding:10px 12px; border-radius:11px;"
-            "  background:rgba(255,255,255,0.035);"
-            "  border:1px solid rgba(255,255,255,0.07); }"
-            "QPushButton:hover { background:rgba(255,255,255,0.07);"
-            "  border:1px solid %1; }").arg(QLatin1String(o.tint)));
+            "QPushButton { text-align:left; padding:0; border-radius:14px;"
+            "  background:%1; border:1px solid %2; }"
+            "QPushButton:hover { background:#12121C; border:1px solid %3; }")
+            .arg(QLatin1String(kCardBg), QLatin1String(kCardEdge),
+                 tint.name(QColor::HexRgb)));
 
         auto* cv = new QVBoxLayout(card);
-        cv->setContentsMargins(3, 1, 3, 1);
-        cv->setSpacing(3);
+        cv->setContentsMargins(11, 10, 11, 8);
+        cv->setSpacing(6);
+
+        // The icon sits in a tinted rounded tile, which is what gives the four
+        // cards their own identity without four different card colours.
+        auto* tile = new QLabel(card);
+        tile->setFixedSize(30, 30);
+        tile->setAlignment(Qt::AlignCenter);
+        tile->setPixmap(glyph(QLatin1String(o.icon), tint, 17));
+        tile->setAttribute(Qt::WA_TransparentForMouseEvents);
+        QColor tileBg = tint;
+        tileBg.setAlphaF(0.16);
+        tile->setStyleSheet(QStringLiteral(
+            "background:rgba(%1,%2,%3,0.16); border-radius:10px;"
+            "border:1px solid rgba(%1,%2,%3,0.30);")
+            .arg(tint.red()).arg(tint.green()).arg(tint.blue()));
+        cv->addWidget(tile, 0, Qt::AlignLeft);
+
         auto* t = new QLabel(QLatin1String(o.title), card);
         t->setStyleSheet(QStringLiteral(
-            "color:#E6E9F0; font:600 12.5px 'Segoe UI'; background:transparent;"));
+            "color:%1; font:600 13px 'Segoe UI'; background:transparent;")
+            .arg(QLatin1String(kTextHigh)));
         t->setAttribute(Qt::WA_TransparentForMouseEvents);
-        // Elided, not clipped. A panel the user has dragged narrow should show
-        // "Ask Anyth..." rather than "Ask Anythin", which just looks broken.
+        // Elided, not clipped. A panel dragged narrow should show "Ask Anyth..."
+        // rather than "Ask Anythin", which just looks broken.
         t->setMinimumWidth(1);
         t->setProperty("fullText", QLatin1String(o.title));
         t->installEventFilter(this);
+
         auto* bl = new QLabel(QLatin1String(o.blurb), card);
         bl->setWordWrap(true);
+        bl->setMinimumHeight(30);          // two lines at 11px, whatever the width
         bl->setStyleSheet(QStringLiteral(
-            "color:#79839A; font:10.5px 'Segoe UI'; background:transparent;"));
+            "color:%1; font:11px 'Segoe UI'; background:transparent;")
+            .arg(QLatin1String(kTextMid)));
         bl->setAttribute(Qt::WA_TransparentForMouseEvents);
         cv->addWidget(t);
         cv->addWidget(bl);
         cv->addStretch(1);
+
+        auto* arrow = new QLabel(card);
+        arrow->setPixmap(glyph(QStringLiteral("arrow"), tint, 15));
+        arrow->setAttribute(Qt::WA_TransparentForMouseEvents);
+        arrow->setStyleSheet(QStringLiteral("background:transparent;"));
+        cv->addWidget(arrow, 0, Qt::AlignRight);
 
         const QString seed = QLatin1String(o.seed);
         connect(card, &QPushButton::clicked, this, [this, seed] {
@@ -941,17 +1109,43 @@ QWidget* AiSidebar::buildComposer() {
     box->setAttribute(Qt::WA_StyledBackground, true);
     setComposerFocused(false);
     auto* bv = new QVBoxLayout(box);
-    bv->setContentsMargins(10, 8, 8, 8);
-    bv->setSpacing(6);
+    bv->setContentsMargins(12, 10, 12, 10);
+    bv->setSpacing(9);
+
+    // A line naming what the box is for, above the box itself. It carries the
+    // mode, so the composer says where the answer will land without the reader
+    // having to look back up at the header.
+    auto* capRow = new QWidget(box);
+    capRow->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* capH = new QHBoxLayout(capRow);
+    capH->setContentsMargins(0, 0, 0, 0);
+    capH->setSpacing(6);
+    auto* capIcon = new QLabel(capRow);
+    capIcon->setPixmap(glyph(QStringLiteral("sparkle"), QColor(kAccentSoft), 13));
+    capIcon->setStyleSheet(QStringLiteral("background:transparent;"));
+    m_composerCaption = new QLabel(QStringLiteral("Ask Stasis"), capRow);
+    m_composerCaption->setStyleSheet(QStringLiteral(
+        "color:%1; font:600 11.5px 'Segoe UI'; background:transparent;")
+        .arg(QLatin1String(kAccentSoft)));
+    capH->addWidget(capIcon, 0);
+    capH->addWidget(m_composerCaption, 0);
+    capH->addStretch(1);
+    bv->addWidget(capRow, 0);
 
     m_input = new QTextEdit(box);
     m_input->setPlaceholderText(QStringLiteral("Ask Stasis, or describe what to build"));
     m_input->setFrameShape(QFrame::NoFrame);
-    m_input->setFixedHeight(56);
+    m_input->setFixedHeight(62);
     m_input->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // Its own inset field inside the box, which is what separates the thing you
+    // type in from the controls around it.
     m_input->setStyleSheet(QStringLiteral(
-        "QTextEdit { background:transparent; border:none; color:#E7EAF1;"
-        "  font:13px 'Segoe UI'; }"));
+        "QTextEdit { background:#0A0A12; border:1px solid rgba(255,255,255,0.06);"
+        "  border-radius:11px; padding:8px 10px; color:%1; font:13px 'Segoe UI'; }"
+        "QScrollBar:vertical { width:6px; background:transparent; }"
+        "QScrollBar::handle:vertical { background:#2A2A3A; border-radius:3px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
+        .arg(QLatin1String(kTextHigh)));
     m_input->installEventFilter(this);
     bv->addWidget(m_input);
 
@@ -961,27 +1155,33 @@ QWidget* AiSidebar::buildComposer() {
     rh->setContentsMargins(0, 0, 0, 0);
     rh->setSpacing(8);
 
-    m_attach = new QPushButton(QStringLiteral("Attach"), row);
+    m_attach = new QPushButton(row);
     m_attach->setCursor(Qt::PointingHandCursor);
-    m_attach->setFixedHeight(28);
+    m_attach->setFixedSize(30, 30);
     m_attach->setFocusPolicy(Qt::NoFocus);
-    m_attach->setToolTip(QStringLiteral("Up to 5 images or 2 files"));
+    m_attach->setIcon(QIcon(glyph(QStringLiteral("clip"), QColor(kTextMid), 16)));
+    m_attach->setIconSize(QSize(16, 16));
+    m_attach->setToolTip(QStringLiteral("Attach up to 5 images or 2 files"));
     m_attach->setStyleSheet(QStringLiteral(
-        "QPushButton { color:#9AA4B8; font:12px 'Segoe UI'; background:transparent;"
-        "  border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:0 11px; }"
-        "QPushButton:hover { color:#E7EAF1; border-color:rgba(255,255,255,0.26); }"));
+        "QPushButton { background:transparent;"
+        "  border:1px solid rgba(255,255,255,0.09); border-radius:9px; }"
+        "QPushButton:hover { background:rgba(255,255,255,0.06);"
+        "  border-color:rgba(255,255,255,0.20); }"));
     connect(m_attach, &QPushButton::clicked, this, &AiSidebar::pickAttachments);
 
     m_quota = new QLabel(row);
     m_quota->setStyleSheet(QStringLiteral(
-        "color:#6C7689; font:11px 'Segoe UI'; background:transparent;"));
+        "color:%1; font:10.5px 'Segoe UI'; background:transparent;")
+        .arg(QLatin1String(kTextLow)));
 
-    m_send = new QPushButton(QStringLiteral("Send"), row);
+    m_send = new QPushButton(QStringLiteral(" Send"), row);
     m_send->setCursor(Qt::PointingHandCursor);
-    m_send->setFixedHeight(28);
+    m_send->setFixedHeight(32);
+    m_send->setIcon(QIcon(glyph(QStringLiteral("send"), QColor("#FFFFFF"), 14)));
+    m_send->setIconSize(QSize(14, 14));
     m_send->setStyleSheet(QStringLiteral(
         "QPushButton { color:#FFFFFF; font:600 12px 'Segoe UI';"
-        "  background:#6D4EF2; border:none; border-radius:8px; padding:0 16px; }"
+        "  background:#7C3AED; border:none; border-radius:10px; padding:0 16px; }"
         "QPushButton:hover { background:#7C5CFF; }"
         "QPushButton:pressed { background:#5B3FD6; }"
         "QPushButton:disabled { background:#2A2F3C; color:#5A6274; }"));
@@ -1126,11 +1326,13 @@ void AiSidebar::hideRollback() {
 
 void AiSidebar::setComposerFocused(bool on) {
     if (!m_composerBox) return;
+    // The box carries a violet edge at rest and a brighter one with the caret in
+    // it, which is what makes it read as the thing you act on.
     m_composerBox->setStyleSheet(QStringLiteral(
-        "#composerBox { background:%1; border:1px solid %2; border-radius:13px; }")
-        .arg(on ? QStringLiteral("#171D29") : QStringLiteral("#141924"),
-             on ? QStringLiteral("rgba(124,92,255,0.55)")
-                : QStringLiteral("rgba(255,255,255,0.09)")));
+        "#composerBox { background:%1; border:1px solid %2; border-radius:16px; }")
+        .arg(QStringLiteral("#0D0D15"),
+             on ? QStringLiteral("rgba(139,92,246,0.75)")
+                : QStringLiteral("rgba(139,92,246,0.32)")));
 }
 
 void AiSidebar::refreshHeroVisibility() {

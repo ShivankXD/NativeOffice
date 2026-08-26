@@ -26,6 +26,7 @@ class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
+class QToolButton;
 class QStackedWidget;
 class QScrollArea;
 class QTextEdit;
@@ -88,7 +89,7 @@ private:
     QWidget* buildRail();
     QWidget* buildHistoryPage();
     QWidget* buildFooter();
-    QPushButton* railButton(QWidget* parent, const QString& text, bool on);
+    QToolButton* railButton(QWidget* parent, const QString& text, bool on);
 
     // ── the two pages behind the header ─────────────────────────────────────
     void showAssist();
@@ -126,8 +127,8 @@ private:
     QLabel*      m_modeChip { nullptr };
     QStackedWidget* m_pages       { nullptr };
     QWidget*        m_composerHost { nullptr };
-    QPushButton*    m_railAssist  { nullptr };
-    QPushButton*    m_railHistory { nullptr };
+    QToolButton*    m_railAssist  { nullptr };
+    QToolButton*    m_railHistory { nullptr };
     QListWidget*    m_historyList { nullptr };
     QLabel*         m_historyNote { nullptr };
     QScrollArea* m_scroll   { nullptr };
@@ -136,6 +137,7 @@ private:
     QWidget*     m_hero     { nullptr };
     AiToast*     m_toast    { nullptr };
     QWidget*     m_composerBox { nullptr };
+    QLabel*      m_composerCaption { nullptr };
     QTextEdit*   m_input    { nullptr };
     QPushButton* m_send     { nullptr };
     QPushButton* m_attach   { nullptr };
