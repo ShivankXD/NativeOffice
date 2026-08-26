@@ -275,21 +275,50 @@ protected:
         p.setClipPath(clip);
         p.fillRect(box, QColor(Home::kPanelSoft));
 
+        // Fill, not fit. Fitting leaves the card's own background showing as a
+        // dark band wherever the frame and the artwork disagree, and they
+        // disagree at nearly every window size: the frame asks for the
+        // artwork's aspect through heightForWidth, but the grid cell hands back
+        // whatever height its row settled on. A 192x159 cell holding a 1.76
+        // picture was drawing it 192x109 and leaving 25px of card above and
+        // below, which is the bar.
+        //
+        // Filling is only safe because the artwork no longer carries a margin
+        // of its own. These four were sliced out of one composite and each kept
+        // the slice gutter on two sides, so the picture already sat inside a
+        // dark border before the card added anything.
         const QSize want = size() * devicePixelRatio();
-        if (m_scaled.isNull() || m_scaled.size() != want) {
+        if (!want.isEmpty() && (m_scaled.isNull() || m_filledTo != want)) {
             const QPixmap src(m_art);
             if (!src.isNull()) {
-                // Fit, not fill: the artwork carries its own title, and filling
-                // cropped the words off the side of it.
-                m_scaled = src.scaled(want, Qt::KeepAspectRatio,
+                m_scaled = src.scaled(want, Qt::KeepAspectRatioByExpanding,
                                       Qt::SmoothTransformation);
                 m_scaled.setDevicePixelRatio(devicePixelRatio());
+                m_filledTo = want;
             }
         }
         if (!m_scaled.isNull()) {
             const QSizeF drawn = m_scaled.deviceIndependentSize();
-            p.drawPixmap(QPointF((width() - drawn.width()) / 2.0,
-                                 (height() - drawn.height()) / 2.0), m_scaled);
+            // Overspill comes off the RIGHT, never off the left. Every one of
+            // these renders puts its wording down the left side and its picture
+            // down the right, so a centred fill takes the first letter off each
+            // line: "Spreadsheet" arrives as "preadsheet". Anchoring left costs
+            // a sliver of backdrop instead.
+            const qreal x = drawn.width() > width() ? 0.0
+                                                    : (width() - drawn.width()) / 2.0;
+            if (qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_ARTCARD") && !m_logged) {
+                m_logged = true;
+                const QPixmap srcDbg(m_art);
+                qInfo("[artcard] %s card %dx%d (%.3f) src %dx%d (%.3f) drawn %.0fx%.0f "
+                      "at x=%.0f y=%.0f  cropX=%.0f cropY=%.0f",
+                      qUtf8Printable(m_art.section('/', -1)), width(), height(),
+                      double(width()) / qMax(1, height()),
+                      srcDbg.width(), srcDbg.height(),
+                      double(srcDbg.width()) / qMax(1, srcDbg.height()),
+                      drawn.width(), drawn.height(), x, (height() - drawn.height()) / 2.0,
+                      drawn.width() - width(), drawn.height() - height());
+            }
+            p.drawPixmap(QPointF(x, (height() - drawn.height()) / 2.0), m_scaled);
         }
 
         if (m_hover) {
@@ -308,6 +337,10 @@ protected:
 private:
     QString m_art;
     QPixmap m_scaled;
+    // The box m_scaled was scaled to fill, which is larger than the box on one
+    // axis, so its own size is not a usable cache key.
+    QSize   m_filledTo;
+    bool    m_logged { false };
     int     m_radius { 12 };
     qreal   m_aspect { 0.0 };
     bool    m_hover  { false };
@@ -713,6 +746,24 @@ void StartScreen::buildUi() {
         // height instead of the visible slice, so a review can see the panels
         // that sit below the fold on a short screen.
         const bool grabFull = qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB_FULL");
+        // NATIVEOFFICE_HOME_SIZE resizes the window before the grab. The home
+        // screen's cards are laid out four to a row, so their shape follows the
+        // window width and a fault in how the artwork is placed inside them
+        // only shows at some sizes. One capture proves nothing.
+        if (qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_SIZE")) {
+            // On a timer, and well before the grab: the shell maximizes its
+            // window after the home screen is constructed, so resizing here and
+            // now is simply undone a moment later.
+            QTimer::singleShot(3500, this, [this] {
+                const QStringList wh =
+                    qEnvironmentVariable("NATIVEOFFICE_HOME_SIZE").split(QLatin1Char(','));
+                auto* top = window();
+                if (!top) return;
+                // resize() is ignored while a window is maximized.
+                if (top->isMaximized() || top->isFullScreen()) top->showNormal();
+                top->resize(wh.value(0).toInt(), wh.value(1).toInt());
+            });
+        }
         QTimer::singleShot(6000, this, [this, grabPath, grabSettings, grabFull, scroll] {
             // A dialog opened by NATIVEOFFICE_HOME_SHOW is its own top-level
             // window, so grabbing the main window would capture the page behind
