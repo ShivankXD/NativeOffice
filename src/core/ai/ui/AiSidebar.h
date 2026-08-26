@@ -16,13 +16,17 @@
 // resizer it answers questions only. See AiCapability in AiTypes.h.
 // ─────────────────────────────────────────────────────────────────────────────
 
+#include <QJsonObject>
 #include <QVector>
 #include <QWidget>
 
 #include "ai/AiTypes.h"
 
 class QLabel;
+class QListWidget;
+class QListWidgetItem;
 class QPushButton;
+class QStackedWidget;
 class QScrollArea;
 class QTextEdit;
 class QTimer;
@@ -33,6 +37,7 @@ class QPropertyAnimation;
 namespace NativeOffice {
 
 class AiChatStore;
+struct AiStoredTurn;
 class AiStreamTarget;
 class AiSourcesStrip;
 class AiDocumentAgent;
@@ -54,6 +59,9 @@ public:
 
     // Puts the caret in the composer.
     void focusComposer();
+
+    // Dev-only: open the History list, which is otherwise a click on the rail.
+    void devShowHistory();
 
     // The text surface the agent may write into for the current tab, or null
     // where there is nothing writable. Set by the shell alongside setMode.
@@ -77,10 +85,32 @@ private:
     QWidget* buildChatArea();
     QWidget* buildComposer();
     QWidget* buildHero();
+    QWidget* buildRail();
+    QWidget* buildHistoryPage();
+    QWidget* buildFooter();
+    QPushButton* railButton(QWidget* parent, const QString& text, bool on);
+
+    // ── the two pages behind the header ─────────────────────────────────────
+    void showAssist();
+    void showHistory();
+    void reloadHistory();
+    void openHistoryItem(QListWidgetItem* item);
+    void replayConversation(const QString& chatId, const QVector<AiStoredTurn>& turns);
+
+    // ── "what Stasis did" ───────────────────────────────────────────────────
+    // A turn that wrote into a file leaves a bubble saying almost nothing, so
+    // what it actually did is recorded beside it and stored with it.
+    static QString actionSummary(const QJsonObject& action);
+    void attachActionBar(QWidget* bubble, const QJsonObject& action);
+    void showActionDetail(const QJsonObject& action);
+    // Assembled over the course of a turn and written out when it finishes.
+    QJsonObject buildTurnAction(const QString& kind, int written, const QString& full);
+    QJsonObject m_turnAction;
+    QString     m_turnPrompt;
 
     // ── conversation ────────────────────────────────────────────────────────
     void submit();
-    void appendMessage(const AiMessage& m);
+    QWidget* appendMessage(const AiMessage& m);
     void refreshHeroVisibility();
     void scrollToBottom();
     void setWorking(bool on);
@@ -94,6 +124,12 @@ private:
     AiMode m_mode { AiMode::Home };
 
     QLabel*      m_modeChip { nullptr };
+    QStackedWidget* m_pages       { nullptr };
+    QWidget*        m_composerHost { nullptr };
+    QPushButton*    m_railAssist  { nullptr };
+    QPushButton*    m_railHistory { nullptr };
+    QListWidget*    m_historyList { nullptr };
+    QLabel*         m_historyNote { nullptr };
     QScrollArea* m_scroll   { nullptr };
     QWidget*     m_chatBody { nullptr };
     QVBoxLayout* m_chatLay  { nullptr };
@@ -135,6 +171,7 @@ private:
     QVector<AiAttachment> m_pending;
     QWidget*              m_attachStrip { nullptr };
     QLabel*               m_streamTarget { nullptr };   // bubble being streamed into
+    QWidget*              m_streamBubble { nullptr };   // ... and the bubble itself
     QString               m_streamAccum;                // raw reply, marker included
     bool                  m_streamDecided { false };    // chat or document, settled
     bool                  m_streamToDoc   { false };    // feeding the page live

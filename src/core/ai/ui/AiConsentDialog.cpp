@@ -114,6 +114,16 @@ QWidget* AiConsentDialog::buildBody() {
                                       "synced in the background."),
                        body));
     v->addSpacing(14);
+    // The panel keeps conversations so History can reopen them, so this has to
+    // be said. It was previously true that only the chat's NAME was kept, and
+    // the notice said as much by omission; storing the turns changes the
+    // promise and the promise is what the user is agreeing to.
+    v->addWidget(point(QStringLiteral("Your conversations are saved so you can reopen them."),
+                       QStringLiteral("Each chat is kept against your account and listed under "
+                                      "History. Deleting a chat deletes what was said in it. "
+                                      "The contents of your files are never part of this."),
+                       body));
+    v->addSpacing(14);
     v->addWidget(point(QStringLiteral("The rest of NativeOffice works fully offline."),
                        QStringLiteral("Once you are signed in, every other feature keeps "
                                       "working with no connection at all, exactly as "

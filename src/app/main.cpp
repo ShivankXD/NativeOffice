@@ -1562,6 +1562,7 @@ public slots:
     // Dev-only entry point for the NATIVEOFFICE_AI_GRAB hook; the panel is
     // otherwise only reachable by clicking the toolbar button.
     void devOpenAiSidebar() { openAiSidebar(); }
+    void devShowAiHistory()  { m_ai->devShowHistory(); }
 
     void openAiSidebar() {
         if (m_ai->isVisible()) { m_ai->focusComposer(); return; }
@@ -1576,7 +1577,7 @@ public slots:
         m_ai->show();
 
         const int total = m_split->width();
-        const int panel = qBound(320, total / 4, 460);
+        const int panel = qBound(380, total / 4, 520);
         m_split->setSizes({ qMax(320, total - panel), panel });
         m_ai->focusComposer();
     }
@@ -3220,6 +3221,10 @@ int main(int argc, char* argv[]) {
                 auto* shell = qobject_cast<MainShell*>(wd);
                 if (!shell) continue;
                 shell->devOpenAiSidebar();
+                // NATIVEOFFICE_AI_PAGE=history opens the History list, which is
+                // otherwise only reachable by clicking the rail.
+                if (qEnvironmentVariable("NATIVEOFFICE_AI_PAGE") == QLatin1String("history"))
+                    shell->devShowAiHistory();
                 break;
             }
             QTimer::singleShot(900, qApp, [grabPath] {
