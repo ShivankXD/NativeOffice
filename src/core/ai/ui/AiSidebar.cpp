@@ -48,19 +48,79 @@ constexpr int kHeaderHeight = 54;
 // sidebar" for the purpose of revealing the close button.
 constexpr int kCloseRevealBand = 56;
 
-// Near-black with a violet cast, not the blue-grey the panel used to be. The
-// assistant is the one surface in the suite that is deliberately its own place
-// rather than a shade of the editor beside it.
-const char* kPanelBg    = "#07070C";
-const char* kRailBg     = "#050509";
-const char* kPanelEdge  = "rgba(255,255,255,0.06)";
-const char* kCardBg     = "#0D0D15";
-const char* kCardEdge   = "rgba(255,255,255,0.07)";
+// Deep navy, not black. The assistant is the one surface in the suite that is
+// deliberately its own place rather than a shade of the editor beside it, and a
+// blue ground is what carries the violet accent: on true black the accent has
+// nothing to sit against and the whole panel reads as a hole in the window.
+const char* kPanelBg    = "#0B1020";
+const char* kRailBg     = "#080C1A";
+const char* kPanelEdge  = "rgba(255,255,255,0.08)";
+const char* kCardBg     = "#141A2E";
+const char* kCardHover  = "#1A2138";
+const char* kInputBg    = "#0E1426";
+const char* kCardEdge   = "rgba(255,255,255,0.09)";
 const char* kAccent     = "#8B5CF6";   // violet, the one accent
 const char* kAccentSoft = "#B9A5FF";
 const char* kTextHigh   = "#F4F4F8";
 const char* kTextMid    = "#9299AD";
 const char* kTextLow    = "#6A7185";
+
+// The Stasis mark, in the panel's own colours.
+//
+// The artwork ships as a pure white silhouette, which means its alpha is
+// already a mask and any colour can be poured through it. That is better than
+// shipping a recoloured copy: the mark follows the palette instead of having to
+// be re-exported whenever the palette moves.
+QPixmap stasisMark(int height, bool withGlow) {
+    const QPixmap src(QStringLiteral(":/assets/stasis-mark-256.png"));
+    if (src.isNull()) return {};
+    const QPixmap art = src.scaledToHeight(height, Qt::SmoothTransformation);
+
+    QPixmap tinted(art.size());
+    tinted.setDevicePixelRatio(art.devicePixelRatio());
+    tinted.fill(Qt::transparent);
+    {
+        QPainter p(&tinted);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.drawPixmap(0, 0, art);
+        // SourceIn keeps the silhouette's alpha and replaces its colour.
+        p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        // A gradient needs room to be read as one. Below about 40px its dark
+        // end is most of the glyph and the mark disappears into the navy, so
+        // the small sizes take a single light tint instead.
+        if (height < 40) {
+            p.fillRect(QRect(QPoint(0, 0), art.size()), QColor("#CFC2FF"));
+        } else {
+            QLinearGradient g(0, 0, 0, art.height());
+            g.setColorAt(0.00, QColor("#F2EEFF"));
+            g.setColorAt(0.45, QColor("#BCA8FF"));
+            g.setColorAt(1.00, QColor("#8B6BFF"));
+            p.fillRect(QRect(QPoint(0, 0), art.size()), g);
+        }
+    }
+    if (!withGlow) return tinted;
+
+    // A halo, drawn as the same silhouette a few times over, growing and
+    // fading. QPainter has no blur, and a QGraphicsEffect is one per widget and
+    // would take the slot without looking any better at this size.
+    const int pad = qMax(8, height / 5);
+    QPixmap out(art.width() + pad * 2, art.height() + pad * 2);
+    out.fill(Qt::transparent);
+    QPainter p(&out);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    for (int i = 5; i >= 1; --i) {
+        const double grow = 1.0 + i * 0.055;
+        const QSize sz(int(art.width() * grow), int(art.height() * grow));
+        p.setOpacity(0.055);
+        p.drawPixmap(QRect(QPoint(pad - (sz.width() - art.width()) / 2,
+                                  pad - (sz.height() - art.height()) / 2), sz),
+                     tinted);
+    }
+    p.setOpacity(1.0);
+    p.drawPixmap(pad, pad, tinted);
+    return out;
+}
 
 // ── icons ───────────────────────────────────────────────────────────────────
 // Drawn rather than shipped: they are a dozen simple glyphs, they have to take
@@ -494,9 +554,7 @@ QWidget* AiSidebar::buildHeader() {
     h->setSpacing(8);
 
     auto* mark = new QLabel(m_header);
-    QPixmap px(QStringLiteral(":/assets/stasis-mark-32.png"));
-    if (!px.isNull())
-        mark->setPixmap(px.scaledToHeight(16, Qt::SmoothTransformation));
+    mark->setPixmap(stasisMark(18, /*withGlow=*/false));
     mark->setStyleSheet(QStringLiteral("background:transparent;"));
 
     auto* name = new QLabel(QStringLiteral("Stasis"), m_header);
@@ -611,9 +669,7 @@ QWidget* AiSidebar::buildRail() {
     v->setSpacing(6);
 
     auto* mark = new QLabel(rail);
-    QPixmap px(QStringLiteral(":/assets/stasis-mark-256.png"));
-    if (!px.isNull())
-        mark->setPixmap(px.scaledToHeight(30, Qt::SmoothTransformation));
+    mark->setPixmap(stasisMark(28, /*withGlow=*/true));
     mark->setAlignment(Qt::AlignCenter);
     mark->setStyleSheet(QStringLiteral("background:transparent;"));
     v->addWidget(mark, 0, Qt::AlignHCenter);
@@ -705,10 +761,10 @@ QWidget* AiSidebar::buildHistoryPage() {
     m_historyList->setUniformItemSizes(false);
     m_historyList->setStyleSheet(QStringLiteral(
         "QListWidget { background:transparent; border:none; outline:none; }"
-        "QListWidget::item { color:#C9CFDB; background:#0D0D15;"
-        "  border:1px solid rgba(255,255,255,0.07); border-radius:11px;"
+        "QListWidget::item { color:#C9CFDB; background:#141A2E;"
+        "  border:1px solid rgba(255,255,255,0.09); border-radius:11px;"
         "  padding:10px 11px; }"
-        "QListWidget::item:hover { background:#12121C;"
+        "QListWidget::item:hover { background:#1A2138;"
         "  border:1px solid rgba(139,92,246,0.35); }"
         "QListWidget::item:selected { background:rgba(139,92,246,0.20);"
         "  border:1px solid rgba(139,92,246,0.50); color:#F4F4F8; }"
@@ -857,14 +913,9 @@ QWidget* AiSidebar::buildHero() {
     v->addStretch(1);
 
     auto* mark = new QLabel(m_hero);
-    QPixmap px(QStringLiteral(":/assets/stasis-mark-256.png"));
-    if (!px.isNull())
-        mark->setPixmap(px.scaledToHeight(76, Qt::SmoothTransformation));
+    mark->setPixmap(stasisMark(76, /*withGlow=*/true));
     mark->setAlignment(Qt::AlignCenter);
     mark->setStyleSheet(QStringLiteral("background:transparent;"));
-    auto* markFade = new QGraphicsOpacityEffect(mark);
-    markFade->setOpacity(0.92);
-    mark->setGraphicsEffect(markFade);
     v->addWidget(mark, 0, Qt::AlignCenter);
 
     v->addSpacing(18);
@@ -934,9 +985,9 @@ QWidget* AiSidebar::buildHero() {
         card->setStyleSheet(QStringLiteral(
             "QPushButton { text-align:left; padding:0; border-radius:14px;"
             "  background:%1; border:1px solid %2; }"
-            "QPushButton:hover { background:#12121C; border:1px solid %3; }")
+            "QPushButton:hover { background:%4; border:1px solid %3; }")
             .arg(QLatin1String(kCardBg), QLatin1String(kCardEdge),
-                 tint.name(QColor::HexRgb)));
+                 tint.name(QColor::HexRgb), QLatin1String(kCardHover)));
 
         auto* cv = new QVBoxLayout(card);
         cv->setContentsMargins(11, 10, 11, 8);
@@ -1140,12 +1191,12 @@ QWidget* AiSidebar::buildComposer() {
     // Its own inset field inside the box, which is what separates the thing you
     // type in from the controls around it.
     m_input->setStyleSheet(QStringLiteral(
-        "QTextEdit { background:#0A0A12; border:1px solid rgba(255,255,255,0.06);"
+        "QTextEdit { background:%2; border:1px solid rgba(255,255,255,0.07);"
         "  border-radius:11px; padding:8px 10px; color:%1; font:13px 'Segoe UI'; }"
         "QScrollBar:vertical { width:6px; background:transparent; }"
         "QScrollBar::handle:vertical { background:#2A2A3A; border-radius:3px; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
-        .arg(QLatin1String(kTextHigh)));
+        .arg(QLatin1String(kTextHigh), QLatin1String(kInputBg)));
     m_input->installEventFilter(this);
     bv->addWidget(m_input);
 
@@ -1330,7 +1381,7 @@ void AiSidebar::setComposerFocused(bool on) {
     // it, which is what makes it read as the thing you act on.
     m_composerBox->setStyleSheet(QStringLiteral(
         "#composerBox { background:%1; border:1px solid %2; border-radius:16px; }")
-        .arg(QStringLiteral("#0D0D15"),
+        .arg(QStringLiteral("#0E1426"),
              on ? QStringLiteral("rgba(139,92,246,0.75)")
                 : QStringLiteral("rgba(139,92,246,0.32)")));
 }
@@ -1409,7 +1460,7 @@ void AiSidebar::showActionDetail(const QJsonObject& action) {
     dlg.setModal(true);
     dlg.setMinimumWidth(520);
     dlg.setStyleSheet(QStringLiteral(
-        "QDialog { background:#0F131B; }"
+        "QDialog { background:#0B1020; }"
         "QLabel { color:#C9CFDB; font:12.5px 'Segoe UI'; background:transparent; }"));
 
     auto* v = new QVBoxLayout(&dlg);

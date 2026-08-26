@@ -3055,8 +3055,15 @@ int main(int argc, char* argv[]) {
     // copy the developer already has open would capture that window instead,
     // and would close their document. The capture hooks therefore skip the
     // handover (and skip claiming the primary slot, so they disturb nothing).
+    // Every capture hook, not just the two that existed when this was written.
+    // A hook missing from this list does not fail loudly: the launch is handed
+    // to the instance already running and exits silently, so the capture simply
+    // never appears and the grab looks like a crash.
     const bool devCapture = qEnvironmentVariableIsSet("NATIVEOFFICE_CALC_GRAB")
-                            || qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB");
+                            || qEnvironmentVariableIsSet("NATIVEOFFICE_HOME_GRAB")
+                            || qEnvironmentVariableIsSet("NATIVEOFFICE_AI_GRAB")
+                            || qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_GRAB")
+                            || qEnvironmentVariableIsSet("NATIVEOFFICE_SPLASH_GRAB");
 
     if (protocolUrl.isEmpty() && !devCapture) {
         const QString payload =
