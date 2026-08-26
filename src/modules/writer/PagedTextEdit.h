@@ -44,6 +44,7 @@ public:
 
     [[nodiscard]] int  pageCountValue() const;
 
+
     // 1-based page number the text cursor is currently on (1 in web layout).
     [[nodiscard]] int  currentPageNumber() const;
 

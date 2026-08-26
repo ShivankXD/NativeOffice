@@ -475,21 +475,55 @@ QRect PagedTextEdit::selectedImageRect() const {
     if (m_imagePos < 0) return {};
     QTextCursor a(document()); a.setPosition(m_imagePos);
     QTextCursor b(document()); b.setPosition(m_imagePos + 1);
+    const QTextImageFormat f = selectedImageFormat();
+    // A stale m_imagePos left pointing at something that is no longer an image
+    // would otherwise hand back a rectangle built out of two unrelated caret
+    // positions, and handleAt() would scatter phantom resize grips over it.
+    if (!f.isImageFormat()) return {};
+
     const QRect ra = cursorRect(a);
     const QRect rb = cursorRect(b);
-    int x = ra.left();
-    int w = rb.left() - ra.left();
-    int top = ra.top();
-    int h = ra.height();
-    const QTextImageFormat f = selectedImageFormat();
-    if (w <= 2 && f.width() > 0)  w = int(f.width());
-    if (h <= 2 && f.height() > 0) h = int(f.height());
-    return QRect(x, top, qMax(w, 1), qMax(h, 1));
+
+    // Measure the image from its own format, and anchor it on the caret that
+    // sits AFTER it.
+    //
+    // Subtracting the two caret positions, which is what this used to do, is
+    // only right while both carets are on the same line. They are not whenever
+    // the image wrapped onto a line of its own (the caret before it stays at
+    // the end of the previous line) and they can be on different PAGES when the
+    // image lands near a break. The subtraction then produced a wide, flat
+    // rectangle lying across the page gap, nowhere near the picture: that is
+    // the box in the "cannot type after pasting an image" report.
+    //
+    // It did not just look wrong. handleAt() treats anything within a few
+    // pixels of that rectangle's eight corners as a resize grip, so a rectangle
+    // stretched across the document put grips in the middle of the text, and
+    // mousePressEvent swallows a press on a grip without passing it to
+    // QTextEdit. Clicks landed on nothing, the caret never moved, and the
+    // document appeared to refuse input.
+    const bool sameLine = qAbs(ra.top() - rb.top()) <= 2;
+
+    int w = f.width()  > 0 ? int(f.width())
+                           : (sameLine ? rb.left() - ra.left() : ra.height());
+    int h = f.height() > 0 ? int(f.height())
+                           : (sameLine ? ra.height() : rb.height());
+    w = qMax(w, 1);
+    h = qMax(h, 1);
+
+    // The caret after the image is always on the image's own line, so the image
+    // ends at its left edge and sits on its baseline.
+    const int x   = rb.left() - w;
+    const int top = rb.bottom() - h;
+    return QRect(x, top, w, h);
 }
 
 int PagedTextEdit::handleAt(const QPoint& p) const {
     if (m_imagePos < 0) return -1;
     const QRect r = selectedImageRect();
+    // A grip only exists next to the picture. Without this, any rectangle that
+    // came out wrong reached across the page and quietly turned parts of the
+    // text into resize grips, so clicks there never got to the caret.
+    if (!r.adjusted(-10, -10, 10, 10).contains(p)) return -1;
     const QPoint pts[8] = {
         r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft(),
         QPoint(r.center().x(), r.top()), QPoint(r.right(), r.center().y()),
@@ -681,10 +715,22 @@ bool PagedTextEdit::insertMimeImage(const QMimeData* source) {
 void PagedTextEdit::embedImage(QImage img) {
     if (img.isNull()) return;
 
-    // Fit within the content area between the margins.
-    const int maxWidth = qMax(100, int(m_pageW - 2 * m_margin));
-    const int drawW = qMin(img.width(), maxWidth);
-    const int drawH = qMax(1, qRound(double(img.height()) * drawW / double(img.width())));
+    // Fit within the content area between the margins - in BOTH directions.
+    //
+    // Only the width used to be capped, so a tall screenshot came in taller
+    // than a whole page. Qt cannot break a line, so the image straddled the
+    // page boundary, the gray gap band was painted across the middle of it,
+    // and the paragraph after it landed at the top of the next page. That is
+    // what the "text at the top of a new page is cut off" report was looking
+    // at. Word scales a pasted picture to fit the page; so does this now.
+    const int maxWidth  = qMax(100, int(m_pageW - 2 * m_margin));
+    const int maxHeight = qMax(100, int(m_pageH - 2 * m_margin));
+    int drawW = qMin(img.width(), maxWidth);
+    int drawH = qMax(1, qRound(double(img.height()) * drawW / double(img.width())));
+    if (drawH > maxHeight) {
+        drawH = maxHeight;
+        drawW = qMax(1, qRound(double(img.width()) * drawH / double(img.height())));
+    }
 
     // Store at up to twice the drawn width and constrain the *displayed* size
     // separately. Resampling down to the drawn width, as this used to do, threw
@@ -1194,11 +1240,54 @@ void PagedTextEdit::paintEvent(QPaintEvent* e) {
     QFont ff("Segoe UI", qMax(7, qRound(8.5 * scale)));
     p.setFont(ff);
 
+    // Content that sits across a page boundary, which the gap band must not be
+    // painted over.
+    //
+    // The band is page CHROME and it is drawn after the text, so anything the
+    // layout put in the inter-page margins gets destroyed by it - the reader
+    // sees a line of text with its top half missing. Normally nothing is there,
+    // because Qt breaks pages inside the margins. But Qt cannot break a single
+    // line, so a line taller than the content area (a large picture, a tall
+    // table row) legitimately spans the boundary and has to survive.
+    //
+    // Blocks are found by hit-testing the band rather than by walking the
+    // document, so this stays proportional to the number of pages on screen
+    // instead of the length of the document.
+    QRegion protectedContent;
+    if (pages > 1) {
+        auto* lay = document()->documentLayout();
+        for (int i = 0; i < pages - 1; ++i) {
+            const double bottom = (i + 1) * m_pageH;
+            const QRectF band(0, bottom - half - 7, w, gap + 8);
+            const double probes[3] = { bottom - half, bottom, bottom + half };
+            for (double y : probes) {
+                const int pos = lay->hitTest(QPointF(m_pageW / 2.0, y), Qt::FuzzyHit);
+                if (pos < 0) continue;
+                const QTextBlock hit = document()->findBlock(pos);
+                const QTextBlock around[3] = { hit.previous(), hit, hit.next() };
+                for (const QTextBlock& b : around) {
+                    if (!b.isValid()) continue;
+                    QTextLayout* tl = b.layout();
+                    if (!tl) continue;
+                    const QPointF org = lay->blockBoundingRect(b).topLeft();
+                    for (int k = 0; k < tl->lineCount(); ++k) {
+                        const QRectF lr = tl->lineAt(k).rect().translated(org);
+                        if (lr.intersects(band))
+                            protectedContent += lr.toAlignedRect().adjusted(-2, -1, 2, 1);
+                    }
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < pages; ++i) {
         const double bottom = (i + 1) * m_pageH;        // page i bottom edge
 
         // Gap band between this page and the next (not after the last page).
         if (i < pages - 1) {
+            p.save();
+            if (!protectedContent.isEmpty())
+                p.setClipRegion(QRegion(viewport()->rect()) - protectedContent);
             p.fillRect(QRectF(0, bottom - half, w, gap), m_desk);
             // shadow under the upper page's edge
             QLinearGradient up(0, bottom - half - 7, 0, bottom - half);
@@ -1207,6 +1296,7 @@ void PagedTextEdit::paintEvent(QPaintEvent* e) {
             p.fillRect(QRectF(0, bottom - half - 7, w, 7), up);
             // faint top highlight on the lower page's edge
             p.fillRect(QRectF(0, bottom + half, w, 1), QColor(0, 0, 0, 18));
+            p.restore();
         }
 
         // Header & footer zones (left / center / right), drawn in the margins.
