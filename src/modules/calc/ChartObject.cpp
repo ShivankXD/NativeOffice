@@ -20,6 +20,10 @@
 #include <QVector>
 #include <QStringList>
 #include <QMargins>
+#include <QHash>
+#include <QImage>
+#include <QGraphicsRectItem>
+#include <QGraphicsScene>
 #include <algorithm>
 
 #include <QtCharts/QChart>
@@ -39,6 +43,7 @@
 #include <QtCharts/QBarCategoryAxis>
 #include <QtCharts/QValueAxis>
 #include <QtCharts/QLegend>
+#include <QtCharts/QLegendMarker>
 
 namespace NativeOffice {
 
@@ -103,6 +108,101 @@ static QBrush pictureBrush(const QVector<QColor>& stops, const QVector<qreal>& p
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Picture-filled bars
+//
+// Excel fills a bar with an image by stretching the image into the bar, and the
+// image's transparent margins are what shape it: the corpus workbook's cone is
+// a cone because the corners of its picture are empty, not because the bar is
+// tapered. Qt Charts has no hook for the outline of a bar - it paints a brush
+// into a QGraphicsRectItem - so filling with a brush gives a slab of shading
+// whatever the picture looked like.
+//
+// So the bar is not painted by Qt at all. The set is given a FULLY TRANSPARENT
+// brush, which makes Qt lay the bar out and draw nothing, and this overlay
+// draws the image into the rectangle Qt worked out. Two consequences worth
+// naming: the layout (grouping, gap width, stacking, animation) stays Qt's, and
+// the silhouette costs no geometry code.
+//
+// Finding those rectangles again is the only awkward part. The transparent
+// brush doubles as the marker: its red channel is the index of the set it
+// belongs to, so a scan of the scene can pair every bar item with its image.
+// Encoding it in the brush rather than in a table of item pointers matters
+// because Qt re-applies the set's brush to its items on every layout pass, so
+// anything stored on the item itself is wiped the first time the chart resizes.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+// Green and blue of the marker colour, picked only to be unlikely to collide
+// with a real fully transparent brush somewhere else in the scene.
+constexpr int kMarkG = 0x5B;
+constexpr int kMarkB = 0xA1;
+
+QColor pictureBarMarker(int setIndex) {
+    return QColor(qBound(0, setIndex, 255), kMarkG, kMarkB, 0);
+}
+
+// The set index this brush marks, or -1 when the brush is not one of ours.
+int pictureBarIndex(const QBrush& b) {
+    if (b.style() != Qt::SolidPattern) return -1;
+    const QColor c = b.color();
+    if (c.alpha() != 0 || c.green() != kMarkG || c.blue() != kMarkB) return -1;
+    return c.red();
+}
+} // namespace
+
+class PictureBarOverlay : public QWidget {
+public:
+    explicit PictureBarOverlay(QWidget* parent) : QWidget(parent) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_TranslucentBackground);
+    }
+
+    // Called once per rebuild. An empty map turns the overlay off.
+    void setImages(QChartView* view, const QHash<int, QImage>& images) {
+        m_view   = view;
+        m_images = images;
+        setVisible(!m_images.isEmpty());
+        update();
+    }
+
+    [[nodiscard]] bool active() const { return !m_images.isEmpty(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (!m_view || !m_view->scene() || m_images.isEmpty()) return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+
+        // Viewport coordinates are what mapFromScene() returns; the overlay
+        // covers the whole object, so the viewport's own offset inside it has
+        // to be added back.
+        const QPoint off = m_view->viewport()->mapTo(parentWidget(), QPoint(0, 0));
+
+        const auto items = m_view->scene()->items();
+        for (QGraphicsItem* gi : items) {
+            auto* ri = dynamic_cast<QGraphicsRectItem*>(gi);
+            if (!ri || !ri->isVisible()) continue;
+            const int idx = pictureBarIndex(ri->brush());
+            if (idx < 0) continue;
+            const auto it = m_images.constFind(idx);
+            if (it == m_images.constEnd()) continue;
+
+            QRect r = m_view->mapFromScene(ri->sceneBoundingRect()).boundingRect();
+            r.translate(off);
+            // A bar at or near zero has no room for a picture, and scaling an
+            // image into a zero-height rect is a division by zero inside Qt.
+            if (r.width() < 1 || r.height() < 1) continue;
+            p.drawImage(r, it.value());
+        }
+    }
+
+private:
+    QChartView*        m_view { nullptr };
+    QHash<int, QImage> m_images;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 ChartObject::ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget* parent)
     : QFrame(parent)
     , m_model(model)
@@ -133,6 +233,12 @@ ChartObject::ChartObject(SpreadsheetModel* model, const ChartSpec& spec, QWidget
     m_view->viewport()->setAutoFillBackground(false);
     m_view->setAttribute(Qt::WA_TransparentForMouseEvents);
     v->addWidget(m_view, 1);
+
+    // Above the view, so a picture-filled bar lands on top of the plot area,
+    // and outside the layout, because it covers the view rather than sharing
+    // room with it. Its geometry is kept in step by resizeEvent().
+    m_picBars = new PictureBarOverlay(this);
+    m_picBars->hide();
 
     // There is deliberately no close button. A little cross floating over the
     // sheet made every chart look like a dialog; selecting the object and
@@ -167,6 +273,13 @@ ChartSpec ChartObject::spec() const {
 
 void ChartObject::resizeEvent(QResizeEvent* e) {
     QFrame::resizeEvent(e);
+    if (m_picBars) {
+        // Covers the object, and repaints because the bars underneath it have
+        // just been laid out at a new size.
+        m_picBars->setGeometry(rect());
+        m_picBars->raise();
+        m_picBars->update();
+    }
     if (m_grip) {
         m_grip->move(width() - m_grip->width(), height() - m_grip->height());
         m_grip->raise();
@@ -293,6 +406,7 @@ void ChartObject::rebuild() {
     struct Series {
         QString name; QVector<double> vals; QColor color; QVector<QColor> pointColors;
         QVector<QColor> gradient; QVector<qreal> gradientPos;   // picture fill
+        QImage image;              // the picture itself, for a bar's silhouette
     };
     QStringList     cats;
     QVector<Series> series;
@@ -333,6 +447,8 @@ void ChartObject::rebuild() {
             s.gradient     = cs.fillGradient;
             s.gradientPos  = cs.fillGradientPos;
             s.name         = cs.name;
+            if (!cs.fillImage.isEmpty() && !s.image.loadFromData(cs.fillImage))
+                s.image = QImage();     // undecodable: the shading still applies
 
             // A name given as a reference to a header cell.
             if (s.name.isEmpty() && !cs.nameRange.isNull()) {
@@ -379,6 +495,31 @@ void ChartObject::rebuild() {
         if (explicitTitle.isEmpty()) explicitTitle = rc.cornerTitle;
     }
 
+    // "Categories in reverse order", which the file asks for with
+    // <c:orientation val="maxMin"> on its category axis.
+    //
+    // Qt has no way to say it: QBarCategoryAxis::setReverse() exists and does
+    // nothing in Qt 6.11, so it is done to the data instead. The labels and
+    // every series are turned over TOGETHER, which flips what is drawn without
+    // ever separating a bar from its category, and it works the same way for
+    // the horizontal and the vertical case: Qt draws index 0 at the bottom of a
+    // bar chart and at the left of a column chart, which is exactly where Excel
+    // draws it when the axis is not reversed.
+    if (m_spec.catReversed && !cats.isEmpty()) {
+        // Pad first. Reversing lists of different lengths would move the
+        // mismatch from the end, where it is invisible, to the front, where
+        // every bar is then paired with the wrong label.
+        for (Series& s : series)
+            while (s.vals.size() < cats.size()) s.vals << 0.0;
+        std::reverse(cats.begin(), cats.end());
+        for (Series& s : series) std::reverse(s.vals.begin(), s.vals.end());
+    }
+
+    // Only a bar chart can have picture-filled bars, and only the branch below
+    // knows whether this one does. Cleared here so every other type, and a bar
+    // chart that lost its picture, leaves nothing behind from the last build.
+    if (m_picBars) m_picBars->setImages(m_view, {});
+
     auto* chart = new QChart();
     chart->setAnimationOptions(QChart::SeriesAnimations);
     chart->setBackgroundRoundness(0);
@@ -421,6 +562,9 @@ void ChartObject::rebuild() {
         // stacked chart side by side turns four solid bars into sixteen
         // hairlines, which is how this workbook looked next to Excel.
         const bool horiz = (m_spec.type == ChartType::Bar);
+        const QStringList&     catsRef = cats;
+        const QVector<Series>& serRef  = series;
+
         QAbstractBarSeries* bs = nullptr;
         switch (m_spec.grouping) {
         case ChartGrouping::Stacked:
@@ -436,16 +580,52 @@ void ChartObject::rebuild() {
                        : static_cast<QAbstractBarSeries*>(new QBarSeries());
             break;
         }
-        for (const auto& s : series) {
+        // Sets whose fill is a picture, by set index, for the overlay.
+        QHash<int, QImage> barPictures;
+        for (int i = 0; i < serRef.size(); ++i) {
+            const auto& s = serRef.at(i);
             auto* set = new QBarSet(s.name);
             for (double v : s.vals) *set << v;
-            if (s.gradient.size() >= 2)      set->setBrush(pictureBrush(s.gradient, s.gradientPos));
-            else if (s.color.isValid())      set->setColor(s.color);
+            if (!s.image.isNull() && i <= 255) {
+                // Laid out by Qt, painted by the overlay. See PictureBarOverlay.
+                barPictures.insert(i, s.image);
+                set->setBrush(QBrush(pictureBarMarker(i)));
+                set->setPen(Qt::NoPen);
+            } else if (s.gradient.size() >= 2) {
+                set->setBrush(pictureBrush(s.gradient, s.gradientPos));
+            } else if (s.color.isValid()) {
+                set->setColor(s.color);
+            }
             bs->append(set);
         }
 
         chart->addSeries(bs);
-        auto* axCat = new QBarCategoryAxis(); axCat->append(cats);
+
+        // The legend reads its swatch off the set's brush, and that brush is
+        // now deliberately invisible. Give those markers the picture's shading
+        // instead, or a picture-filled series shows a blank key.
+        if (!barPictures.isEmpty()) {
+            const auto markers = chart->legend()->markers(bs);
+            for (int i = 0; i < markers.size() && i < serRef.size(); ++i) {
+                if (!barPictures.contains(i)) continue;
+                const auto& s = serRef.at(i);
+                if (s.gradient.size() >= 2)
+                    markers.at(i)->setBrush(pictureBrush(s.gradient, s.gradientPos));
+                else if (s.color.isValid())
+                    markers.at(i)->setBrush(QBrush(s.color));
+            }
+        }
+        if (m_picBars) m_picBars->setImages(m_view, barPictures);
+
+        // Picture bars and the grow animation do not mix. Qt animates a bar's
+        // rectangle up from zero on every layout, and the overlay can only
+        // draw the rectangle that exists when it paints: a zero-height one
+        // gives nothing, so the bars were simply absent for the first second
+        // after every zoom or resize. A solid bar merely looked short for that
+        // second, which is why this only shows up once the fill is a picture.
+        if (!barPictures.isEmpty()) chart->setAnimationOptions(QChart::NoAnimation);
+
+        auto* axCat = new QBarCategoryAxis(); axCat->append(catsRef);
         auto* axVal = new QValueAxis();
         applyValueAxisFormat(axVal);
         if (m_spec.type == ChartType::Column) {

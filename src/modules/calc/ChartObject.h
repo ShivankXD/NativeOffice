@@ -25,6 +25,11 @@ namespace NativeOffice {
 
 class SpreadsheetModel;
 
+// Paints picture-filled bars over the chart. See ChartObject.cpp: Qt Charts
+// fills a bar by painting a brush into a rectangle, so a brush alone can never
+// give a bar the outline of the picture it is filled with.
+class PictureBarOverlay;
+
 class ChartObject : public QFrame {
     Q_OBJECT
 public:
@@ -81,6 +86,9 @@ private:
 
     QWidget*     m_grip     { nullptr };
     QChartView*  m_view     { nullptr };
+    // Sits over the view and draws the bars whose fill is a picture. Always
+    // present; it has nothing to paint unless a series carries an image.
+    PictureBarOverlay* m_picBars { nullptr };
 
     // Drag / resize state.
     bool   m_dragging { false };

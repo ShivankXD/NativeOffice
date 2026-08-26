@@ -77,6 +77,13 @@ struct ChartSeries {
     // Empty for an ordinary solid fill.
     QVector<QColor> fillGradient;
     QVector<qreal>  fillGradientPos;
+    // The picture itself, kept because the shading alone cannot give a bar the
+    // picture's OUTLINE. Excel stretches the image into the bar and the image's
+    // transparent margins are what make a cone look like a cone; a gradient
+    // brush paints the whole rectangle and comes out a slab. The bytes stay
+    // with the series so the silhouette survives a save and reload, and so the
+    // fill can be written back into an .xlsx as a real blipFill.
+    QByteArray      fillImage;
     // Pie and doughnut charts colour each slice separately, so the file gives
     // per-point colours (c:dPt) rather than one colour for the series.
     QVector<QColor> pointColors;
@@ -109,6 +116,16 @@ struct ChartSpec {
     // Only meaningful for bar, line and area charts.
     ChartGrouping grouping { ChartGrouping::Clustered };
     QString valueAxisFormat;         // number-format code for the value axis
+
+    // The category axis runs the other way: OOXML's <c:orientation val="maxMin">,
+    // which Excel's UI calls "categories in reverse order".
+    //
+    // This was not read at all, and the default is not a safe guess. Excel and
+    // Qt agree on the unreversed order (the first category at the bottom of a
+    // bar chart, at the left of a column chart), so a chart that asks for the
+    // reverse came out upside down next to Excel while every other chart was
+    // right. Reversing everything would only have moved the bug.
+    bool catReversed { false };
 
     // True when this chart was read out of an .xlsx. It decides whether a
     // save can keep it: the exporter cannot write a chart part, so the only

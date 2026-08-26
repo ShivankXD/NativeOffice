@@ -74,6 +74,10 @@ struct FillPicture {
     QColor          average;
     QVector<QColor> stops;
     QVector<qreal>  positions;   // 0..1, parallel to stops
+    // The image as it came out of the package. The average and the stops are
+    // both lossy summaries of it; the bytes are what a renderer needs to give
+    // a bar the picture's silhouette rather than just its shading.
+    QByteArray      bytes;
 };
 
 // `blipPicture` resolves a picture fill on a series, given the relationship id

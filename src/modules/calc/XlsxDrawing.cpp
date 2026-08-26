@@ -385,6 +385,13 @@ bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
                 spec.valueAxisFormat =
                     r.attributes().value(QLatin1String("formatCode")).toString();
 
+            // "Categories in reverse order". Scoped to catAx because the value
+            // axis carries the same element and reversing on that one would
+            // turn the chart the wrong way round entirely.
+            if (n == QLatin1String("orientation") && inside(path, "catAx"))
+                spec.catReversed =
+                    r.attributes().value(QLatin1String("val")) == QLatin1String("maxMin");
+
             // A combo chart holds several plot elements; the first one decides
             // the type, so only its direction counts.
             if (n == QLatin1String("barDir") && pendingBarDir.isEmpty())
@@ -439,9 +446,12 @@ bool parseChartPart(const QByteArray& chartXml, ChartSpec& spec,
                 if (!c.isValid() && !blipRel.isEmpty() && blipPicture) {
                     const FillPicture fp = blipPicture(blipRel);
                     c = fp.average;
-                    if (!forPoint && !fp.stops.isEmpty()) {
-                        cur.fillGradient    = fp.stops;
-                        cur.fillGradientPos = fp.positions;
+                    if (!forPoint) {
+                        cur.fillImage = fp.bytes;
+                        if (!fp.stops.isEmpty()) {
+                            cur.fillGradient    = fp.stops;
+                            cur.fillGradientPos = fp.positions;
+                        }
                     }
                 }
                 if (c.isValid()) {
@@ -901,6 +911,7 @@ FillPicture samplePicture(const QByteArray& imageBytes) {
     if (imageBytes.isEmpty()) return out;
     QImage img;
     if (!img.loadFromData(imageBytes) || img.isNull()) return out;
+    out.bytes = imageBytes;
     if (img.height() > 128)
         img = img.scaledToHeight(128, Qt::SmoothTransformation);
     img = img.convertToFormat(QImage::Format_ARGB32);
