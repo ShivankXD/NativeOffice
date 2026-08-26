@@ -3434,6 +3434,11 @@ int main(int argc, char* argv[]) {
         beginUpdateScan();
     };
 
+    // How long the startup card stays up, measured from the moment it appears.
+    // The shell is revealed as this ends, so it is also the time the whole
+    // launch appears to take.
+    constexpr int kSplashHoldMs = 2000;
+
     // ── Unified startup: one splash card + the sign-in gate ────────────────
     // A single card carries the whole launch — it shows "Restoring your
     // session" while the stored session validates, then "Initializing" until
@@ -3444,20 +3449,23 @@ int main(int argc, char* argv[]) {
             !openedFromCli && QSettings().value("app/showSplash", true).toBool();
         QPointer<NativeOffice::SplashScreen> splash =
             useSplash ? new NativeOffice::SplashScreen : nullptr;
-        if (splash) splash->beginWith(QStringLiteral("Restoring your session"));
+        if (splash) splash->begin();
 
         auto* gate = new NativeOffice::LoginGate;
         QObject::connect(gate, &NativeOffice::LoginGate::proceed,
                          &shell, [splash, revealShell]() {
-            if (splash) {
-                splash->setStatus(QStringLiteral("Initializing"));
-                QTimer::singleShot(1400, splash, [splash, revealShell]() {
-                    revealShell();
-                    if (splash) splash->finish();
-                });
-            } else {
+            if (!splash) { revealShell(); return; }
+            // The card runs for a fixed span, not for however long the session
+            // check took. Waiting a flat interval AFTER the gate answered made
+            // the whole startup as slow as the slowest step plus the wait, and
+            // made the card outstay its welcome on a machine that was ready
+            // immediately. Asking the splash what is left of its own span puts
+            // the shell up the moment the span ends, whichever finished first.
+            QTimer::singleShot(splash->remainingMs(kSplashHoldMs), splash,
+                               [splash, revealShell]() {
                 revealShell();
-            }
+                if (splash) splash->finish();
+            });
         });
         QObject::connect(gate, &NativeOffice::LoginGate::signInRequired,
                          gate, [splash]() { if (splash) splash->finish(); });

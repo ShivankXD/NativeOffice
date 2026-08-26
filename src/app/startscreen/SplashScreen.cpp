@@ -3,17 +3,26 @@
 // ─────────────────────────────────────────────────────────────────────────────
 #include "SplashScreen.h"
 
-#include <QVBoxLayout>
-#include <QLabel>
-#include <QFrame>
-#include <QPixmap>
-#include <QTimer>
-#include <QProgressBar>
-#include <QGraphicsDropShadowEffect>
 #include <QApplication>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QScreen>
+#include <QTimer>
 
 namespace NativeOffice {
+
+namespace {
+// The card is sized against the SCREEN, not in fixed pixels, so it holds the
+// same share of the display on a 1366 laptop panel and on a 4K monitor. Word's
+// startup card is a shade over a quarter of the screen's width; this is that,
+// rounded up a little, and clamped so it stays sensible at both extremes.
+constexpr double kScreenShare = 0.29;
+constexpr int    kMinWidth    = 420;
+constexpr int    kMaxWidth    = 760;
+constexpr int    kShadowPad   = 26;   // room outside the card for the shadow
+constexpr int    kRadius      = 18;
+} // namespace
 
 SplashScreen::SplashScreen(QWidget* parent)
     : QWidget(parent)
@@ -23,105 +32,95 @@ SplashScreen::SplashScreen(QWidget* parent)
                    | Qt::WindowStaysOnTopHint);
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_DeleteOnClose);
-    setFixedSize(560, 440);
 
-    // Outer margin gives the drop shadow room to render.
-    auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(28, 24, 28, 28);
+    m_art = QPixmap(QStringLiteral(":/assets/splash-card.jpg"));
 
-    // ── Rounded white card ────────────────────────────────────────────────
-    auto* card = new QFrame(this);
-    card->setObjectName("splashCard");
-    card->setStyleSheet("#splashCard { background:#FFFFFF; border-radius:20px; }");
-    outer->addWidget(card);
+    int cardW = kMinWidth;
+    if (const QScreen* screen = QApplication::primaryScreen())
+        cardW = int(screen->geometry().width() * kScreenShare);
+    cardW = qBound(kMinWidth, cardW, kMaxWidth);
 
-    auto* shadow = new QGraphicsDropShadowEffect(card);
-    shadow->setBlurRadius(54);
-    shadow->setColor(QColor(20, 24, 40, 75));
-    shadow->setOffset(0, 12);
-    card->setGraphicsEffect(shadow);
+    // The card takes the artwork's own proportions. Forcing a shape on it would
+    // either letterbox the picture or crop the wordmark out of it.
+    const double aspect = (!m_art.isNull() && m_art.width() > 0)
+                              ? double(m_art.height()) / m_art.width()
+                              : 0.75;
+    const int cardH = int(cardW * aspect);
+    setFixedSize(cardW + kShadowPad * 2, cardH + kShadowPad * 2);
+}
 
-    auto* cl = new QVBoxLayout(card);
-    cl->setContentsMargins(44, 40, 44, 36);
-    cl->setSpacing(0);
-    cl->addStretch();
+void SplashScreen::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
 
-    // ── Brand logo ────────────────────────────────────────────────────────
-    auto* logo = new QLabel(card);
-    logo->setAlignment(Qt::AlignCenter);
-    // The transparent-background lockup (logo_white_bg.png) so it sits flush on
-    // the white card — the light-bg variant baked in an off-white rectangle
-    // that read as a mismatched box.
-    QPixmap pm(":/assets/nativeoffice-logo-mark.png");
-    if (!pm.isNull()) {
-        // Fit inside a bounded box (keeping aspect ratio) so the tall wordmark
-        // logo never overflows the card and pushes the status text off-screen.
-        logo->setPixmap(pm.scaled(240, 168, Qt::KeepAspectRatio,
+    const QRectF card = QRectF(rect()).adjusted(kShadowPad, kShadowPad,
+                                                -kShadowPad, -kShadowPad);
+
+    // A soft shadow, painted as a few nested rounded rectangles rather than
+    // through QGraphicsDropShadowEffect: the effect renders the whole widget to
+    // an offscreen buffer first, and on a translucent frameless window that
+    // costs a visible flicker on the very first frame, which is the one frame
+    // this window exists to look right in.
+    for (int i = kShadowPad; i > 0; --i) {
+        const double t = double(i) / kShadowPad;
+        QColor c(10, 12, 22);
+        c.setAlphaF(0.055 * (1.0 - t));
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
+        p.drawRoundedRect(card.adjusted(-i, -i + 3, i, i + 3),
+                          kRadius + i, kRadius + i);
+    }
+
+    QPainterPath clip;
+    clip.addRoundedRect(card, kRadius, kRadius);
+    p.setClipPath(clip);
+
+    if (!m_art.isNull()) {
+        p.drawPixmap(card.toRect(),
+                     m_art.scaled(card.size().toSize(), Qt::KeepAspectRatioByExpanding,
                                   Qt::SmoothTransformation));
     } else {
-        logo->setText("NativeOffice");
-        logo->setStyleSheet("color:#1A1F2E; font-size:30px; font-weight:700;");
+        // The artwork is the whole card, so a missing resource has to leave
+        // something behind rather than a transparent hole.
+        p.fillRect(card, QColor(8, 10, 18));
+        p.setPen(QColor(0xF2, 0xF5, 0xFA));
+        QFont f(QStringLiteral("Segoe UI"));
+        f.setPixelSize(qMax(16, int(card.width() * 0.06)));
+        f.setWeight(QFont::DemiBold);
+        p.setFont(f);
+        p.drawText(card, Qt::AlignCenter, QStringLiteral("NativeOffice"));
     }
-    cl->addWidget(logo);
-
-    cl->addSpacing(28);
-
-    // ── Status line (base text + animated dots) ────────────────────────────
-    m_status = new QLabel(card);
-    m_status->setAlignment(Qt::AlignCenter);
-    m_status->setStyleSheet(
-        "color:#5B6473; font-family:'Segoe UI','Inter',sans-serif;"
-        "font-size:15px; letter-spacing:1px;");
-    cl->addWidget(m_status);
-
-    cl->addSpacing(24);
-
-    // ── Thin indeterminate progress bar ───────────────────────────────────
-    auto* bar = new QProgressBar(card);
-    bar->setRange(0, 0);            // busy / indeterminate
-    bar->setTextVisible(false);
-    bar->setFixedHeight(4);
-    bar->setStyleSheet(
-        "QProgressBar { background:#EEF1F6; border:none; border-radius:2px; }"
-        "QProgressBar::chunk { border-radius:2px;"
-        "  background:qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-        "    stop:0 #3B82F6, stop:1 #8B5CF6); }");
-    cl->addWidget(bar);
-
-    cl->addStretch();
-
-    // Animate the trailing dots of the status line (1..5 dots).
-    m_dotTimer = new QTimer(this);
-    connect(m_dotTimer, &QTimer::timeout, this, [this]() {
-        m_dotCount = (m_dotCount % 5) + 1;
-        refreshStatus();
-    });
 }
 
-void SplashScreen::refreshStatus() {
-    m_status->setText(m_base + QString(m_dotCount, '.'));
-}
-
-void SplashScreen::beginWith(const QString& baseText) {
+void SplashScreen::begin() {
     if (const QScreen* screen = QApplication::primaryScreen())
         move(screen->geometry().center() - rect().center());
-
-    m_base = baseText;
-    m_dotCount = 3;
-    refreshStatus();
-    m_dotTimer->start(280);
-
+    m_shown.start();
     show();
     raise();
+
+    // Dev-only: capture the card itself. The startup window is on screen for
+    // two seconds and the dev build is masked from screen capture, so this is
+    // the only way to look at it.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_SPLASH_GRAB")) {
+        const QString out = qEnvironmentVariable("NATIVEOFFICE_SPLASH_GRAB");
+        QTimer::singleShot(600, this, [this, out] {
+            if (grab().save(out))
+                qWarning("[splash] grabbed %s  card %dx%d screen %dx%d",
+                         qUtf8Printable(out), width(), height(),
+                         QApplication::primaryScreen()->geometry().width(),
+                         QApplication::primaryScreen()->geometry().height());
+        });
+    }
 }
 
-void SplashScreen::setStatus(const QString& baseText) {
-    m_base = baseText;
-    refreshStatus();
+int SplashScreen::remainingMs(int totalMs) const {
+    if (!m_shown.isValid()) return 0;
+    return qBound(0, totalMs - int(m_shown.elapsed()), totalMs);
 }
 
 void SplashScreen::finish() {
-    m_dotTimer->stop();
     emit finished();
     close();                   // WA_DeleteOnClose handles cleanup
 }

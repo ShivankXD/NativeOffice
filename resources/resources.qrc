@@ -50,6 +50,7 @@
        <!-- Create-card art, composited from the supplied 3D renders by
             scratchpad/make_cards.py: subject high in the frame, lower third
             left clear for the name the card draws over it. -->
+       <file alias="splash-card.jpg">splash-card.jpg</file>
        <file alias="card-document.jpg">card-document.jpg</file>
        <file alias="card-document-icon.png">card-document-icon.png</file>
        <file alias="card-spreadsheet-icon.png">card-spreadsheet-icon.png</file>
