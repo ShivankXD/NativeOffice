@@ -98,6 +98,11 @@ public:
     // View tab hasn't been opened yet).
     void setFocusModeChecked(bool on);
 
+    // Applying a named paragraph or character style, the same call every style
+    // button and menu entry makes. Public so the dev capture hooks can drive it
+    // without synthesising clicks on a lazily-built ribbon tab.
+    void applyStyleByName(const QString& name);
+
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;
 
@@ -145,7 +150,6 @@ private:
     void pasteAsPlainText();
 
     // ── Named styles (Tier 2 #8) ────────────────────────────────────────────
-    void applyStyleByName(const QString& name);
     void rebuildStyleGallery();
     void rebuildMoreStylesMenu();
     void openStyleEditor(const QString& editName);   // empty → create new

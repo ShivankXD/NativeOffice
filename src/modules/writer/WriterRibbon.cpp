@@ -5210,6 +5210,20 @@ void WriterRibbon::applyStyleByName(const QString& name) {
             range.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
         }
         range.mergeBlockFormat(bf);
+        // The BLOCK's char format, not just the text's.
+        //
+        // mergeCharFormat only touches characters that are actually selected,
+        // so on an empty paragraph it does nothing at all, and the only thing
+        // carrying the new style was setCurrentCharFormat below - which Qt
+        // throws away the moment the cursor moves. That is the whole of the
+        // "clear the text, retype it, and Heading 2 comes back as Heading 1"
+        // report: the emptied block kept the previous style's char format and
+        // handed it straight back to the newly typed text.
+        //
+        // The block char format is what an empty block renders with and what
+        // text typed into it inherits, so it has to be set too. It matters for
+        // every paragraph style, not only the headings.
+        range.mergeBlockCharFormat(cf);
         range.mergeCharFormat(cf);
         m_editor->setCurrentCharFormat(cf);
     }
