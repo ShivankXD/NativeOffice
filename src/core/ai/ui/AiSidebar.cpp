@@ -3,6 +3,7 @@
 #include "AiSourcesStrip.h"
 #include "AiToast.h"
 #include "ai/AiChatStore.h"
+#include "ai/AiDocMarker.h"
 #include "ai/AiStreamTarget.h"
 #include "ai/AiDocumentAgent.h"
 #include "ai/AiQuota.h"
@@ -122,26 +123,13 @@ private:
     bool         m_user  { false };
 };
 
-// The model marks a reply that is meant for the file with this on its own
-// first line. Everything after it is placed into the document verbatim, so a
-// reply without it is conversation and stays in the chat. The marker is never
-// shown: it is stripped here on the way in.
-const QLatin1String kDocMarker("[[DOCUMENT]]");
+// The document marker rule lives in AiDocMarker.h so it can be tested without a
+// running panel. See that file for why it is a line match rather than a
+// startsWith on the whole reply.
+const QLatin1String kDocMarker = aiDocMarker();
 
-// Is this reply destined for the document? When it is, *content receives the
-// reply with the marker line removed.
-bool isDocumentReply(const QString& reply, QString* content) {
-    const QString t = reply.trimmed();
-    if (!t.startsWith(kDocMarker)) return false;
-    if (content) {
-        QString rest = t.mid(kDocMarker.size());
-        // Drop the rest of the marker line, whatever line ending it used.
-        const int nl = rest.indexOf(QLatin1Char('\n'));
-        rest = nl >= 0 ? rest.mid(nl + 1) : QString();
-        *content = rest.trimmed();
-    }
-    return true;
-}
+using NativeOffice::aiDocMarkerAt;
+using NativeOffice::aiIsDocumentReply;
 
 } // namespace
 
@@ -198,36 +186,50 @@ AiSidebar::AiSidebar(QWidget* parent)
             return;
         }
 
-        // Undecided: the marker, if there is one, is the first line. Wait for
-        // that line rather than guessing from a few characters.
-        const QString t = m_streamAccum.trimmed();
-        const int n = qMin(t.size(), kDocMarker.size());
-        const bool couldBeMarker = t.left(n) == kDocMarker.left(n);
+        // Undecided. The marker can be preceded by the model explaining what it
+        // is about to build, so this cannot commit to "conversation" the moment
+        // the first character is not a bracket. Instead the preamble is shown
+        // as it streams, and the switch happens if and when a marker line
+        // arrives; a reply that ends without one was simply conversation.
+        const int at = aiDocMarkerAt(m_streamAccum);
+        if (at < 0) {
+            // No marker yet. Show what has arrived, minus a partial marker that
+            // may still be coming, so the reader never sees "[[DOCU" flash.
+            QString shown = m_streamAccum;
+            const int tailStart = qMax(0, shown.size() - kDocMarker.size());
+            const int brk = shown.indexOf(kDocMarker.left(1), tailStart);
+            if (brk >= 0 && kDocMarker.left(shown.size() - brk) == shown.mid(brk))
+                shown = shown.left(brk);
+            if (m_streamTarget) { m_streamTarget->setText(shown); scrollToBottom(); }
+            return;
+        }
 
-        if (couldBeMarker && t.size() < kDocMarker.size()) return;   // still arriving
+        const int nl = m_streamAccum.indexOf(QLatin1Char('\n'), at);
+        if (nl < 0) return;                           // marker line not finished
 
-        if (t.startsWith(kDocMarker)) {
-            const int nl = m_streamAccum.indexOf(QLatin1Char('\n'));
-            if (nl < 0) return;                       // marker line not finished
-            m_streamDecided = true;
-            if (capabilityFor(m_mode) == AiCapability::Edit
-                && (m_docTarget || m_deckTarget)) {
-                m_streamToDoc = true;
-                m_streamToDeck = m_deckTarget && !m_docTarget;
-                if (m_streamToDeck) { m_deckTarget->aiBegin();
-                                      m_deckTarget->aiFeed(m_streamAccum.mid(nl + 1)); }
-                else                { m_agent->beginLive(m_docTarget);
-                                      m_agent->feed(m_streamAccum.mid(nl + 1)); }
-                if (m_streamTarget)
-                    m_streamTarget->setText(QStringLiteral("Writing into your %1 document...")
-                                                .arg(modeName(m_mode)));
-            } else if (m_streamTarget) {
-                // Marked as content somewhere it cannot be written; show it.
-                m_streamTarget->setText(m_streamAccum.mid(nl + 1));
+        m_streamDecided = true;
+        const QString preamble = m_streamAccum.left(at).trimmed();
+        const QString body     = m_streamAccum.mid(nl + 1);
+
+        if (capabilityFor(m_mode) == AiCapability::Edit
+            && (m_docTarget || m_deckTarget)) {
+            m_streamToDoc = true;
+            m_streamToDeck = m_deckTarget && !m_docTarget;
+            if (m_streamToDeck) { m_deckTarget->aiBegin(); m_deckTarget->aiFeed(body); }
+            else                { m_agent->beginLive(m_docTarget); m_agent->feed(body); }
+            if (m_streamTarget) {
+                // Keep what the model said before the marker: it is usually the
+                // reason it built what it built, and it is the only part of the
+                // reply the reader can still see once the rest is in the file.
+                const QString note = QStringLiteral("Writing into your %1 document...")
+                                         .arg(modeName(m_mode));
+                m_streamTarget->setText(preamble.isEmpty() ? note
+                                                           : preamble + "\n\n" + note);
             }
-        } else {
-            m_streamDecided = true;                   // ordinary conversation
-            if (m_streamTarget) m_streamTarget->setText(m_streamAccum);
+        } else if (m_streamTarget) {
+            // Marked as content somewhere it cannot be written; show it.
+            m_streamTarget->setText(preamble.isEmpty() ? body
+                                                       : preamble + "\n\n" + body);
         }
         scrollToBottom();
     });
@@ -278,11 +280,14 @@ AiSidebar::AiSidebar(QWidget* parent)
                     m_streamTarget->setText(QStringLiteral("Written into your %1 document.")
                                                 .arg(modeName(m_mode)));
             } else if (m_streamTarget) {
-                QString docContent;
+                QString docContent, preamble;
                 // A reply so short it finished before the marker line could be
-                // judged still needs the marker taken off.
-                const QString shown =
-                    isDocumentReply(full, &docContent) ? docContent : full;
+                // judged still needs the marker taken off, and whatever the
+                // model said ahead of it kept.
+                QString shown = full;
+                if (aiIsDocumentReply(full, &docContent, &preamble))
+                    shown = preamble.isEmpty() ? docContent
+                                               : preamble + "\n\n" + docContent;
                 // An empty reply gets said out loud rather than left as a blank
                 // bubble under the question.
                 m_streamTarget->setText(shown.trimmed().isEmpty()

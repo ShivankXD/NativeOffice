@@ -146,6 +146,14 @@ endforeach()
 qt_add_executable(RecoverySmoke tools/RecoverySmoke.cpp)
 target_link_libraries(RecoverySmoke PRIVATE NativeOfficeCore Qt6::Widgets)
 
+# Dev-only check on the rule that decides whether a Stasis reply is written into
+# the open file or shown in the chat. A reply that explains itself before the
+# [[DOCUMENT]] marker used to be misread as conversation, which printed a whole
+# slide deck's JSON into the panel and built nothing.
+qt_add_executable(AiMarkerSmoke tools/AiMarkerSmoke.cpp)
+target_link_libraries(AiMarkerSmoke PRIVATE Qt6::Core)
+target_include_directories(AiMarkerSmoke PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Installation rules (future-proofing)
 # ─────────────────────────────────────────────────────────────────────────────
