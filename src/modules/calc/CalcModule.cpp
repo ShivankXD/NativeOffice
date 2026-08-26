@@ -44,6 +44,7 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QResizeEvent>
+#include <QMoveEvent>
 #include <QFont>
 #include <QSizePolicy>
 #include <QFrame>
@@ -135,6 +136,27 @@ namespace NativeOffice {
 // (animating the dash phase) and recomputes its rect from visualRect() every
 // paint, so it tracks scrolling for free.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Both grid overlays below are transparent children of the VIEWPORT, and they
+// paint in viewport coordinates (QTableView::visualRect). That only lines up
+// while the widget itself sits at the viewport's top-left corner, and there is
+// one thing that quietly moves it: QAbstractScrollArea scrolls by calling
+// viewport()->scroll(dx, dy), and QWidget::scroll MOVES CHILD WIDGETS as well
+// as blitting pixels. So every scroll slid the overlay by the scroll delta,
+// and it then drew perfectly correct coordinates in the wrong place: scrolled
+// three rows down, the selection box appeared three rows above the cell it
+// belonged to while the row header and the name box named the right one.
+//
+// Repainting on scroll, which is what was wired up, cannot fix that - it
+// redraws the right picture at the displaced position. The widget has to be
+// put back, and doing it in moveEvent catches every scroll path rather than
+// the ones someone remembered to connect. The second move is a no-op, so this
+// settles immediately instead of recursing.
+// ─────────────────────────────────────────────────────────────────────────────
+static void pinOverlayToViewport(QWidget* w) {
+    if (w->pos() != QPoint(0, 0)) w->move(0, 0);
+}
+
 class MarchingAntsOverlay : public QWidget {
 public:
     explicit MarchingAntsOverlay(QTableView* view)
@@ -164,6 +186,8 @@ public:
     }
 
 protected:
+    void moveEvent(QMoveEvent*) override { pinOverlayToViewport(this); }
+
     void paintEvent(QPaintEvent*) override {
         if (m_cells.isNull()) return;
         const QModelIndex tl = m_view->model()->index(m_cells.top(),    m_cells.left());
@@ -208,6 +232,8 @@ public:
     }
 
 protected:
+    void moveEvent(QMoveEvent*) override { pinOverlayToViewport(this); }
+
     void paintEvent(QPaintEvent*) override {
         auto* sm = m_view->selectionModel();
         if (!sm) return;
@@ -3078,6 +3104,17 @@ void CalcModule::dumpSheetObjects() const {
              qUtf8Printable(QStringLiteral("XFD")), SpreadsheetModel::NUM_ROWS);
     qWarning("[calc] sheet %d of %d  viewport %dx%d  zoom %.2f",
              m_activeSheet + 1, int(m_sheets.size()), vp.width(), vp.height(), m_zoom);
+    // The grid overlays paint in viewport coordinates, so they are only correct
+    // while they sit at the viewport's origin. QWidget::scroll moves child
+    // widgets, so this is what drifts when a scroll is not compensated for, and
+    // a non-zero position here means the selection box is drawn that far from
+    // the cell it belongs to.
+    if (m_selOverlay && m_ants)
+        qWarning("[calc] overlay origins: selection (%d,%d) ants (%d,%d)  scroll v=%d h=%d",
+                 m_selOverlay->pos().x(), m_selOverlay->pos().y(),
+                 m_ants->pos().x(), m_ants->pos().y(),
+                 m_tableView ? m_tableView->verticalScrollBar()->value() : -1,
+                 m_tableView ? m_tableView->horizontalScrollBar()->value() : -1);
     qWarning("[calc] model: %d chart(s), %d image(s), %d shape(s)",
              m_model ? m_model->charts().size() : 0,
              m_model ? m_model->images().size() : 0,
