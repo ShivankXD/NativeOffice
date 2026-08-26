@@ -130,20 +130,38 @@ protected:
         p.setClipPath(clip);
         p.fillRect(box, QColor(Home::kPanel));
 
-        // Cover-crop, cached: a repaint happens on every hover.
-        const QSize want = size() * devicePixelRatio();
-        if (m_scaled.isNull() || m_scaled.size() != want) {
+        // The icon is LAID OUT, not cover-cropped.
+        //
+        // The artwork used to be a 512x304 render of an icon floating in a wide
+        // dark field, drawn with KeepAspectRatioByExpanding and centred. That
+        // only looks right at one card shape: the icons do not sit at the centre
+        // of their own renders, so as the window changed size the expanding crop
+        // cut a different part of each field and the icons drifted, shrank and
+        // ran off the edge at their worst. Four cards on one row means the card
+        // aspect follows the window width, so every monitor produced a different
+        // wrong answer.
+        //
+        // The art is now the icon alone on transparency, and it is fitted into a
+        // reserved box above the caption. Fitting cannot crop, so the icon is
+        // whole and identically placed at every size, and the card's own panel
+        // and accent wash supply the backdrop the render used to carry.
+        const qreal capH = 46;                       // room kept for the caption
+        const QRectF iconBox = box.adjusted(16, 12, -16, -capH);
+        const QSize want = (iconBox.size() * devicePixelRatio()).toSize();
+        if (!want.isEmpty() && (m_scaled.isNull() || m_fittedTo != want)) {
             const QPixmap src(m_art);
             if (!src.isNull()) {
-                m_scaled = src.scaled(want, Qt::KeepAspectRatioByExpanding,
+                m_scaled = src.scaled(want, Qt::KeepAspectRatio,
                                       Qt::SmoothTransformation);
                 m_scaled.setDevicePixelRatio(devicePixelRatio());
+                m_fittedTo = want;
             }
         }
         if (!m_scaled.isNull()) {
             const QSizeF drawn = m_scaled.deviceIndependentSize();
-            p.drawPixmap(QPointF((width() - drawn.width()) / 2.0,
-                                 (height() - drawn.height()) / 2.0), m_scaled);
+            p.drawPixmap(QPointF(iconBox.center().x() - drawn.width() / 2.0,
+                                 iconBox.center().y() - drawn.height() / 2.0),
+                         m_scaled);
         }
 
         // Scrim under the text. The renders are dark at the foot already, so
@@ -203,6 +221,10 @@ protected:
 private:
     QString m_art, m_title, m_sub, m_accent;
     QPixmap m_scaled;
+    // The box m_scaled was fitted into, not its own size: a fit leaves the
+    // pixmap smaller than the box on one axis, so comparing against the box is
+    // the only way to know the cache is still valid.
+    QSize   m_fittedTo;
     bool    m_hover { false };
 };
 
@@ -1169,13 +1191,13 @@ QWidget* StartScreen::buildCreateCards() {
     // Create New, which is what gives the row its breathing space.
     struct Card { const char* art; QString title, sub, accent; int action; };
     const Card cards[] = {
-        { ":/assets/card-document.jpg",     tr("Document"),     tr("Write, edit and format"),
+        { ":/assets/card-document-icon.png",     tr("Document"),     tr("Write, edit and format"),
           Home::kWriter,  1 },
-        { ":/assets/card-spreadsheet.jpg",  tr("Spreadsheet"),  tr("Analyse and visualise"),
+        { ":/assets/card-spreadsheet-icon.png",  tr("Spreadsheet"),  tr("Analyse and visualise"),
           Home::kCalc,    2 },
-        { ":/assets/card-presentation.jpg", tr("Presentation"), tr("Design and present"),
+        { ":/assets/card-presentation-icon.png", tr("Presentation"), tr("Design and present"),
           Home::kImpress, 3 },
-        { ":/assets/card-pdf.jpg",          tr("PDF"),          tr("Merge, convert and secure"),
+        { ":/assets/card-pdf-icon.png",          tr("PDF"),          tr("Merge, convert and secure"),
           Home::kPdf,     4 },
     };
 
