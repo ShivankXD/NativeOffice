@@ -358,6 +358,28 @@ QWidget* AiSidebar::buildHeader() {
         "background:rgba(124,92,255,0.14); border:none;"
         "border-radius:7px; padding:0 9px;"));
 
+    // Start a fresh conversation.
+    //
+    // startNewSession() has always existed but nothing in the panel reached it:
+    // the only caller runs once per process, so closing and reopening Stasis
+    // kept the whole transcript. Testers were told by the assistant itself to
+    // "look for a New Chat button, or close and reopen the panel", and neither
+    // worked. This is that button.
+    m_newChat = new QPushButton(QStringLiteral("+"), m_header);
+    m_newChat->setCursor(Qt::PointingHandCursor);
+    m_newChat->setFixedSize(30, 24);
+    m_newChat->setFocusPolicy(Qt::NoFocus);
+    m_newChat->setToolTip(QStringLiteral("New chat"));
+    m_newChat->setStyleSheet(QStringLiteral(
+        "QPushButton { border:none; background:transparent; color:#C9CFDB;"
+        "  font:600 15px 'Segoe UI'; border-radius:6px; padding-bottom:2px; }"
+        "QPushButton:hover { background:rgba(255,255,255,0.10); color:#FFFFFF; }"
+        "QPushButton:pressed { background:rgba(255,255,255,0.05); }"));
+    connect(m_newChat, &QPushButton::clicked, this, [this] {
+        startNewSession();
+        focusComposer();
+    });
+
     // Matches the shell's own close button: transparent until hovered, then the
     // Windows close red.
     m_close = new QPushButton(QStringLiteral("✕"), m_header);
@@ -382,6 +404,8 @@ QWidget* AiSidebar::buildHeader() {
     h->addSpacing(4);
     h->addWidget(m_modeChip, 0);
     h->addStretch(1);
+    h->addWidget(m_newChat, 0);
+    h->addSpacing(2);
     h->addWidget(m_close, 0);
     return m_header;
 }

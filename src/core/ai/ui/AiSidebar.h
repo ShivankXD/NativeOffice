@@ -107,6 +107,7 @@ private:
 
     // Header close control, revealed only while the pointer is near the top.
     QWidget*                m_header      { nullptr };
+    QPushButton* m_newChat { nullptr };   // header "+": start a fresh conversation
     QPushButton*            m_close       { nullptr };
     QGraphicsOpacityEffect* m_closeFade   { nullptr };
     QPropertyAnimation*     m_closeAnim   { nullptr };
