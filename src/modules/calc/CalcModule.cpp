@@ -6667,6 +6667,12 @@ void CalcModule::buildXlsxSheets(std::vector<XlsxSheet>& out) const {
         xs.charts.assign(cs.begin(), cs.end());
         const QVector<SheetImage>& im = s->images();
         xs.images.assign(im.begin(), im.end());
+        // Shapes went the same way charts did before 1.7.5: read on import,
+        // never handed to the writer, so a rebuilt package lost every banner,
+        // button and rule on the sheet. The preserving path hid it, because
+        // there the original drawing part goes back untouched.
+        const QVector<SheetShape>& sp = s->shapes();
+        xs.shapes.assign(sp.begin(), sp.end());
         xs.cellText = [s](int col, int row) { return s->displayValue(col, row); };
 
         out.push_back(std::move(xs));

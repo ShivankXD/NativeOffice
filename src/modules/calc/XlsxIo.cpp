@@ -1809,16 +1809,30 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
         QVector<QByteArray> partXml;
         QStringList         relIds;
         QString             anchors;     // the graphicFrames and pictures, concatenated
+        // A chart part that references a picture fill needs a .rels of its own,
+        // which nothing else in this package does: every other relationship
+        // here hangs off a worksheet or off the drawing.
+        QStringList         chartRelsFor;  // "xl/charts/_rels/chart1.xml.rels"
+        QStringList         chartRelsXml;
     };
     QVector<SheetDrawing> draw(nSheets);
     QSet<QString> mediaExts;             // extensions needing a <Default> content type
+    const QString kRelsHead =
+        QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+                       "<Relationships xmlns=\"http://schemas.openxmlformats.org/"
+                       "package/2006/relationships\">");
+    const QString kImageRelType =
+        QStringLiteral("http://schemas.openxmlformats.org/officeDocument/2006/"
+                       "relationships/image");
     int chartNo = 0, imageNo = 0;
     for (int i = 0; i < nSheets && i < (int)sheets.size(); ++i) {
         const XlsxSheet& sh = sheets[i];
         // Shape ids only have to be unique inside one drawing part.
         int shapeId = 1;
         for (const ChartSpec& cs : sh.charts) {
-            const QByteArray part = buildChartPartXml(cs, sh.name, sh.cellText);
+            // One per chart: the ids inside are numbered within a single part.
+            ChartMedia cm;
+            const QByteArray part = buildChartPartXml(cs, sh.name, sh.cellText, &cm);
             if (part.isEmpty()) continue;   // nothing plottable, skip it
             ++chartNo;
             const QString relId = QString("rIdCh%1").arg(chartNo);
@@ -1828,6 +1842,28 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
             draw[i].partXml   << part;
             draw[i].relIds    << relId;
             draw[i].anchors   += buildChartAnchorXml(cs, relId, ++shapeId);
+
+            // The pictures that chart's series are filled with. They are the
+            // chart's own relationships, not the drawing's, so they go under
+            // xl/charts/_rels rather than beside the sheet's images.
+            if (!cm.data.isEmpty()) {
+                QString rels = kRelsHead;
+                for (int k = 0; k < cm.data.size(); ++k) {
+                    ++imageNo;
+                    const QString ext = imageExtension(cm.data.at(k));
+                    mediaExts.insert(ext);
+                    draw[i].partNames << QString("xl/media/image%1.%2").arg(imageNo).arg(ext);
+                    draw[i].targets   << QString();   // referenced by the chart, not the drawing
+                    draw[i].relTypes  << QStringLiteral("media");
+                    draw[i].partXml   << cm.data.at(k);
+                    draw[i].relIds    << QString();
+                    rels += QString("<Relationship Id=\"%1\" Type=\"%2\" Target=\"../media/image%3.%4\"/>")
+                                .arg(cm.relIds.at(k), kImageRelType)
+                                .arg(imageNo).arg(ext);
+                }
+                draw[i].chartRelsFor << QString("xl/charts/_rels/chart%1.xml.rels").arg(chartNo);
+                draw[i].chartRelsXml << rels + QStringLiteral("</Relationships>");
+            }
         }
         for (const SheetImage& im : sh.images) {
             if (im.data.isEmpty()) continue;
@@ -1841,6 +1877,26 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
             draw[i].partXml   << im.data;
             draw[i].relIds    << relId;
             draw[i].anchors   += buildPictureAnchorXml(im, relId, ++shapeId);
+        }
+
+        // Shapes last, so they land over the charts and pictures the way the
+        // sheet shows them. A shape filled with a picture claims a media part
+        // in this drawing's own rels, which is where the shape references it.
+        if (!sh.shapes.empty()) {
+            const QVector<SheetShape> shapes(sh.shapes.begin(), sh.shapes.end());
+            auto fillRel = [&](const QByteArray& bytes) -> QString {
+                ++imageNo;
+                const QString ext   = imageExtension(bytes);
+                const QString relId = QString("rIdShp%1").arg(imageNo);
+                mediaExts.insert(ext);
+                draw[i].partNames << QString("xl/media/image%1.%2").arg(imageNo).arg(ext);
+                draw[i].targets   << QString("../media/image%1.%2").arg(imageNo).arg(ext);
+                draw[i].relTypes  << QStringLiteral("image");
+                draw[i].partXml   << bytes;
+                draw[i].relIds    << relId;
+                return relId;
+            };
+            draw[i].anchors += buildShapeAnchorsXml(shapes, fillRel, shapeId);
         }
     }
     const bool wm = NativeOffice::Watermark::enabledForExport();
@@ -1931,13 +1987,21 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
                       + WO::hyperlinkRel(QStringLiteral("rIdWmLink"));
             }
             anchors += draw[i].anchors;
-            for (int k = 0; k < draw[i].relIds.size(); ++k)
+            for (int k = 0; k < draw[i].relIds.size(); ++k) {
+                // A chart's own picture fills are parts of this package but not
+                // relationships of this drawing: the chart references them, and
+                // its own .rels (written below) is where they are declared.
+                if (draw[i].relIds.at(k).isEmpty()) continue;
                 rels += QString("<Relationship Id=\"%1\" Type=\"http://schemas."
                                 "openxmlformats.org/officeDocument/2006/relationships/%2\" "
                                 "Target=\"%3\"/>")
                             .arg(draw[i].relIds.at(k), draw[i].relTypes.at(k),
                                  draw[i].targets.at(k));
+            }
             rels += QStringLiteral("</Relationships>");
+
+            for (int k = 0; k < draw[i].chartRelsFor.size(); ++k)
+                zip.add(draw[i].chartRelsFor.at(k), draw[i].chartRelsXml.at(k).toUtf8());
 
             zip.add(QString("xl/drawings/drawing%1.xml").arg(i + 1),
                 (QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"

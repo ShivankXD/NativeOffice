@@ -122,7 +122,16 @@ struct WSeries {
     QVector<double> vals;
     QColor          color;      // invalid => let the reader pick
     QVector<QColor> pointColors;
+    // A series filled with a picture. `fillImage` is the picture itself and
+    // wins when the caller can carry media parts; the gradient is the shading
+    // sampled out of it, and is what gets written when the caller cannot.
+    QByteArray      fillImage;
+    QString         fillRelId;  // assigned once the media part is claimed
+    QVector<QColor> gradient;
+    QVector<qreal>  gradientPos;
 };
+
+QString hexRgb(const QColor& c) { return c.name(QColor::HexRgb).mid(1).toUpper(); }
 
 struct Plot {
     ChartType     type { ChartType::Column };
@@ -133,15 +142,17 @@ struct Plot {
     bool        dataLabels { false };
     QStringList cats;
     QString     catRef;             // empty => write only the cache
+    bool        catReversed { false };
     QVector<WSeries> series;
 };
 
 // Collapse a ChartSpec into a Plot. Returns false when nothing is plottable.
 bool flatten(const ChartSpec& spec, const QString& sheetName,
              const std::function<QString(int, int)>& disp, Plot& out) {
-    out.type       = spec.type;
-    out.grouping   = spec.grouping;
-    out.dataLabels = spec.showDataLabels;
+    out.type        = spec.type;
+    out.grouping    = spec.grouping;
+    out.dataLabels  = spec.showDataLabels;
+    out.catReversed = spec.catReversed;
 
     if (spec.isExplicit()) {
         // A chart that came from a file already names its own ranges. Its
@@ -163,6 +174,9 @@ bool flatten(const ChartSpec& spec, const QString& sheetName,
             w.vals    = cs.cache;
             w.color       = cs.color;
             w.pointColors = cs.pointColors;
+            w.fillImage   = cs.fillImage;
+            w.gradient    = cs.fillGradient;
+            w.gradientPos = cs.fillGradientPos;
             // No cached copy in the spec: read the values back off the sheet so
             // the part still carries a cache.
             if (w.vals.isEmpty() && !cs.valRange.isNull() && disp)
@@ -235,11 +249,50 @@ QString numSource(const QString& ref, const QVector<double>& vals) {
 
 // <c:spPr> goes immediately after <c:tx> in every CT_*Ser. Empty when the
 // series has no colour, so a chart with none keeps whatever the reader picks.
+//
+// Three kinds of fill, most faithful first:
+//
+//   * the picture, when the caller can carry media parts. The only one that
+//     preserves what Excel actually wrote, silhouette included.
+//   * a gradient built from the shading sampled out of that picture, when the
+//     caller cannot write media. Lossy, but the bar still shades.
+//   * a flat colour.
+//
+// Falling straight to the flat colour, which is what happened before, wrote a
+// shaded cone back as a slab of one green every time a chart was rebuilt.
 QString seriesFill(const WSeries& s) {
-    if (!s.color.isValid()) return {};
-    return QString("<c:spPr><a:solidFill><a:srgbClr val=\"%1\"/></a:solidFill>"
-                   "<a:ln><a:noFill/></a:ln></c:spPr>")
-        .arg(s.color.name(QColor::HexRgb).mid(1).toUpper());
+    QString fill;
+
+    if (!s.fillRelId.isEmpty()) {
+        // CT_BlipFillProperties: blip, srcRect, then the tile/stretch choice.
+        fill = QString("<a:blipFill rotWithShape=\"1\"><a:blip r:embed=\"%1\"/>"
+                       "<a:stretch><a:fillRect/></a:stretch></a:blipFill>")
+                   .arg(s.fillRelId);
+    } else if (s.gradient.size() >= 2) {
+        QString stops;
+        for (int i = 0; i < s.gradient.size(); ++i) {
+            if (!s.gradient.at(i).isValid()) continue;
+            const qreal pos = i < s.gradientPos.size()
+                                  ? s.gradientPos.at(i)
+                                  : qreal(i) / qreal(s.gradient.size() - 1);
+            stops += QString("<a:gs pos=\"%1\"><a:srgbClr val=\"%2\"/></a:gs>")
+                         .arg(int(qBound(0.0, double(pos), 1.0) * 100000))
+                         .arg(hexRgb(s.gradient.at(i)));
+        }
+        // CT_GradientFillProperties: gsLst, then the lin/path choice. The angle
+        // is in 60000ths of a degree, so 5400000 is 90: top to bottom, which is
+        // the direction the shading was sampled in.
+        if (!stops.isEmpty())
+            fill = "<a:gradFill><a:gsLst>" + stops
+                 + "</a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>";
+    }
+
+    if (fill.isEmpty()) {
+        if (!s.color.isValid()) return {};
+        fill = QString("<a:solidFill><a:srgbClr val=\"%1\"/></a:solidFill>")
+                   .arg(hexRgb(s.color));
+    }
+    return "<c:spPr>" + fill + "<a:ln><a:noFill/></a:ln></c:spPr>";
 }
 
 // Per-point colours, for the types that colour each point separately. Sits
@@ -411,11 +464,16 @@ QString buildPlot(const Plot& p) {
         const char* catAxEl = (p.type == ChartType::Scatter) ? "valAx" : "catAx";
         // A bar chart lays its category axis down the left and its values
         // along the bottom, the opposite of every other type here.
+        // The category axis keeps the direction the chart asked for. Writing
+        // minMax unconditionally, which is what happened before, turned every
+        // reversed chart the right way up on the first save: a silent edit to
+        // the user's workbook rather than a save of it.
         axes = QString("<c:%1><c:axId val=\"%2\"/>"
-                       "<c:scaling><c:orientation val=\"minMax\"/></c:scaling>"
+                       "<c:scaling><c:orientation val=\"%5\"/></c:scaling>"
                        "<c:delete val=\"0\"/><c:axPos val=\"%3\"/>"
                        "<c:crossAx val=\"%4\"/></c:%1>")
-                   .arg(catAxEl, kCatAxId, bar ? "l" : "b", kValAxId);
+                   .arg(catAxEl, kCatAxId, bar ? "l" : "b", kValAxId,
+                        p.catReversed ? "maxMin" : "minMax");
         axes += QString("<c:valAx><c:axId val=\"%1\"/>"
                         "<c:scaling><c:orientation val=\"minMax\"/></c:scaling>"
                         "<c:delete val=\"0\"/><c:axPos val=\"%2\"/>"
@@ -436,9 +494,26 @@ bool chartIsWritable(const ChartSpec& spec,
 
 QByteArray buildChartPartXml(const ChartSpec& spec,
                              const QString& sheetName,
-                             const std::function<QString(int, int)>& disp) {
+                             const std::function<QString(int, int)>& disp,
+                             ChartMedia* media) {
     Plot p;
     if (!flatten(spec, sheetName, disp, p)) return {};
+
+    // Claim a media part for every distinct picture fill, and hand its
+    // relationship id to the series that asked for it. Distinct is worth the
+    // comparison: a clustered chart usually fills all of its series from one
+    // image, and a part each would triple the size of the package for nothing.
+    if (media)
+        for (WSeries& w : p.series) {
+            if (w.fillImage.isEmpty()) continue;
+            int at = media->data.indexOf(w.fillImage);
+            if (at < 0) {
+                media->data   << w.fillImage;
+                media->relIds << QString("rIdPic%1").arg(media->data.size());
+                at = media->data.size() - 1;
+            }
+            w.fillRelId = media->relIds.at(at);
+        }
 
     // CT_Chart: title, autoTitleDeleted, plotArea, legend, plotVisOnly,
     // dispBlanksAs.
@@ -526,6 +601,290 @@ QString buildPictureAnchorXml(const SheetImage& img,
                  QString::number(cx), QString::number(cy));
 
     return anchorAround(img.anchor, img.geom, pic);
+}
+
+// ── Drawn shapes ────────────────────────────────────────────────────────────
+// Shapes were the one kind of sheet object the writer could read and not write.
+// On the preserving path that never showed, because the original package goes
+// back verbatim; on a rebuild every banner, button and rule on the sheet was
+// dropped, which is most of what a template workbook is made of.
+namespace {
+
+const char* presetName(ShapeGeom g) {
+    switch (g) {
+    case ShapeGeom::Rect:          return "rect";
+    case ShapeGeom::RoundRect:     return "roundRect";
+    case ShapeGeom::Ellipse:       return "ellipse";
+    case ShapeGeom::Triangle:      return "triangle";
+    case ShapeGeom::RightTriangle: return "rtTriangle";
+    case ShapeGeom::Diamond:       return "diamond";
+    case ShapeGeom::Line:          return "line";
+    case ShapeGeom::RightArrow:    return "rightArrow";
+    case ShapeGeom::LeftArrow:     return "leftArrow";
+    case ShapeGeom::UpArrow:       return "upArrow";
+    case ShapeGeom::DownArrow:     return "downArrow";
+    case ShapeGeom::Chevron:       return "chevron";
+    // The importer reads both homePlate and pentagon as Pentagon; homePlate is
+    // the one Excel's own Pentagon button inserts, so that is what goes back.
+    case ShapeGeom::Pentagon:      return "homePlate";
+    case ShapeGeom::Callout:       return "wedgeRectCallout";
+    case ShapeGeom::Custom:        break;
+    }
+    return "rect";
+}
+
+// A freeform's outline. The path is stored in 0..1 coordinates, and custGeom
+// wants integers in a path space it declares, so the space is 100000 wide and
+// every point is scaled into it.
+QString custGeomXml(const QPainterPath& path) {
+    auto pt = [](qreal x, qreal y) {
+        return QString("<a:pt x=\"%1\" y=\"%2\"/>")
+            .arg(qRound(qBound(0.0, double(x), 1.0) * 100000))
+            .arg(qRound(qBound(0.0, double(y), 1.0) * 100000));
+    };
+
+    QString cmds;
+    bool open = false;
+    for (int i = 0; i < path.elementCount(); ++i) {
+        const QPainterPath::Element e = path.elementAt(i);
+        switch (e.type) {
+        case QPainterPath::MoveToElement:
+            // Every subpath is closed before the next one starts: these are
+            // filled outlines, and an unclosed one fills to a straight edge
+            // Excel draws and the original never had.
+            if (open) cmds += "<a:close/>";
+            cmds += "<a:moveTo>" + pt(e.x, e.y) + "</a:moveTo>";
+            open = true;
+            break;
+        case QPainterPath::LineToElement:
+            cmds += "<a:lnTo>" + pt(e.x, e.y) + "</a:lnTo>";
+            break;
+        case QPainterPath::CurveToElement: {
+            // A cubic is one CurveToElement followed by two CurveToDataElements.
+            if (i + 2 >= path.elementCount()) break;
+            const QPainterPath::Element c1 = path.elementAt(i + 1);
+            const QPainterPath::Element c2 = path.elementAt(i + 2);
+            cmds += "<a:cubicBezTo>" + pt(e.x, e.y) + pt(c1.x, c1.y) + pt(c2.x, c2.y)
+                  + "</a:cubicBezTo>";
+            i += 2;
+            break;
+        }
+        case QPainterPath::CurveToDataElement:
+            break;   // consumed above
+        }
+    }
+    if (open) cmds += "<a:close/>";
+    if (cmds.isEmpty()) return {};
+
+    // CT_CustomGeometry2D is a sequence: avLst, gdLst, ahLst, cxnLst, rect,
+    // pathLst. The empty ones are written because leaving them out of the
+    // middle of a sequence is not the same as writing them empty.
+    return "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>"
+           "<a:rect l=\"0\" t=\"0\" r=\"r\" b=\"b\"/>"
+           "<a:pathLst><a:path w=\"100000\" h=\"100000\">"
+         + cmds + "</a:path></a:pathLst></a:custGeom>";
+}
+
+QString shapeFillXml(const SheetShape& sh, const QString& fillRelId) {
+    if (!fillRelId.isEmpty())
+        return QString("<a:blipFill rotWithShape=\"1\"><a:blip r:embed=\"%1\"/>"
+                       "<a:stretch><a:fillRect/></a:stretch></a:blipFill>")
+                   .arg(fillRelId);
+
+    if (sh.gradient.size() >= 2) {
+        QString stops;
+        for (int i = 0; i < sh.gradient.size(); ++i) {
+            if (!sh.gradient.at(i).isValid()) continue;
+            const qreal pos = i < sh.gradientPos.size()
+                                  ? sh.gradientPos.at(i)
+                                  : qreal(i) / qreal(sh.gradient.size() - 1);
+            stops += QString("<a:gs pos=\"%1\"><a:srgbClr val=\"%2\"/></a:gs>")
+                         .arg(int(qBound(0.0, double(pos), 1.0) * 100000))
+                         .arg(hexRgb(sh.gradient.at(i)));
+        }
+        if (!stops.isEmpty())
+            return QString("<a:gradFill><a:gsLst>%1</a:gsLst>"
+                           "<a:lin ang=\"%2\" scaled=\"0\"/></a:gradFill>")
+                       .arg(stops)
+                       .arg(((sh.gradientAngle % 360) + 360) % 360 * 60000);
+    }
+
+    if (sh.fill.isValid()) {
+        // Alpha is written separately: srgbClr carries none of its own, and a
+        // half-transparent banner written opaque covers the cells under it.
+        QString clr = QString("<a:srgbClr val=\"%1\"").arg(hexRgb(sh.fill));
+        if (sh.fill.alpha() < 255)
+            clr += QString("><a:alpha val=\"%1\"/></a:srgbClr>")
+                       .arg(int(sh.fill.alphaF() * 100000));
+        else
+            clr += "/>";
+        return "<a:solidFill>" + clr + "</a:solidFill>";
+    }
+    return "<a:noFill/>";
+}
+
+QString shapeTextXml(const SheetShape& sh) {
+    const char* anchor = sh.vAlign.testFlag(Qt::AlignTop)    ? "t"
+                       : sh.vAlign.testFlag(Qt::AlignBottom) ? "b"
+                                                             : "ctr";
+    QString body = QString("<a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\" "
+                           "wrap=\"square\" anchor=\"%1\"/><a:lstStyle/>").arg(anchor);
+
+    for (const ShapeParagraph& para : sh.text) {
+        const char* algn = para.align.testFlag(Qt::AlignHCenter) ? "ctr"
+                         : para.align.testFlag(Qt::AlignRight)   ? "r"
+                         : para.align.testFlag(Qt::AlignJustify) ? "just"
+                                                                 : "l";
+        QString p = QString("<a:p><a:pPr algn=\"%1\"/>").arg(algn);
+        for (const ShapeRun& run : para.runs) {
+            QString rPr = QString("<a:rPr lang=\"en-US\" sz=\"%1\" b=\"%2\" i=\"%3\" u=\"%4\"")
+                              .arg(qMax(100, int(run.size * 100)))
+                              .arg(run.bold ? 1 : 0)
+                              .arg(run.italic ? 1 : 0)
+                              .arg(run.underline ? "sng" : "none");
+            QString inner;
+            if (run.color.isValid())
+                inner += QString("<a:solidFill><a:srgbClr val=\"%1\"/></a:solidFill>")
+                             .arg(hexRgb(run.color));
+            // The typeface is not decoration. The corpus has buttons whose icon
+            // is a run in Webdings, and dropping the family turns the icon into
+            // a stray letter.
+            if (!run.family.isEmpty())
+                inner += QString("<a:latin typeface=\"%1\"/><a:cs typeface=\"%1\"/>")
+                             .arg(xmlEsc(run.family));
+            rPr += inner.isEmpty() ? QStringLiteral("/>")
+                                   : QStringLiteral(">") + inner + "</a:rPr>";
+            p += "<a:r>" + rPr + "<a:t>" + xmlEsc(run.text) + "</a:t></a:r>";
+        }
+        body += p + "</a:p>";
+    }
+    // A linked text box carries no runs of its own; the empty paragraph is what
+    // keeps the txBody well formed while the text comes from the cell.
+    if (sh.text.isEmpty()) body += "<a:p><a:pPr algn=\"ctr\"/></a:p>";
+    return "<xdr:txBody>" + body + "</xdr:txBody>";
+}
+
+// One <xdr:sp>. `xfrmBody` is the <a:off>/<a:ext> pair, which differs between a
+// shape anchored on its own (pixels, from its geometry) and one inside a group
+// (the group's child coordinate space).
+QString shapeXml(const SheetShape& sh, const QString& fillRelId, int shapeId,
+                 const QString& xfrmBody) {
+    QString xfrmAttrs;
+    if (sh.rotation) xfrmAttrs += QString(" rot=\"%1\"").arg(((sh.rotation % 360) + 360) % 360 * 60000);
+    if (sh.flipH)    xfrmAttrs += QStringLiteral(" flipH=\"1\"");
+    if (sh.flipV)    xfrmAttrs += QStringLiteral(" flipV=\"1\"");
+
+    QString geom;
+    if (sh.preset == ShapeGeom::Custom) geom = custGeomXml(sh.customPath);
+    if (geom.isEmpty()) {
+        // roundRect's corner radius rides in the adjust list; every other
+        // preset here takes none.
+        const QString av = sh.preset == ShapeGeom::RoundRect
+            ? QString("<a:avLst><a:gd name=\"adj\" fmla=\"val %1\"/></a:avLst>")
+                  .arg(qBound(0, sh.adjustPct, 50000))
+            : QStringLiteral("<a:avLst/>");
+        geom = QString("<a:prstGeom prst=\"%1\">%2</a:prstGeom>")
+                   .arg(QLatin1String(presetName(sh.preset)), av);
+    }
+
+    const QString ln = sh.line.isValid()
+        ? QString("<a:ln w=\"%1\"><a:solidFill><a:srgbClr val=\"%2\"/></a:solidFill></a:ln>")
+              .arg(qMax(0, int(sh.lineWidth * 9525))).arg(hexRgb(sh.line))
+        : QStringLiteral("<a:ln><a:noFill/></a:ln>");
+
+    // textlink is what makes a text box show a cell rather than fixed text.
+    const QString link = sh.textLink.isEmpty()
+        ? QStringLiteral("")
+        : QString(" textlink=\"%1\"").arg(xmlEsc(sh.textLink));
+
+    return QString("<xdr:sp macro=\"\"%1>"
+                   "<xdr:nvSpPr><xdr:cNvPr id=\"%2\" name=\"Shape %2\"/>"
+                   "<xdr:cNvSpPr/></xdr:nvSpPr>"
+                   "<xdr:spPr><a:xfrm%3>%4</a:xfrm>%5%6%7</xdr:spPr>%8"
+                   "</xdr:sp>")
+        .arg(link, QString::number(shapeId), xfrmAttrs, xfrmBody, geom,
+             shapeFillXml(sh, fillRelId), ln, shapeTextXml(sh));
+}
+
+bool sameAnchor(const SheetShape& a, const SheetShape& b) {
+    return a.anchor.fromCol == b.anchor.fromCol && a.anchor.fromRow == b.anchor.fromRow
+        && a.anchor.fromDx  == b.anchor.fromDx  && a.anchor.fromDy  == b.anchor.fromDy
+        && a.anchor.toCol   == b.anchor.toCol   && a.anchor.toRow   == b.anchor.toRow
+        && a.anchor.toDx    == b.anchor.toDx    && a.anchor.toDy    == b.anchor.toDy
+        && a.geom == b.geom;
+}
+
+} // namespace
+
+QString buildShapeAnchorsXml(const QVector<SheetShape>& shapes,
+                             const std::function<QString(const QByteArray&)>& fillRel,
+                             int& nextShapeId) {
+    QString out;
+
+    for (int i = 0; i < shapes.size(); ) {
+        // Shapes that share an anchor are the members of one group. They have
+        // to go back as a group: written as separate anchors they would all
+        // claim the whole box and stack on top of each other, because what
+        // separates them is `frac`, which only means anything relative to the
+        // box a group gives them.
+        int j = i + 1;
+        while (j < shapes.size() && sameAnchor(shapes.at(i), shapes.at(j))) ++j;
+
+        const SheetShape& first = shapes.at(i);
+        const int cx = pxToEmu(first.geom.width()  > 0 ? first.geom.width()  : 200);
+        const int cy = pxToEmu(first.geom.height() > 0 ? first.geom.height() : 100);
+
+        const bool grouped = (j - i) > 1 || first.frac != QRectF(0, 0, 1, 1);
+        if (!grouped) {
+            if (!first.isVisible()) { i = j; continue; }
+            const QString rel = first.fillImage.isEmpty() || !fillRel
+                                    ? QString() : fillRel(first.fillImage);
+            const QString xfrm = QString("<a:off x=\"0\" y=\"0\"/>"
+                                         "<a:ext cx=\"%1\" cy=\"%2\"/>")
+                                     .arg(cx).arg(cy);
+            out += anchorAround(first.anchor, first.geom,
+                                shapeXml(first, rel, ++nextShapeId, xfrm));
+            i = j;
+            continue;
+        }
+
+        // The group's child coordinate space is 100000 square, which is the
+        // space `frac` is already expressed in: a child's off/ext is its
+        // fraction times 100000, and the group maps that onto its own extent.
+        // That is the same mapping the importer collapses back into `frac`, so
+        // this round-trips.
+        QString children;
+        const int groupId = ++nextShapeId;
+        for (int k = i; k < j; ++k) {
+            const SheetShape& sh = shapes.at(k);
+            if (!sh.isVisible()) continue;
+            const QRectF f = sh.frac.isNull() ? QRectF(0, 0, 1, 1) : sh.frac;
+            const QString xfrm =
+                QString("<a:off x=\"%1\" y=\"%2\"/><a:ext cx=\"%3\" cy=\"%4\"/>")
+                    .arg(qRound(f.x() * 100000)).arg(qRound(f.y() * 100000))
+                    .arg(qMax(1, qRound(f.width()  * 100000)))
+                    .arg(qMax(1, qRound(f.height() * 100000)));
+            const QString rel = sh.fillImage.isEmpty() || !fillRel
+                                    ? QString() : fillRel(sh.fillImage);
+            children += shapeXml(sh, rel, ++nextShapeId, xfrm);
+        }
+        if (!children.isEmpty()) {
+            const QString grp =
+                QString("<xdr:grpSp>"
+                        "<xdr:nvGrpSpPr><xdr:cNvPr id=\"%1\" name=\"Group %1\"/>"
+                        "<xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>"
+                        "<xdr:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
+                        "<a:ext cx=\"%2\" cy=\"%3\"/>"
+                        "<a:chOff x=\"0\" y=\"0\"/>"
+                        "<a:chExt cx=\"100000\" cy=\"100000\"/></a:xfrm></xdr:grpSpPr>"
+                        "%4</xdr:grpSp>")
+                    .arg(QString::number(groupId), QString::number(cx),
+                         QString::number(cy), children);
+            out += anchorAround(first.anchor, first.geom, grp);
+        }
+        i = j;
+    }
+    return out;
 }
 
 QString imageExtension(const QByteArray& data) {

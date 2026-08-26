@@ -23,6 +23,8 @@
 
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
+#include <QVector>
 #include <functional>
 
 #include "ChartSpec.h"
@@ -41,9 +43,27 @@ namespace NativeOffice {
 //              scan behind it, so the file agrees with the screen.
 //
 // Returns an empty array when the chart has nothing plottable.
+//
+// `media` collects the pictures the chart part references, for a series whose
+// fill is an image rather than a colour. Pass one (freshly default-constructed,
+// one per chart, because the relationship ids are numbered within a single
+// chart part) when the caller can write media parts and a
+// xl/charts/chartN.xml.rels alongside; the caller writes `data[k]` under a part
+// name of its choosing and relates it as `relIds[k]`.
+//
+// Pass nothing and a picture fill degrades to a gradient built from the
+// shading sampled out of it, and then to a flat colour: valid, self-contained,
+// and lossy. Both are better than what happened before, which was to write the
+// flat average and lose the shading with it.
+struct ChartMedia {
+    QVector<QByteArray> data;
+    QStringList         relIds;   // parallel to data
+};
+
 QByteArray buildChartPartXml(const ChartSpec& spec,
                              const QString& sheetName,
-                             const std::function<QString(int, int)>& disp);
+                             const std::function<QString(int, int)>& disp,
+                             ChartMedia* media = nullptr);
 
 // The <xdr:twoCellAnchor> (or <xdr:oneCellAnchor>, for a chart that only ever
 // had pixel geometry) that places this chart and points at `relId`.
@@ -62,6 +82,31 @@ QString buildChartAnchorXml(const ChartSpec& spec,
 QString buildPictureAnchorXml(const SheetImage& img,
                               const QString& relId,
                               int shapeId);
+
+// The anchors that place every drawn shape on a sheet.
+//
+// Shapes are the one kind of object the reader handled and the writer did not,
+// so a rebuild dropped every banner, button, rule and callout on the sheet.
+//
+// This takes the whole list rather than one shape at a time because shapes that
+// share an anchor are the members of a GROUP, and a group is what gives them
+// their separate places: each one covers a fraction of the anchored box
+// (SheetShape::frac), and written as separate anchors they would all claim the
+// whole box and pile up on each other. Consecutive shapes with the same anchor
+// are re-grouped here, with `frac` written back as the group's child
+// coordinates, which is where it was read from.
+//
+// `fillRel` is called for a shape filled with a picture and must write that
+// image as a media part and hand back the relationship id for it, in the SAME
+// drawing part these anchors go into. Pass nothing and picture fills are
+// skipped (the shape keeps its outline and its text).
+//
+// `nextShapeId` is advanced past every id used; ids only have to be unique
+// within one drawing part, and the caller shares the counter with the charts
+// and pictures in that part.
+QString buildShapeAnchorsXml(const QVector<SheetShape>& shapes,
+                             const std::function<QString(const QByteArray&)>& fillRel,
+                             int& nextShapeId);
 
 // The file extension for `data`, sniffed from its first bytes: "png", "jpeg",
 // "gif" or "bmp", and "png" when nothing matches.
