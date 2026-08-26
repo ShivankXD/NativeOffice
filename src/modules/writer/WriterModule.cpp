@@ -40,6 +40,9 @@
 #include <QIODevice>
 #include <QFileDialog>
 #include <QImage>
+#include <QMimeData>
+#include <QClipboard>
+#include <QKeyEvent>
 #include <QBuffer>
 #include <QByteArray>
 #include <QRegularExpression>
@@ -612,6 +615,132 @@ void WriterModule::setPlainContent(const QString& text) {
 // ─────────────────────────────────────────────────────────────────────────────
 QTextDocument* WriterModule::document() const noexcept {
     return m_editor ? m_editor->document() : nullptr;
+}
+
+// ── Dev-only capture aids ────────────────────────────────────────────────────
+void WriterModule::devFill(int paragraphs) {
+    if (!m_editor || paragraphs <= 0) return;
+    QTextCursor c = m_editor->textCursor();
+    c.movePosition(QTextCursor::End);
+    for (int i = 0; i < paragraphs; ++i) {
+        if (i) c.insertBlock();
+        c.insertText(QString("Paragraph %1. ").arg(i + 1)
+                     + QString("The quick brown fox jumps over the lazy dog. ").repeated(3));
+    }
+    m_editor->setTextCursor(c);
+}
+
+void WriterModule::devDumpPagination() const {
+    if (m_paper) m_paper->dumpPagination();
+}
+
+void WriterModule::devApplyStyle(const QString& name) {
+    if (m_ribbon) m_ribbon->applyStyleByName(name);
+}
+
+void WriterModule::devPasteImage(const QString& file) {
+    if (!m_paper) return;
+    QImage img(file);
+    if (img.isNull()) { qWarning("[writer] could not load %s", qUtf8Printable(file)); return; }
+    // Through the clipboard and paste(), which is literally the Ctrl+V path.
+    auto* md = new QMimeData;
+    md->setImageData(img);
+    QApplication::clipboard()->setMimeData(md);
+    m_paper->setFocus();
+    m_paper->paste();
+    qWarning("[writer] pasted image %dx%d", img.width(), img.height());
+}
+
+void WriterModule::devTypeText(const QString& text) {
+    QWidget* f = QApplication::focusWidget();
+    qWarning("[writer] typing into %s",
+             f ? qUtf8Printable(QString("%1/%2").arg(f->metaObject()->className(),
+                                                     f->objectName()))
+               : "(nothing has focus)");
+    if (!f) return;
+    for (const QChar& ch : text) {
+        QKeyEvent press(QEvent::KeyPress, ch.unicode(), Qt::NoModifier, QString(ch));
+        QKeyEvent rel  (QEvent::KeyRelease, ch.unicode(), Qt::NoModifier, QString(ch));
+        QApplication::sendEvent(f, &press);
+        QApplication::sendEvent(f, &rel);
+    }
+}
+
+void WriterModule::devClickAt(int x, int y) {
+    if (!m_paper) return;
+    const QPoint pt(x, y);
+    QMouseEvent press(QEvent::MouseButtonPress, pt, m_paper->viewport()->mapToGlobal(pt),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent rel(QEvent::MouseButtonRelease, pt, m_paper->viewport()->mapToGlobal(pt),
+                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(m_paper->viewport(), &press);
+    QApplication::sendEvent(m_paper->viewport(), &rel);
+    qWarning("[writer] clicked at (%d,%d)", x, y);
+}
+
+void WriterModule::devReportImageBox() {
+    if (!m_paper) return;
+    m_paper->devSelectFirstImage();
+}
+
+void WriterModule::devStyleProbe() {
+    if (!m_editor || !m_ribbon) return;
+    m_editor->clear();
+    const char* names[3] = { "Heading 1", "Heading 2", "Heading 3" };
+    for (int i = 0; i < 3; ++i) {
+        QTextCursor c = m_editor->textCursor();
+        c.movePosition(QTextCursor::End);
+        if (i) c.insertBlock();
+        m_editor->setTextCursor(c);
+
+        // The reported sequence: type it, style it, clear it, type it again.
+        c.insertText(QStringLiteral("HEADING %1").arg(i + 1));
+        m_editor->setTextCursor(c);
+        m_ribbon->applyStyleByName(QLatin1String(names[i]));
+
+        QTextCursor sel = m_editor->textCursor();
+        sel.movePosition(QTextCursor::StartOfBlock);
+        sel.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+        sel.removeSelectedText();
+        m_editor->setTextCursor(sel);
+
+        QTextCursor again = m_editor->textCursor();
+        again.insertText(QStringLiteral("HEADING %1").arg(i + 1));
+        m_editor->setTextCursor(again);
+    }
+
+    int n = 0;
+    for (QTextBlock b = document()->begin(); b.isValid(); b = b.next(), ++n) {
+        if (b.text().isEmpty()) continue;
+        double size = 0; bool bold = false;
+        for (auto it = b.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fr = it.fragment();
+            if (!fr.isValid()) continue;
+            size = fr.charFormat().fontPointSize();
+            bold = fr.charFormat().fontWeight() >= QFont::DemiBold;
+            break;
+        }
+        qWarning("[writer] \"%s\" heading=%d size=%.1f bold=%d",
+                 qUtf8Printable(b.text()), b.blockFormat().headingLevel(), size, int(bold));
+    }
+}
+
+void WriterModule::devReportInput() const {
+    QWidget* f = QApplication::focusWidget();
+    const QTextCursor c = m_editor ? m_editor->textCursor() : QTextCursor();
+    qWarning("[writer] focus=%s editorHasFocus=%d caret=%d readOnly=%d",
+             f ? f->metaObject()->className() : "(none)",
+             m_editor ? int(m_editor->hasFocus()) : -1,
+             c.position(), m_editor ? int(m_editor->isReadOnly()) : -1);
+    if (!m_editor) return;
+    // Around the caret, not the tail: a click moves the caret into the middle
+    // of the document, and text typed there never shows up at the end.
+    const QString all = m_editor->toPlainText();
+    const int at = qBound(0, c.position(), all.size());
+    QString around = all.mid(qMax(0, at - 30), 60);
+    around.replace(QChar(0xFFFC), QChar('#'));
+    around.replace(QChar(0x2029), QChar('|'));
+    qWarning("[writer] around caret: \"%s\"", qUtf8Printable(around));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

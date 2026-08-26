@@ -447,6 +447,214 @@ static void testColoursRoundTrip(const QString& dir) {
               "and they came back in the right order");
 }
 
+// ── A picture with transparent corners ──────────────────────────────────────
+// The shape of the fill lives in the ALPHA: a series filled with this should
+// come back carrying the bytes, not just the colour they average to.
+static QByteArray makeConePng() {
+    QImage img(32, 32, QImage::Format_ARGB32);
+    img.fill(Qt::transparent);
+    for (int y = 0; y < 32; ++y) {
+        const int halfWidth = (y + 1) / 2;       // a triangle, tip at the top
+        const int a = 212 - (212 - 133) * y / 31;
+        for (int x = 16 - halfWidth; x < 16 + halfWidth; ++x)
+            img.setPixel(x, y, qRgba(0x58, 0xBC, 0x93, a));
+    }
+    QByteArray png;
+    { QBuffer b(&png); b.open(QIODevice::WriteOnly); img.save(&b, "PNG"); }
+    return png;
+}
+
+// A series filled with a picture keeps the picture, not the colour it averages
+// to. Before this the rebuild path wrote the flat average and threw away both
+// the shading and the silhouette.
+static void testPictureFillRebuild(const QString& dir) {
+    out << "\n[rebuild] a picture-filled series keeps its picture\n";
+
+    XlsxSheet sh = makeSheet();
+    sh.cellText  = tableReader();
+
+    ChartSpec cs;
+    cs.type     = ChartType::Bar;
+    cs.geom     = QRect(40, 40, 420, 280);
+    cs.anchor.fromCol = 4;  cs.anchor.fromRow = 1;
+    cs.anchor.toCol   = 10; cs.anchor.toRow   = 15;
+    cs.catRange = QRect(0, 1, 1, 3);
+    cs.catSheet = QStringLiteral("Data");
+
+    const QByteArray cone = makeConePng();
+    ChartSeries a;
+    a.name            = QStringLiteral("Sales");
+    a.sheet           = QStringLiteral("Data");
+    a.valRange        = QRect(1, 1, 1, 3);
+    a.cache           = { 120.0, 90.0, 140.0 };
+    a.color           = QColor("#7FCFB0");        // what it averages to
+    a.fillImage       = cone;
+    a.fillGradient    = { QColor("#8FD8BE"), QColor("#A8E2CE") };
+    a.fillGradientPos = { 0.0, 1.0 };
+    cs.series.push_back(a);
+    sh.charts.push_back(cs);
+
+    const QString path = dir + "/picturefill.xlsx";
+    std::vector<XlsxSheet> sheets { sh }, back;
+    check(exportXlsx(path, sheets), "exportXlsx wrote the file");
+    validatePackage(path, "picturefill");
+
+    // The chart part has to reference the image through a .rels of its own:
+    // the picture is the chart's relationship, not the drawing's.
+    {
+        QZipReader zr(path);
+        QByteArray chartXml, chartRels;
+        int mediaParts = 0;
+        for (const auto& e : zr.fileInfoList()) {
+            if (e.filePath.startsWith("xl/charts/chart") && e.filePath.endsWith(".xml"))
+                chartXml = zr.fileData(e.filePath);
+            else if (e.filePath.startsWith("xl/charts/_rels/"))
+                chartRels = zr.fileData(e.filePath);
+            else if (e.filePath.startsWith("xl/media/")) ++mediaParts;
+        }
+        check(chartXml.contains("<a:blipFill"),
+              "the series fill is written as a blipFill");
+        check(chartXml.contains("r:embed=\"rIdPic1\""),
+              "and it references the media part by relationship id");
+        check(chartRels.contains("rIdPic1") && chartRels.contains("../media/"),
+              "the chart part carries a .rels pointing at that media");
+        // One for the fill, one for the export mark.
+        check(mediaParts >= 1, QString("the image is in the package (%1 media part(s))")
+                                   .arg(mediaParts));
+    }
+
+    if (!importXlsx(path, back) || back.empty() || back[0].charts.empty()) {
+        check(false, "reads back with a chart");
+        return;
+    }
+    const ChartSpec& got = back[0].charts.front();
+    if (got.series.isEmpty()) { check(false, "the series came back"); return; }
+    check(got.series[0].fillImage == cone,
+          QString("the picture came back byte-identical (%1 vs %2 bytes)")
+              .arg(got.series[0].fillImage.size()).arg(cone.size()));
+    check(got.series[0].fillGradient.size() >= 2,
+          QString("its shading was re-sampled (%1 stop(s))")
+              .arg(got.series[0].fillGradient.size()));
+    // The alpha ramp is the whole point: sampled over white, the top of the
+    // cone is darker than the bottom, and a flat average would lose it.
+    if (got.series[0].fillGradient.size() >= 2) {
+        const QColor top = got.series[0].fillGradient.first();
+        const QColor bot = got.series[0].fillGradient.last();
+        check(top != bot, QString("and it actually varies (%1 -> %2)")
+                              .arg(top.name(), bot.name()));
+    }
+}
+
+// "Categories in reverse order" was neither read nor written, so a chart that
+// asked for it drew upside down, and saving it wrote the flag away.
+static void testReversedCategories(const QString& dir) {
+    out << "\n[rebuild] a reversed category axis round-trips\n";
+
+    for (const bool reversed : { false, true }) {
+        XlsxSheet sh = makeSheet();
+        sh.cellText  = tableReader();
+        ChartSpec cs = makeChart(ChartType::Bar);
+        cs.catReversed = reversed;
+        sh.charts.push_back(cs);
+
+        const QString path = dir + (reversed ? "/reversed.xlsx" : "/forward.xlsx");
+        std::vector<XlsxSheet> sheets { sh }, back;
+        const QString what = reversed ? QStringLiteral("reversed")
+                                      : QStringLiteral("forward");
+        if (!exportXlsx(path, sheets)) { check(false, what + ": write"); continue; }
+        validatePackage(path, what);
+        if (!importXlsx(path, back) || back.empty() || back[0].charts.empty()) {
+            check(false, what + ": reads back with a chart");
+            continue;
+        }
+        check(back[0].charts.front().catReversed == reversed,
+              QString("%1: the axis direction survived (got %2)")
+                  .arg(what, back[0].charts.front().catReversed ? "maxMin" : "minMax"));
+    }
+}
+
+// Drawn shapes were read on import and never written. A rebuild dropped every
+// one of them; a workbook that is mostly shapes came back stripped.
+static void testShapeRebuild(const QString& dir) {
+    out << "\n[rebuild] drawn shapes survive a rebuild\n";
+
+    XlsxSheet sh = makeSheet();
+    sh.cellText  = tableReader();
+
+    // Standalone: a rounded rectangle with a caption.
+    SheetShape banner;
+    banner.anchor.fromCol = 0;  banner.anchor.fromRow = 8;
+    banner.anchor.toCol   = 6;  banner.anchor.toRow   = 11;
+    banner.geom    = QRect(0, 160, 360, 60);
+    banner.preset  = ShapeGeom::RoundRect;
+    banner.fill    = QColor("#1A73E8");
+    banner.line    = QColor("#0B4FA8");
+    banner.lineWidth = 2.0;
+    ShapeRun r;
+    r.text = QStringLiteral("Quarterly review");
+    r.family = QStringLiteral("Bahnschrift");
+    r.size = 14.0; r.bold = true; r.color = QColor("#FFFFFF");
+    ShapeParagraph para; para.runs.push_back(r); para.align = Qt::AlignHCenter;
+    banner.text.push_back(para);
+    sh.shapes.push_back(banner);
+
+    // A group: two shapes sharing one anchor, told apart only by `frac`.
+    SheetShape left, right;
+    left.anchor.fromCol = 1;  left.anchor.fromRow = 14;
+    left.anchor.toCol   = 7;  left.anchor.toRow   = 18;
+    left.geom    = QRect(20, 300, 300, 80);
+    left.preset  = ShapeGeom::Ellipse;
+    left.fill    = QColor("#59BD94");
+    left.frac    = QRectF(0.0, 0.0, 0.45, 1.0);
+    right = left;
+    right.preset = ShapeGeom::Chevron;
+    right.fill   = QColor("#F4B400");
+    right.frac   = QRectF(0.55, 0.0, 0.45, 1.0);
+    sh.shapes.push_back(left);
+    sh.shapes.push_back(right);
+
+    const QString path = dir + "/shapes.xlsx";
+    std::vector<XlsxSheet> sheets { sh }, back;
+    check(exportXlsx(path, sheets), "exportXlsx wrote the file");
+    validatePackage(path, "shapes");
+
+    if (!importXlsx(path, back) || back.empty()) { check(false, "reads back"); return; }
+    const auto& got = back[0].shapes;
+    check(got.size() == 3, QString("all three shapes came back (got %1)").arg(got.size()));
+    if (got.size() != 3) return;
+
+    // The standalone one, found by its caption rather than by position.
+    const SheetShape* cap = nullptr;
+    for (const SheetShape& s : got)
+        if (!s.text.isEmpty() && !s.text.first().runs.isEmpty()
+            && s.text.first().runs.first().text == QLatin1String("Quarterly review"))
+            cap = &s;
+    check(cap != nullptr, "the captioned shape kept its text");
+    if (cap) {
+        check(cap->preset == ShapeGeom::RoundRect, "and its rounded-rectangle preset");
+        check(cap->fill.name().compare("#1a73e8", Qt::CaseInsensitive) == 0,
+              QString("and its fill (got %1)").arg(cap->fill.name()));
+        check(cap->line.isValid(), "and its outline");
+        const ShapeRun& rr = cap->text.first().runs.first();
+        check(rr.bold && rr.family == QLatin1String("Bahnschrift"),
+              QString("and the run's weight and typeface (got %1, bold=%2)")
+                  .arg(rr.family).arg(rr.bold));
+    }
+
+    // The group: written as a grpSp, so the two members have to come back with
+    // their fractions, not stacked on top of each other.
+    const SheetShape* chev = nullptr;
+    for (const SheetShape& s : got) if (s.preset == ShapeGeom::Chevron) chev = &s;
+    check(chev != nullptr, "the grouped chevron came back");
+    if (chev) {
+        check(qAbs(chev->frac.x() - 0.55) < 0.02 && qAbs(chev->frac.width() - 0.45) < 0.02,
+              QString("and kept its place in the group (x=%1 w=%2)")
+                  .arg(chev->frac.x(), 0, 'f', 3).arg(chev->frac.width(), 0, 'f', 3));
+        check(chev->fill.name().compare("#f4b400", Qt::CaseInsensitive) == 0,
+              QString("and its own fill (got %1)").arg(chev->fill.name()));
+    }
+}
+
 // Every chart type, to catch a plot element whose schema order is wrong.
 static void testEveryType(const QString& dir) {
     out << "\n[rebuild] every chart type round-trips\n";
@@ -611,6 +819,36 @@ static void testNoChartsUnchanged(const QString& corpus, const QString& dir) {
     }
 }
 
+// The synthetic shapes above are the ones this file made up. Real workbooks
+// carry freeforms, wedge callouts, gradient banners, picture fills and groups
+// nested several deep, which is where a writer actually breaks.
+static void testCorpusShapeRebuild(const QString& corpus, const QString& dir) {
+    out << "\n[rebuild] real workbooks' shapes survive a rebuild\n";
+    QDir d(corpus);
+    const QStringList files = d.entryList({ "*.xlsx" }, QDir::Files, QDir::Name);
+    for (const QString& f : files) {
+        std::vector<XlsxSheet> sheets;
+        if (!importXlsx(d.filePath(f), sheets)) continue;
+
+        int before = 0;
+        for (const auto& sh : sheets) before += int(sh.shapes.size());
+        if (before == 0) continue;      // nothing to prove on this one
+
+        // A rebuild needs a cell reader for the charts; without it they are
+        // skipped, which is fine here since the shapes are what is under test.
+        const QString path = dir + "/shaperebuild-" + f;
+        std::vector<XlsxSheet> back;
+        if (!exportXlsx(path, sheets)) { check(false, f + ": write"); continue; }
+        validatePackage(path, "shaperebuild-" + f);
+        if (!importXlsx(path, back))   { check(false, f + ": read back"); continue; }
+
+        int after = 0;
+        for (const auto& sh : back) after += int(sh.shapes.size());
+        check(after >= before,
+              QString("%1: %2 shape(s) came back (had %3)").arg(f).arg(after).arg(before));
+    }
+}
+
 int main(int argc, char** argv) {
     // A GUI application, not a console one: exportXlsx() stamps the export mark
     // on every sheet, and rendering that artwork goes through QPainter. With a
@@ -633,9 +871,13 @@ int main(int argc, char** argv) {
     testRebuild(dir);
     testPictureRebuild(dir);
     testColoursRoundTrip(dir);
+    testPictureFillRebuild(dir);
+    testReversedCategories(dir);
+    testShapeRebuild(dir);
     testEveryType(dir);
     if (argc > 1) {
         const QString corpus = QString::fromLocal8Bit(argv[1]);
+        testCorpusShapeRebuild(corpus, dir);
         testNoChartsUnchanged(corpus, dir);
         testPreserving(corpus, dir);
     }

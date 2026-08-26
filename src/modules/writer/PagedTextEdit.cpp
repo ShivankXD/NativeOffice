@@ -1160,6 +1160,77 @@ void PagedTextEdit::contextMenuEvent(QContextMenuEvent* e) {
     menu.exec(e->globalPos());
 }
 
+void PagedTextEdit::devSelectFirstImage() {
+    for (QTextBlock b = document()->begin(); b.isValid(); b = b.next()) {
+        for (auto it = b.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fr = it.fragment();
+            if (!fr.isValid() || !fr.charFormat().isImageFormat()) continue;
+            m_imagePos = fr.position();
+            const QRect box = selectedImageRect();
+            const QTextImageFormat f = selectedImageFormat();
+            QTextCursor a(document()); a.setPosition(m_imagePos);
+            QTextCursor c2(document()); c2.setPosition(m_imagePos + 1);
+            const QRect ra = cursorRect(a), rb = cursorRect(c2);
+            qWarning("[writer] image pos=%d format=%.0fx%.0f", m_imagePos, f.width(), f.height());
+            qWarning("[writer]   caretBefore=(%d,%d %dx%d) caretAfter=(%d,%d %dx%d)",
+                     ra.x(), ra.y(), ra.width(), ra.height(),
+                     rb.x(), rb.y(), rb.width(), rb.height());
+            qWarning("[writer]   selection box=(%d,%d %dx%d)%s",
+                     box.x(), box.y(), box.width(), box.height(),
+                     (box.width() < f.width() * 0.5 || box.height() < f.height() * 0.5)
+                         ? "   <-- BOX DOES NOT MATCH THE IMAGE" : "");
+            viewport()->update();
+            return;
+        }
+    }
+    qWarning("[writer] no image in the document");
+}
+
+void PagedTextEdit::dumpPagination() const {
+    auto* lay = document()->documentLayout();
+    const QSizeF ps = document()->pageSize();
+    const double gap  = qBound(18.0, m_margin * 0.66, 46.0);
+    const double half = gap / 2.0;
+    qWarning("[writer] paged=%d pageSize=%.1fx%.1f docMargin=%.1f pageH=%.1f "
+             "margin=%.1f gap=%.1f pages=%d docHeight=%.1f",
+             int(m_paged), ps.width(), ps.height(), document()->documentMargin(),
+             m_pageH, m_margin, gap, pageCountValue(),
+             lay->documentSize().height());
+
+    // LINE positions, not block bounding rects. A block whose lines Qt pushed
+    // onto the next page still reports a bounding rect starting where it began
+    // on the previous one, so block rects say a paragraph is in the gap band
+    // when its text is nowhere near it. What gets painted is the lines.
+    int n = 0, bad = 0;
+    for (QTextBlock b = document()->begin(); b.isValid() && n < 200; b = b.next()) {
+        const QRectF br = lay->blockBoundingRect(b);
+        QTextLayout* tl = b.layout();
+        if (!tl) continue;
+        for (int i = 0; i < tl->lineCount(); ++i, ++n) {
+            const QTextLine ln = tl->lineAt(i);
+            const double top = br.top() + ln.y();
+            const double bot = top + ln.height();
+            const int page   = int(top / m_pageH);
+            const double intoPage = top - page * m_pageH;
+            // The gap band is painted OVER the text, from (pageBottom - half)
+            // to (pageBottom + half). A line overlapping that is a line the
+            // reader sees sliced in half.
+            const double bandTop = (page + 1) * m_pageH - half;
+            const double bandBot = (page + 1) * m_pageH + half;
+            const bool underBand = (bot > bandTop && top < bandBot)
+                                || (page > 0 && intoPage < half);
+            if (underBand) ++bad;
+            if (underBand || i == 0 || intoPage < m_margin + 4)
+                qWarning("[writer]   line %3d y=%8.1f h=%5.1f page=%d intoPage=%7.1f "
+                         "\"%s\"%s",
+                         n, top, ln.height(), page + 1, intoPage,
+                         qUtf8Printable(b.text().mid(ln.textStart(), 22)),
+                         underBand ? "   <-- SLICED BY THE GAP BAND" : "");
+        }
+    }
+    qWarning("[writer] %d line(s) overlap a gap band", bad);
+}
+
 void PagedTextEdit::paintEvent(QPaintEvent* e) {
     // 1) Let QTextEdit paint the paper (its background) + text + selection/cursor.
     QTextEdit::paintEvent(e);

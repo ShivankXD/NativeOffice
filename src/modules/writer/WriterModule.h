@@ -46,6 +46,29 @@ public:
     [[nodiscard]] QTextEdit*     editor()   const noexcept { return m_editor; }
     [[nodiscard]] QTextDocument* document() const noexcept;
 
+    // ── Dev-only capture aids (see the NATIVEOFFICE_WRITER_* hooks) ────────
+    // Type `paragraphs` of filler, enough to push the document onto page 2.
+    void devFill(int paragraphs);
+    // Print where the pagination actually put every block.
+    void devDumpPagination() const;
+    // Apply a paragraph style by name, the same call the ribbon makes.
+    void devApplyStyle(const QString& name);
+    // Paste an image through the same path a Ctrl+V takes.
+    void devPasteImage(const QString& file);
+    // Send real key events to whatever has focus, so "I cannot type" is tested
+    // the way the user hits it rather than through a cursor insert that would
+    // succeed regardless.
+    void devTypeText(const QString& text);
+    // Who has focus, where the caret is, and what the document ends with.
+    void devReportInput() const;
+    // Click the editor at a viewport point, the way a user does.
+    void devClickAt(int x, int y);
+    // Select the pasted image and report the box the resize chrome draws.
+    void devReportImageBox();
+    // Replay the heading-styles report: type, style, CLEAR the text, retype,
+    // and print the size each one actually came out at.
+    void devStyleProbe();
+
     // ── File state ────────────────────────────────────────────────────────
     [[nodiscard]] QString currentFilePath() const noexcept { return m_currentPath; }
     [[nodiscard]] bool    isDirty()         const noexcept { return m_dirty; }

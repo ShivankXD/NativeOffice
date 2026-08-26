@@ -44,6 +44,16 @@ public:
 
     [[nodiscard]] int  pageCountValue() const;
 
+    // Dev-only: report where every block actually landed against the page
+    // boundaries the chrome is drawn at. This is how the "text at the top of a
+    // new page is cut off" report was pinned down: the numbers say whether the
+    // layout paginated at all, and whether a block sits inside the gray gap
+    // band that gets painted over it.
+    void dumpPagination() const;
+
+    // Dev-only: select the document's first image and report the box the
+    // resize chrome draws around it, against where the image really is.
+    void devSelectFirstImage();
 
     // 1-based page number the text cursor is currently on (1 in web layout).
     [[nodiscard]] int  currentPageNumber() const;

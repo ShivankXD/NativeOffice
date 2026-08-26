@@ -1559,6 +1559,10 @@ public slots:
         openAiSidebar();
     }
 
+    // Dev-only entry point for the NATIVEOFFICE_AI_GRAB hook; the panel is
+    // otherwise only reachable by clicking the toolbar button.
+    void devOpenAiSidebar() { openAiSidebar(); }
+
     void openAiSidebar() {
         if (m_ai->isVisible()) { m_ai->focusComposer(); return; }
         // The hero belongs to a run of the app, not to a click: the first time
@@ -3205,6 +3209,89 @@ int main(int argc, char* argv[]) {
         presentEditor(createCalcWindow());
     if (qEnvironmentVariableIsSet("NATIVEOFFICE_OPEN_IMPRESS"))
         presentEditor(createImpressWindow());
+
+    // Dev-only: open the Stasis panel and grab it, so the panel's own chrome
+    // (the New chat button, the mode chip, the quota line) can be checked
+    // without a network round trip or spending a generation.
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_AI_GRAB")) {
+        const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_AI_GRAB");
+        QTimer::singleShot(2200, qApp, [grabPath] {
+            for (QWidget* wd : QApplication::allWidgets()) {
+                auto* shell = qobject_cast<MainShell*>(wd);
+                if (!shell) continue;
+                shell->devOpenAiSidebar();
+                break;
+            }
+            QTimer::singleShot(900, qApp, [grabPath] {
+                for (QWidget* wd : QApplication::allWidgets()) {
+                    if (wd->objectName() != QLatin1String("aiSidebar")) continue;
+                    const QPixmap pm = wd->grab();
+                    if (pm.save(grabPath)) qWarning("[ai] grabbed %s", qUtf8Printable(grabPath));
+                    else                   qWarning("[ai] could not write %s", qUtf8Printable(grabPath));
+                    break;
+                }
+                qApp->quit();
+            });
+        });
+    }
+
+    // Dev-only: open Writer, optionally pour text into it, report where the
+    // pagination actually put things, and grab it. Same family as the Calc
+    // hook below, and the reason it exists is the same: the dev build has a
+    // different app identity from the MSIX allowlist entry, so it is masked
+    // out of computer-use screenshots and cannot be driven by clicking.
+    //
+    //   NATIVEOFFICE_WRITER_GRAB   png to write
+    //   NATIVEOFFICE_WRITER_FILL   paragraphs of filler to type first
+    //   NATIVEOFFICE_WRITER_STYLE  exercise the heading styles (see below)
+    if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_GRAB")) {
+        const QString grabPath = qEnvironmentVariable("NATIVEOFFICE_WRITER_GRAB");
+        const int fill = qEnvironmentVariable("NATIVEOFFICE_WRITER_FILL", "0").toInt();
+        if (!openedFromCli) presentEditor(createWriterWindow());
+        QTimer::singleShot(2500, qApp, [grabPath, fill] {
+            NativeOffice::WriterModule* w = nullptr;
+            for (QWidget* wd : QApplication::allWidgets())
+                if (auto* m = qobject_cast<NativeOffice::WriterModule*>(wd)) { w = m; break; }
+            if (!w) { qWarning("[writer] no WriterModule found"); qApp->quit(); return; }
+            w->devFill(fill);
+            // Resizing after the text is in is the trigger the pagination
+            // notes warn about: QTextEdit::resizeEvent drops the page size, and
+            // a document that relayouts unpaginated while the chrome keeps
+            // drawing bands every pageH puts those bands anywhere at all.
+            if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_RESIZE")) {
+                const QStringList wh =
+                    qEnvironmentVariable("NATIVEOFFICE_WRITER_RESIZE").split(',');
+                if (auto* top = w->window())
+                    top->resize(wh.value(0).toInt(), wh.value(1).toInt());
+            }
+            // Paste an image, then try to type: the "cannot type after pasting
+            // an image" report, driven end to end.
+            if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_IMAGE"))
+                w->devPasteImage(qEnvironmentVariable("NATIVEOFFICE_WRITER_IMAGE"));
+            QTimer::singleShot(1200, qApp, [w, grabPath] {
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_IMAGE")) {
+                    // Select the image the way a click does, and report the box
+                    // the resize chrome would draw against where it really is.
+                    w->devReportImageBox();
+                    // Then click somewhere in the text and try to type, which is
+                    // the reported failure: click after the image, nothing.
+                    const QStringList xy =
+                        qEnvironmentVariable("NATIVEOFFICE_WRITER_CLICK", "300,300").split(',');
+                    w->devClickAt(xy.value(0).toInt(), xy.value(1).toInt());
+                    w->devReportInput();
+                    w->devTypeText(QStringLiteral("TYPEDAFTERIMAGE"));
+                    w->devReportInput();
+                }
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_STYLE"))
+                    w->devStyleProbe();
+                w->devDumpPagination();
+                const QPixmap pm = w->grab();
+                if (pm.save(grabPath)) qWarning("[writer] grabbed %s", qUtf8Printable(grabPath));
+                else                   qWarning("[writer] could not write %s", qUtf8Printable(grabPath));
+                qApp->quit();
+            });
+        });
+    }
 
     // Dev-only: open a workbook, print what got materialised onto the sheet and
     // grab it. This is how chart/picture import is checked without driving the
