@@ -590,14 +590,17 @@ QWidget* SettingsTray::buildPremiumPage() {
 
     v->addSpacing(6);
     v->addWidget(text(tr("Default save formats"), 13, "#8A93A6", true, page));
+    // .noff is no longer a format anyone is offered. See the filters in
+    // main.cpp for why. Documents can still be saved as HTML and sheets as CSV,
+    // but the DEFAULT is always the format the rest of the world reads.
     auto* docCombo = addCombo(tr("Documents"),
-        {{ tr("Word document (.docx)"), "docx" }, { tr("NativeOffice document (.noff)"), "noff" }},
+        {{ tr("Word document (.docx)"), "docx" }, { tr("Web page (.html)"), "html" }},
         "premium/defaultDocFormat", "docx");
     auto* sheetCombo = addCombo(tr("Spreadsheets"),
-        {{ tr("Excel workbook (.xlsx)"), "xlsx" }, { tr("NativeOffice sheet (.noff)"), "noff" }},
+        {{ tr("Excel workbook (.xlsx)"), "xlsx" }, { tr("CSV file (.csv)"), "csv" }},
         "premium/defaultSheetFormat", "xlsx");
     auto* deckCombo = addCombo(tr("Presentations"),
-        {{ tr("PowerPoint presentation (.pptx)"), "pptx" }, { tr("NativeOffice deck (.noff)"), "noff" }},
+        {{ tr("PowerPoint presentation (.pptx)"), "pptx" }},
         "premium/defaultDeckFormat", "pptx");
 
     v->addSpacing(6);

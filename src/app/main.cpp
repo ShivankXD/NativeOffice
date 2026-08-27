@@ -148,28 +148,32 @@ static void fitWindowToScreen(QWidget* w) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
-static const QString NOFF_FILTER =
-    "NativeOffice Document (*.noff);;HTML Document (*.html);;All Files (*)";
-// Writer open: accept Word, NativeOffice and HTML documents.
+// .noff is no longer offered anywhere a file is SAVED, and is still accepted
+// everywhere one is OPENED.
+//
+// It was a native format nothing else on earth could read, which is the wrong
+// default for a suite whose whole argument is that it works with the files you
+// already have. It also let the real exporters go unexercised: the
+// <headerFooter> ordering bug made every from-scratch .xlsx unopenable in Excel
+// for months precisely because the common path never went near that writer.
+// Saving in the formats people actually use means every save tests them.
+//
+// Read support stays forever. People have .noff files and must keep being able
+// to open them; nobody should be handed a new one. The format also remains the
+// crash-recovery snapshot container, where no user ever sees it and where an
+// automatic write is guaranteed not to land on a document it would rewrite.
 static const QString WRITER_OPEN_FILTER =
     "Documents (*.docx *.noff *.html);;Word Document (*.docx);;"
     "NativeOffice Document (*.noff);;HTML Document (*.html);;All Files (*)";
-// Writer Save As: Word (.docx) is offered first so it is the default format.
 static const QString WRITER_SAVE_FILTER =
-    "Word Document (*.docx);;NativeOffice Document (*.noff);;HTML Document (*.html)";
-// Open: accept Excel, NativeOffice and CSV spreadsheets.
+    "Word Document (*.docx);;HTML Document (*.html)";
 static const QString CALC_FILTER =
     "Spreadsheets (*.xlsx *.noff *.csv);;Excel Workbook (*.xlsx);;"
     "NativeOffice Spreadsheet (*.noff);;CSV File (*.csv);;All Files (*)";
-// Save As: Excel (.xlsx) is offered first so it is the default format.
 static const QString CALC_SAVE_FILTER =
-    "Excel Workbook (*.xlsx);;NativeOffice Spreadsheet (*.noff);;CSV File (*.csv)";
-static const QString IMPRESS_FILTER =
-    "NativeOffice Presentation (*.noff);;All Files (*)";
-// Save As: PowerPoint (.pptx) is offered first so it is the default format.
+    "Excel Workbook (*.xlsx);;CSV File (*.csv)";
 static const QString IMPRESS_SAVE_FILTER =
-    "PowerPoint Presentation (*.pptx);;NativeOffice Presentation (*.noff);;All Files (*)";
-// Open: accept PowerPoint and NativeOffice presentations.
+    "PowerPoint Presentation (*.pptx);;All Files (*)";
 static const QString IMPRESS_OPEN_FILTER =
     "Presentations (*.pptx *.noff);;PowerPoint Presentation (*.pptx);;"
     "NativeOffice Presentation (*.noff);;All Files (*)";
@@ -434,8 +438,7 @@ public:
         // Append an extension matching the chosen filter if the user omitted one.
         // With no filter hint, fall back to the premium default format.
         if (QFileInfo(path).suffix().isEmpty()) {
-            if      (selectedFilter.contains("noff")) path += ".noff";
-            else if (selectedFilter.contains("html")) path += ".html";
+            if      (selectedFilter.contains("html")) path += ".html";
             else if (selectedFilter.contains("docx")) path += ".docx";
             else path += "." + NativeOffice::ExportPrefs::defaultDocFormat();
         }
@@ -554,7 +557,7 @@ public:
         // Append the extension matching the chosen filter if the user omitted one.
         // With no filter hint, fall back to the premium default format.
         if (QFileInfo(path).suffix().isEmpty()) {
-            if      (selectedFilter.contains("noff")) path += ".noff";
+            if      (selectedFilter.contains("csv"))  path += ".csv";
             else if (selectedFilter.contains("csv"))  path += ".csv";
             else if (selectedFilter.contains("xlsx")) path += ".xlsx";
             else path += "." + NativeOffice::ExportPrefs::defaultSheetFormat();
@@ -651,28 +654,25 @@ private:
 
         QMessageBox box(this);
         box.setIcon(QMessageBox::Warning);
-        box.setWindowTitle(QStringLiteral("Charts and pictures will not be saved"));
-        box.setText(QString("This workbook contains %1 chart%2 or picture%2 that "
-                            "NativeOffice cannot yet write back into an .xlsx file.")
+        box.setWindowTitle(QStringLiteral("Some objects will not be saved"));
+        box.setText(QString("This workbook contains %1 object%2 that NativeOffice "
+                            "cannot yet write into an .xlsx file.")
                         .arg(objects).arg(objects == 1 ? "" : "s"));
+        // There is no longer a lossless alternative to offer. .noff is not a
+        // format anyone is given any more, and the two things that used to make
+        // this warning common are fixed: drawn shapes are written on both save
+        // paths, and an imported chart's own part is put back byte for byte
+        // rather than regenerated. What is left is a chart with nothing
+        // plottable in it, which is rare and genuinely cannot be written.
         box.setInformativeText(
-            "Saving as .xlsx keeps the cells and loses those objects.\n"
-            "Saving as .noff keeps everything.");
-        QPushButton* keep = box.addButton(QStringLiteral("Save as .noff instead"),
-                                          QMessageBox::AcceptRole);
-        QPushButton* anyway = box.addButton(QStringLiteral("Save as .xlsx anyway"),
+            "Saving keeps the cells and loses those objects.");
+        QPushButton* anyway = box.addButton(QStringLiteral("Save anyway"),
                                             QMessageBox::DestructiveRole);
         box.addButton(QMessageBox::Cancel);
-        box.setDefaultButton(keep);
+        box.setDefaultButton(anyway);
         box.exec();
 
         if (box.clickedButton() == anyway) { m_lossySaveAccepted = true; return true; }
-        if (box.clickedButton() == keep) {
-            QString alt = path;
-            alt.chop(5);                       // ".xlsx"
-            alt += QStringLiteral(".noff");
-            return performSave(alt);           // writes the lossless copy instead
-        }
         return false;                          // cancelled
     }
 
@@ -778,11 +778,13 @@ protected:
 
 private:
     bool performSave(const QString& path) {
-        // Route by extension: a .pptx path is exported as a PowerPoint package;
-        // anything else is saved as the native .noff document.
-        const bool ok = path.endsWith(".pptx", Qt::CaseInsensitive)
-                            ? m_impress->exportPptxTo(path)
-                            : m_impress->saveToPath(path);
+        // A deck is saved as a PowerPoint package. The only other destination
+        // is an existing .noff the user opened, which is still written back in
+        // its own format so opening one and pressing Save does not silently
+        // change the file underneath them.
+        const bool ok = path.endsWith(QStringLiteral(".noff"), Qt::CaseInsensitive)
+                            ? m_impress->saveToPath(path)
+                            : m_impress->exportPptxTo(path);
         if (!ok) {
             QMessageBox::critical(this, "Save Failed",
                 "Could not write to:\n" + path);
@@ -3296,11 +3298,21 @@ int main(int argc, char* argv[]) {
                 }
                 if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_STYLE"))
                     w->devStyleProbe();
+                // Prove what a default save actually produces, which is the
+                // whole point of retiring .noff.
+                if (qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_SAVEAS")) {
+                    const QString to = qEnvironmentVariable("NATIVEOFFICE_WRITER_SAVEAS");
+                    qWarning("[writer] saveToPath(%s) -> %d", qUtf8Printable(to),
+                             int(w->saveToPath(to)));
+                }
                 w->devDumpPagination();
                 const QPixmap pm = w->grab();
                 if (pm.save(grabPath)) qWarning("[writer] grabbed %s", qUtf8Printable(grabPath));
                 else                   qWarning("[writer] could not write %s", qUtf8Printable(grabPath));
-                qApp->quit();
+                // NATIVEOFFICE_WRITER_LINGER holds the window open afterwards,
+                // which is what lets a snapshot timer actually tick before the
+                // process goes away. Same idea as the Calc hook's dirty linger.
+                if (!qEnvironmentVariableIsSet("NATIVEOFFICE_WRITER_LINGER")) qApp->quit();
             });
         });
     }
