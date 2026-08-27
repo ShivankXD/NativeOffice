@@ -1832,7 +1832,21 @@ bool exportXlsx(const QString& path, const std::vector<XlsxSheet>& sheets) {
         for (const ChartSpec& cs : sh.charts) {
             // One per chart: the ids inside are numbered within a single part.
             ChartMedia cm;
-            const QByteArray part = buildChartPartXml(cs, sh.name, sh.cellText, &cm);
+            QByteArray part;
+
+            // A chart that came out of a file is written back as the part it
+            // came from. Regenerating it from ChartSpec would keep only what
+            // the importer models and quietly drop the rest, which is what a
+            // from-scratch export used to do to every imported chart.
+            if (cs.fromFile && !cs.sourceXml.isEmpty()) {
+                part = cs.sourceXml;
+                for (const auto& m : cs.sourceMedia) {
+                    cm.data   << m.second;
+                    cm.relIds << m.first;      // the id the original XML uses
+                }
+            } else {
+                part = buildChartPartXml(cs, sh.name, sh.cellText, &cm);
+            }
             if (part.isEmpty()) continue;   // nothing plottable, skip it
             ++chartNo;
             const QString relId = QString("rIdCh%1").arg(chartNo);

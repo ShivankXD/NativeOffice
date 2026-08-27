@@ -655,6 +655,63 @@ static void testShapeRebuild(const QString& dir) {
     }
 }
 
+// An imported chart keeps its ORIGINAL part through a from-scratch export.
+//
+// The rebuild path regenerates a chart from ChartSpec, and ChartSpec holds only
+// what the importer models. Everything else the original carried was dropped
+// the moment a workbook was exported rather than saved back over its own
+// package. This reads a real corpus chart, exports it through the rebuild path,
+// and checks the bytes came back rather than an approximation of them.
+static void testImportedChartSurvivesRebuild(const QString& corpusDir, const QString& dir) {
+    out << "\n[rebuild] an imported chart keeps the part it came from\n";
+
+    const QString srcFile = corpusDir + "/media_heavy.xlsx";
+    if (!QFileInfo::exists(srcFile)) {
+        out << "  (skipped, no media_heavy.xlsx)\n";
+        return;
+    }
+
+    std::vector<XlsxSheet> in;
+    if (!importXlsx(srcFile, in) || in.empty()) { check(false, "the corpus file reads"); return; }
+
+    const ChartSpec* imported = nullptr;
+    for (const XlsxSheet& sh : in)
+        for (const ChartSpec& c : sh.charts)
+            if (c.fromFile && !c.sourceXml.isEmpty()) { imported = &c; break; }
+
+    check(imported != nullptr, "an imported chart carries its source part");
+    if (!imported) return;
+    const QByteArray originalXml = imported->sourceXml;
+    check(originalXml.contains("<c:chartSpace") || originalXml.contains("chartSpace"),
+          QString("and it looks like a chart part (%1 bytes)").arg(originalXml.size()));
+
+    // Export through the REBUILD path, which is what a from-scratch save takes.
+    for (XlsxSheet& sh : in) sh.cellText = tableReader();
+    const QString path = dir + "/imported-rebuild.xlsx";
+    check(exportXlsx(path, in), "exportXlsx wrote the file");
+    validatePackage(path, "imported-rebuild");
+
+    // The written package must contain that part verbatim.
+    QZipReader zr(path);
+    bool found = false;
+    int charts = 0;
+    for (const auto& e : zr.fileInfoList()) {
+        if (!e.filePath.startsWith("xl/charts/chart") || !e.filePath.endsWith(".xml")) continue;
+        ++charts;
+        if (zr.fileData(e.filePath) == originalXml) found = true;
+    }
+    check(charts > 0, QString("the rebuilt package has chart parts (%1)").arg(charts));
+    check(found, "and one of them is the original, byte for byte");
+
+    // And it still reads back as a chart, so preserving it did not produce a
+    // package our own importer can no longer make sense of.
+    std::vector<XlsxSheet> back;
+    check(importXlsx(path, back), "the rebuilt file reads back");
+    int backCharts = 0;
+    for (const XlsxSheet& sh : back) backCharts += int(sh.charts.size());
+    check(backCharts > 0, QString("with its charts intact (%1)").arg(backCharts));
+}
+
 // Every chart type, to catch a plot element whose schema order is wrong.
 static void testEveryType(const QString& dir) {
     out << "\n[rebuild] every chart type round-trips\n";
@@ -878,6 +935,7 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         const QString corpus = QString::fromLocal8Bit(argv[1]);
         testCorpusShapeRebuild(corpus, dir);
+        testImportedChartSurvivesRebuild(corpus, dir);
         testNoChartsUnchanged(corpus, dir);
         testPreserving(corpus, dir);
     }

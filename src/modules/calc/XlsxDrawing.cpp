@@ -1220,6 +1220,15 @@ void parseGraphicFrame(QXmlStreamReader& r, const Mapper& m, DrawCtx& ctx) {
     spec.geom   = ctx.objectGeom();
     spec.frac   = haveXfrm ? m.map(x, y, cx, cy) : m.box;
     spec.fromFile = true;
+
+    // Keep the part itself, not just what was understood of it, so a rebuild
+    // can put the original back rather than an approximation. See ChartSpec.
+    spec.sourceXml = bytes;
+    for (auto it = chartRels.constBegin(); it != chartRels.constEnd(); ++it) {
+        const QByteArray media = ctx.fetch(it.value());
+        if (!media.isEmpty()) spec.sourceMedia.push_back({ it.key(), media });
+    }
+
     ctx.charts.push_back(spec);
 }
 

@@ -127,11 +127,25 @@ struct ChartSpec {
     // right. Reversing everything would only have moved the bug.
     bool catReversed { false };
 
-    // True when this chart was read out of an .xlsx. It decides whether a
-    // save can keep it: the exporter cannot write a chart part, so the only
-    // chart that survives is one whose part is already in the package being
-    // put back. A chart built in the app has no part to put back.
+    // True when this chart was read out of an .xlsx.
     bool    fromFile { false };
+
+    // The chart part exactly as it was read, and the images it referenced.
+    //
+    // A rebuild regenerates the part from the fields above, and those fields
+    // are only what the importer models. Everything else the original carried
+    // (3-D rotation, trendlines, error bars, axis titles, per-point layout, the
+    // dozens of formatting elements nothing here reads) was silently dropped
+    // the moment a workbook was exported from scratch rather than saved back
+    // over its own package.
+    //
+    // Keeping the bytes means the rebuild path can put the ORIGINAL part back
+    // instead of its own approximation of it, so an imported chart survives a
+    // from-scratch export as the chart it actually was. `sourceMedia` is keyed
+    // by the relationship id the part uses internally, so the rels file can be
+    // rebuilt around freshly named media parts without touching the XML.
+    QByteArray sourceXml;
+    QVector<QPair<QString, QByteArray>> sourceMedia;
 
     [[nodiscard]] bool isExplicit() const { return !series.isEmpty(); }
 };

@@ -3084,13 +3084,16 @@ int CalcModule::objectsLostOnXlsxSave() const {
     buildXlsxSheets(out);
     const bool preserved = canPreserveXlsx(out, m_originalXlsx);
 
+    // Shapes used to be counted here because the writer could not produce them.
+    // It can since 1.8.0, on both save paths, so counting them was reporting a
+    // loss that no longer happens and pushing people towards a format they did
+    // not need. An imported chart is not counted either: its original part is
+    // written back byte for byte rather than regenerated.
+    Q_UNUSED(preserved);
     int lost = 0;
     for (const XlsxSheet& xs : out)
         for (const ChartSpec& c : xs.charts)
             if (!chartIsWritable(c, xs.cellText)) ++lost;
-    if (!preserved)
-        for (SpreadsheetModel* m : m_sheets)
-            if (m) lost += int(m->shapes().size());
     return lost;
 }
 
