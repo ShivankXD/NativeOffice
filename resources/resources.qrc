@@ -51,14 +51,10 @@
             scratchpad/make_cards.py: subject high in the frame, lower third
             left clear for the name the card draws over it. -->
        <file alias="splash-card.jpg">splash-card.jpg</file>
-       <file alias="card-document.jpg">card-document.jpg</file>
        <file alias="card-document-icon.png">card-document-icon.png</file>
        <file alias="card-spreadsheet-icon.png">card-spreadsheet-icon.png</file>
        <file alias="card-presentation-icon.png">card-presentation-icon.png</file>
        <file alias="card-pdf-icon.png">card-pdf-icon.png</file>
-       <file alias="card-spreadsheet.jpg">card-spreadsheet.jpg</file>
-       <file alias="card-presentation.jpg">card-presentation.jpg</file>
-       <file alias="card-pdf.jpg">card-pdf.jpg</file>
        <!-- Second round of supplied art: the neon Create New pill with its
             black field keyed out, the assistant card, the four finished
             template cards, and cut-outs of the format renders for file lists.
